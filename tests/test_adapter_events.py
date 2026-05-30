@@ -3,7 +3,7 @@ from typing import Any
 
 from common.config import Settings
 from common.models import AgentExecutionContextPayload
-from common.kubernetes_runtime import KubernetesAdapterService
+from common.kubernetes_runtime import KubernetesAdapterService, KubernetesRuntime
 
 
 def _make_context() -> AgentExecutionContextPayload:
@@ -87,11 +87,11 @@ def test_close_falls_back_when_git_worktree_remove_fails(monkeypatch, tmp_path):
             return "Deleted branch task-1 (was abc123)."
         raise AssertionError(f"Unexpected git command: {args}")
 
-    monkeypatch.setattr("common.kubernetes_runtime.OpenCodeManifestParser", FakeManifestParser)
+    monkeypatch.setattr("common.kubernetes.runtime.OpenCodeManifestParser", FakeManifestParser)
     monkeypatch.setattr(KubernetesAdapterService, "_repository_root", lambda self: repository_root)
     monkeypatch.setattr(KubernetesAdapterService, "_resolved_worktree_path", lambda self: worktree_path)
     monkeypatch.setattr(
-        KubernetesAdapterService,
+        KubernetesRuntime,
         "_resolve_manifest_source",
         lambda self: tmp_path / "opencode.yaml",
     )

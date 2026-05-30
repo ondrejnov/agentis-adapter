@@ -29,6 +29,7 @@ from uuid import uuid4
 
 from common.config import Settings
 from common.models import AgentExecutionContextPayload, completion_task_status
+from common.git_adapter import GitAdapterService
 from common.kubernetes_runtime import KubernetesAdapterService
 from common.artifacts.expected import collect_expected_artifacts
 from common.artifacts.screenshots import collect_screenshot_images
@@ -45,7 +46,7 @@ if TYPE_CHECKING:
     from common.cli_session import KubectlExecTarget
 
 
-_AGENT_SESSION_START_TIMEOUT_SEC = 15.0
+_AGENT_SESSION_START_TIMEOUT_SEC = 300.0
 _ALLOWED_ADAPTER_EVENT_STATUSES = {"started", "success", "failed"}
 
 
@@ -457,7 +458,7 @@ class BaseSessionManager:
 
     @staticmethod
     def _completion_actions(context: AgentExecutionContextPayload | None = None) -> list[dict[str, Any]]:
-        if context is not None and KubernetesAdapterService.is_project_scope(context):
+        if context is not None and GitAdapterService.is_project_scope(context):
             return []
         return [
             {
@@ -491,14 +492,14 @@ class BaseSessionManager:
                 "working_dir": str(worktree_path),
             }
 
-        if not KubernetesAdapterService._git_succeeds(worktree_path, "rev-parse", "--is-inside-work-tree"):
+        if not GitAdapterService._git_succeeds(worktree_path, "rev-parse", "--is-inside-work-tree"):
             return {
                 "status": "skipped",
                 "reason": "not_a_git_worktree",
                 "working_dir": str(worktree_path),
             }
 
-        if not KubernetesAdapterService._run_git(worktree_path, "status", "--porcelain"):
+        if not GitAdapterService._run_git(worktree_path, "status", "--porcelain"):
             return {
                 "status": "skipped",
                 "reason": "clean_worktree",
@@ -506,8 +507,8 @@ class BaseSessionManager:
             }
 
         commit_message = f"TASK: #{context.task_number} - {context.title}"
-        KubernetesAdapterService._run_git(worktree_path, "add", "--all")
-        KubernetesAdapterService._run_git(
+        GitAdapterService._run_git(worktree_path, "add", "--all")
+        GitAdapterService._run_git(
             worktree_path,
             "-c",
             "user.name=Agentis",
@@ -517,7 +518,7 @@ class BaseSessionManager:
             "-m",
             commit_message,
         )
-        commit_sha = KubernetesAdapterService._run_git(worktree_path, "rev-parse", "HEAD")
+        commit_sha = GitAdapterService._run_git(worktree_path, "rev-parse", "HEAD")
         return {
             "status": "success",
             "working_dir": str(worktree_path),
@@ -530,13 +531,13 @@ class BaseSessionManager:
         context: AgentExecutionContextPayload,
         worktree_path: Path,
     ) -> GithubPrResult | None:
-        if KubernetesAdapterService.is_project_scope(context):
+        if GitAdapterService.is_project_scope(context):
             return None
         if not context.project_github_repo:
             return None
 
         try:
-            branch = KubernetesAdapterService._branch_name_for_context(context)
+            branch = GitAdapterService._branch_name_for_context(context)
             service = GithubPrService(context=context, worktree_path=worktree_path, branch=branch)
             return service.ensure_pull_request_result()
         except GithubPrError as exc:
@@ -593,7 +594,7 @@ class BaseSessionManager:
 
     def _finish_session_actions(self, sess: _AgentSession, session_ref: str) -> list[dict[str, Any]]:
         context = sess.context
-        if KubernetesAdapterService.is_project_scope(context) or not context.project_github_repo:
+        if GitAdapterService.is_project_scope(context) or not context.project_github_repo:
             return []
 
         attachments: list[dict[str, Any]] = []

@@ -14,7 +14,7 @@ from common.models import (
     AdapterOptionsPayload,
     TaskStatus,
 )
-from common.kubernetes_runtime import KubernetesAdapterService, LocalOpenCodeRuntime
+from common.kubernetes_runtime import KubernetesAdapterService, KubernetesRuntime, LocalOpenCodeRuntime
 from common.artifacts.expected import collect_expected_artifacts
 from common.kubernetes.manifest_parser import OpenCodeManifestParser
 from common.rpc.jsonrpc import AgentJsonRpcService
@@ -1211,7 +1211,7 @@ def test_deploy_prefers_public_base_url(monkeypatch):
             captured["source_path"] = source_path
             return "applied"
 
-    monkeypatch.setattr("common.kubernetes_runtime.OpenCodeManifestParser", FakeParser)
+    monkeypatch.setattr("common.kubernetes.runtime.OpenCodeManifestParser", FakeParser)
 
     service = KubernetesAdapterService(
         AgentExecutionContextPayload(
@@ -1256,7 +1256,7 @@ def test_deploy_uses_settings_manifest_directory_for_named_manifest(monkeypatch)
             captured["source_path"] = source_path
             return "applied"
 
-    monkeypatch.setattr("common.kubernetes_runtime.OpenCodeManifestParser", FakeParser)
+    monkeypatch.setattr("common.kubernetes.runtime.OpenCodeManifestParser", FakeParser)
 
     service = KubernetesAdapterService(
         AgentExecutionContextPayload(
@@ -1285,7 +1285,7 @@ def test_init_agentis_copies_opencode_template_when_config_missing(monkeypatch, 
     template = tmp_path / "opencode.json.tpl"
     template.write_text('{"permission":"allow"}\n', encoding="utf-8")
     monkeypatch.setattr(KubernetesAdapterService, "_workspace_path", lambda self: workspace)
-    monkeypatch.setattr(KubernetesAdapterService, "AGENTIS_CONFIG_TEMPLATE", template)
+    monkeypatch.setattr(KubernetesRuntime, "AGENTIS_CONFIG_TEMPLATE", template)
 
     service = KubernetesAdapterService(
         AgentExecutionContextPayload(
@@ -1313,7 +1313,7 @@ def test_init_agentis_keeps_existing_opencode_config(monkeypatch, tmp_path):
     template = tmp_path / "opencode.json.tpl"
     template.write_text('{"permission":"allow"}\n', encoding="utf-8")
     monkeypatch.setattr(KubernetesAdapterService, "_workspace_path", lambda self: workspace)
-    monkeypatch.setattr(KubernetesAdapterService, "AGENTIS_CONFIG_TEMPLATE", template)
+    monkeypatch.setattr(KubernetesRuntime, "AGENTIS_CONFIG_TEMPLATE", template)
 
     service = KubernetesAdapterService(
         AgentExecutionContextPayload(
@@ -1349,7 +1349,7 @@ def test_deploy_uses_project_deploy_config_manifest(monkeypatch, tmp_path):
             captured["source_path"] = source_path
             return "applied"
 
-    monkeypatch.setattr("common.kubernetes_runtime.OpenCodeManifestParser", FakeParser)
+    monkeypatch.setattr("common.kubernetes.runtime.OpenCodeManifestParser", FakeParser)
     monkeypatch.setattr(KubernetesAdapterService, "_workspace_path", lambda self: workspace)
 
     service = KubernetesAdapterService(
@@ -1397,9 +1397,9 @@ def test_deploy_config_selects_manifest_by_scope(monkeypatch, tmp_path):
             captured["source_path"] = source_path
             return "applied"
 
-    monkeypatch.setattr("common.kubernetes_runtime.OpenCodeManifestParser", FakeParser)
+    monkeypatch.setattr("common.kubernetes.runtime.OpenCodeManifestParser", FakeParser)
     monkeypatch.setattr(KubernetesAdapterService, "_repository_root", lambda self: workspace)
-    monkeypatch.setattr(KubernetesAdapterService, "_project_environment_exists", lambda self, namespace: False)
+    monkeypatch.setattr(KubernetesRuntime, "_project_environment_exists", lambda self, namespace: False)
 
     service = KubernetesAdapterService(
         AgentExecutionContextPayload(
@@ -1444,7 +1444,7 @@ def test_worktree_deploy_config_falls_back_to_source_repo(monkeypatch, tmp_path)
             captured["source_path"] = source_path
             return "applied"
 
-    monkeypatch.setattr("common.kubernetes_runtime.OpenCodeManifestParser", FakeParser)
+    monkeypatch.setattr("common.kubernetes.runtime.OpenCodeManifestParser", FakeParser)
     monkeypatch.setattr(KubernetesAdapterService, "_workspace_path", lambda self: worktree)
 
     service = KubernetesAdapterService(
@@ -1478,7 +1478,7 @@ def test_local_runtime_without_local_deploy_manifest_starts_local_opencode(monke
         "    manifest: .agentis/opencode-project.yaml\n",
         encoding="utf-8",
     )
-    KubernetesAdapterService._local_runtimes.clear()
+    KubernetesRuntime._local_runtimes.clear()
 
     class FakeStdout:
         def __init__(self) -> None:
@@ -1511,7 +1511,7 @@ def test_local_runtime_without_local_deploy_manifest_starts_local_opencode(monke
         captured["env"] = env
         return FakeProcess()
 
-    monkeypatch.setattr("common.kubernetes_runtime.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("common.kubernetes.runtime.subprocess.Popen", fake_popen)
     monkeypatch.setattr(KubernetesAdapterService, "_workspace_path", lambda self: workspace)
 
     class FakeResponse:
@@ -1524,7 +1524,7 @@ def test_local_runtime_without_local_deploy_manifest_starts_local_opencode(monke
         def getcode(self) -> int:
             return 200
 
-    monkeypatch.setattr("common.kubernetes_runtime.urllib.request.urlopen", lambda url, timeout: FakeResponse())
+    monkeypatch.setattr("common.kubernetes.runtime.urllib.request.urlopen", lambda url, timeout: FakeResponse())
 
     service = KubernetesAdapterService(
         AgentExecutionContextPayload(
@@ -1580,7 +1580,7 @@ def test_local_runtime_close_stops_process_without_kubectl_delete(monkeypatch, t
     monkeypatch.setattr(KubernetesAdapterService, "_resolved_worktree_path", lambda self: worktree_path)
     monkeypatch.setattr(KubernetesAdapterService, "_cleanup_worktree_branch", lambda self, *args: (True, True))
     monkeypatch.setattr(
-        "common.kubernetes_runtime.OpenCodeManifestParser.delete",
+        "common.kubernetes.runtime.OpenCodeManifestParser.delete",
         lambda self, *args, **kwargs: calls.append("kubectl_delete"),
     )
 
@@ -1592,7 +1592,7 @@ def test_local_runtime_close_stops_process_without_kubectl_delete(monkeypatch, t
         working_dir=str(repository_root),
         adapter=AdapterOptionsPayload(runtime="local"),
     )
-    KubernetesAdapterService._local_runtimes[KubernetesAdapterService._runtime_key(context)] = LocalOpenCodeRuntime(
+    KubernetesRuntime._local_runtimes[KubernetesRuntime._runtime_key(context)] = LocalOpenCodeRuntime(
         process=cast(Any, FakeProcess()),
         url="http://127.0.0.1:54321",
         workspace_path=str(worktree_path),
@@ -1653,10 +1653,10 @@ def test_project_scope_uses_current_branch_workspace_and_project_manifest(monkey
             return "feature/current"
         raise AssertionError(f"Unexpected git command: cwd={cwd}, args={args}")
 
-    monkeypatch.setattr("common.kubernetes_runtime.OpenCodeManifestParser", FakeParser)
+    monkeypatch.setattr("common.kubernetes.runtime.OpenCodeManifestParser", FakeParser)
     monkeypatch.setattr(KubernetesAdapterService, "_repository_root", lambda self: repository_root)
     monkeypatch.setattr(KubernetesAdapterService, "_run_git", staticmethod(fake_run_git))
-    monkeypatch.setattr(KubernetesAdapterService, "_project_environment_exists", lambda self, namespace: False)
+    monkeypatch.setattr(KubernetesRuntime, "_project_environment_exists", lambda self, namespace: False)
 
     service = KubernetesAdapterService(
         AgentExecutionContextPayload(
@@ -1707,9 +1707,9 @@ def test_project_scope_deploy_reuses_existing_environment(monkeypatch):
         def apply(self, source_path: str) -> str:
             raise AssertionError(f"Unexpected manifest apply: {source_path}")
 
-    monkeypatch.setattr("common.kubernetes_runtime.OpenCodeManifestParser", FakeParser)
+    monkeypatch.setattr("common.kubernetes.runtime.OpenCodeManifestParser", FakeParser)
     monkeypatch.setattr(KubernetesAdapterService, "_repository_root", lambda self: Path("/var/www/repo"))
-    monkeypatch.setattr(KubernetesAdapterService, "_project_environment_exists", lambda self, namespace: True)
+    monkeypatch.setattr(KubernetesRuntime, "_project_environment_exists", lambda self, namespace: True)
 
     service = KubernetesAdapterService(
         AgentExecutionContextPayload(
@@ -1917,9 +1917,9 @@ def test_git_merge_aborts_failed_rebase_when_conflict_resolver_fails(monkeypatch
         def failed(self, kind: str, *, message: str | None = None, event_id: str | None = None) -> None:
             event_calls.append({"kind": kind, "status": "failed", "event_id": event_id, "message": message})
 
-    monkeypatch.setattr("common.adapter_base.AgentisRunLogger", FakeRunLogger)
+    monkeypatch.setattr("common.git_adapter.AgentisRunLogger", FakeRunLogger)
     monkeypatch.setattr(
-        "common.adapter_base.subprocess.run",
+        "common.git_adapter.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="resolver failed"),
     )
 
@@ -2031,9 +2031,9 @@ def test_git_merge_continues_after_ai_conflict_resolution(monkeypatch):
         def success(self, kind: str, *, message: str | None = None, event_id: str | None = None) -> None:
             event_calls.append({"kind": kind, "status": "success", "event_id": event_id, "message": message})
 
-    monkeypatch.setattr("common.adapter_base.AgentisRunLogger", FakeRunLogger)
+    monkeypatch.setattr("common.git_adapter.AgentisRunLogger", FakeRunLogger)
     monkeypatch.setattr(
-        "common.adapter_base.subprocess.run",
+        "common.git_adapter.subprocess.run",
         lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="resolved", stderr=""),
     )
 
@@ -2284,7 +2284,7 @@ def test_start_session_persists_session_id_in_agentis(monkeypatch):
             return {"ok": True}
 
     monkeypatch.setattr("common.kubernetes_runtime.OpenCodeRestClient", FakeClient)
-    monkeypatch.setattr("common.kubernetes_runtime.AgentisJsonRpcClient", FakeAgentisClient)
+    monkeypatch.setattr("common.adapter_base.AgentisJsonRpcClient", FakeAgentisClient)
     monkeypatch.setattr(
         "common.kubernetes_runtime.snapshot_sources_best_effort",
         lambda worktree, snapshot_key, label: events.append(("snapshot", snapshot_key)),
@@ -2353,7 +2353,7 @@ def test_start_session_can_fork_existing_opencode_session(monkeypatch):
 
     monkeypatch.setattr("common.kubernetes_runtime.OpenCodeRestClient", FakeClient)
     monkeypatch.setattr("common.kubernetes_runtime.snapshot_sources_best_effort", lambda *args, **kwargs: None)
-    monkeypatch.setattr("common.kubernetes_runtime.AgentisJsonRpcClient", None)
+    monkeypatch.setattr("common.adapter_base.AgentisJsonRpcClient", None)
 
     service = KubernetesAdapterService(
         AgentExecutionContextPayload(

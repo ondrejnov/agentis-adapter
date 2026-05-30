@@ -121,17 +121,40 @@ Kazdy krok obaluje `_run_adapter_step`, ktery posila `run.adapter_event` se stav
 
 ## Adapter service vrstva
 
-Zaklad je `common/adapter_base.py::BaseAdapterService`.
+Adaptery jsou trivrstva dedicnost; Kubernetes deploy mechanika je samostatny
+helper mimo strom:
 
-Spolecne zodpovednosti:
+```
+BaseAdapterService            common/adapter_base.py   (minimalni)
+└── GitAdapterService         common/git_adapter.py    (git/worktree)
+    ├── CliAdapterService     common/cli_adapter.py
+    │   ├── OpenCodeAdapterService
+    │   └── ClaudeCodeAdapterService
+    └── KubernetesAdapterService  common/kubernetes_runtime.py
+```
+
+`KubernetesRuntime` (`common/kubernetes/runtime.py`) NENI adapter — je to
+collaborator s Kubernetes deploy mechanikou, ktery si `CliAdapterService`
+(v `kubernetes` modu) i `KubernetesAdapterService` composnou. Zadny adapter si
+deploy nepujcuje od jineho adapteru.
+
+`BaseAdapterService` je zamerne minimalni — prijme kontext, mluvi s Agentisem
+(`AgentisJsonRpcClient`, emitovani adapter eventu, persist session_id) a deklaruje
+lifecycle, ktery konkretni adaptery implementuji. O gitu ani Kubernetes nevi.
+
+`GitAdapterService` resi vsechno git:
 
 - odvozeni nazvu branche z `task_id` nebo `context.adapter.branch`,
-- odvozeni Kubernetes namespace,
-- vytvoreni nebo znovupouziti git worktree,
-- volani Agentisu pres `AgentisJsonRpcClient`,
-- emitovani adapter eventu,
+- vytvoreni nebo znovupouziti git worktree (`create_worktree`),
 - `git_merge`,
 - `close` a cleanup worktree/branche.
+
+`KubernetesRuntime` resi vsechno Kubernetes:
+
+- odvozeni namespace a ingress/URL,
+- resolveni a `apply`/`delete` manifestu,
+- volitelny lokalni `opencode web` runtime,
+- `deploy`, `wait_ready`, `teardown`.
 
 Adapter service musi implementovat tyto metody:
 
@@ -147,7 +170,7 @@ CLI adaptery pouzivaji spolecnou implementaci `common/cli_adapter.py::CliAdapter
 `CliAdapterService` dela:
 
 - lokalni mod bez Kubernetes deploye,
-- volitelny Kubernetes mod, kde se deleguje na `KubernetesAdapterService`,
+- volitelny Kubernetes mod, kde se deleguje na `KubernetesRuntime`,
 - sestaveni prvniho promptu z `user_prompt`, `description`, `comments` nebo `title`,
 - start a resume session pres `BaseSessionManager`,
 - abort a close.
@@ -219,7 +242,7 @@ Mapper musi z eventu postupne vytvaret seznam zprav ve formatu, ktery Agentis uk
 | Scope | Chovani |
 | --- | --- |
 | `task` | Default. Adapter vytvori worktree mimo hlavni repo a task branch `task-<task_id>`. |
-| `worktree` | V modelu povoleno, chova se prakticky jako task scope v aktualnim `BaseAdapterService`. |
+| `worktree` | V modelu povoleno, chova se prakticky jako task scope v `GitAdapterService`. |
 | `project` | Nepousti se task worktree. Bezi primo v aktualnim projektovem repozitari a `git_merge`/`close` cleanup se preskakuje. |
 
 Task scope:
@@ -237,7 +260,9 @@ Project scope:
 
 ## Kubernetes runtime
 
-`common/kubernetes_runtime.py::KubernetesAdapterService` je starsi/runtime vrstva pro OpenCode web runtime a pro Kubernetes fallback CLI adapteru.
+`common/kubernetes/runtime.py::KubernetesRuntime` je helper s Kubernetes deploy
+mechanikou. Composnou si ho `common/kubernetes_runtime.py::KubernetesAdapterService`
+(adapter pro OpenCode web runtime) i `CliAdapterService` v Kubernetes modu.
 
 Zodpovednosti:
 
@@ -248,7 +273,7 @@ Zodpovednosti:
 - umi lokalni `opencode web` fallback pro `adapter.runtime = "local"`, pokud neexistuje local deploy config,
 - vytvari `opencode.json` z template, pokud `requires_agentis_init = True`.
 
-CLI adaptery v defaultnim lokalnim modu Kubernetes nepouziji. Pri `context.adapter.runtime = "kubernetes"` deleguji `deploy`, `wait_ready` a `close` na `KubernetesAdapterService` a samotne CLI spousti pres `kubectl exec` v podu.
+CLI adaptery v defaultnim lokalnim modu Kubernetes nepouziji. Pri `context.adapter.runtime = "kubernetes"` deleguji `deploy`, `wait_ready` a teardown na `KubernetesRuntime` a samotne CLI spousti pres `kubectl exec` v podu.
 
 ## Dokonceni session
 

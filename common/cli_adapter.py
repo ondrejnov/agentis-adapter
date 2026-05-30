@@ -19,8 +19,9 @@ from typing import TYPE_CHECKING, Any
 from common.config import Settings
 from common.models import AgentExecutionContextPayload
 from common.cli_session import KubectlExecTarget
-from common.adapter_base import BaseAdapterService, log_json
-from common.kubernetes_runtime import KubernetesAdapterService
+from common.adapter_base import log_json
+from common.git_adapter import GitAdapterService
+from common.kubernetes.runtime import KubernetesRuntime
 
 if TYPE_CHECKING:
     from common.session_manager import BaseSessionManager
@@ -30,7 +31,7 @@ KUBERNETES_MODE = "kubernetes"
 LOCAL_MODE = "local"
 
 
-class CliAdapterService(BaseAdapterService):
+class CliAdapterService(GitAdapterService):
     """Base adapter for CLI agents run locally (or via ``kubectl exec``).
 
     Subclasses set :attr:`runtime_label` — used in log messages, the local
@@ -69,7 +70,7 @@ class CliAdapterService(BaseAdapterService):
         return self._mode == KUBERNETES_MODE
 
     def _kubectl_target(self) -> KubectlExecTarget:
-        namespace = self.namespace_for_context(self.context, self.settings)
+        namespace = KubernetesRuntime.namespace_for_context(self.context, self.settings)
         return KubectlExecTarget(
             namespace=namespace,
             selector=self.settings.claude_pod_selector,
@@ -77,8 +78,8 @@ class CliAdapterService(BaseAdapterService):
             kubectl=self.settings.kubectl_command,
         )
 
-    def _kubernetes_runtime(self) -> KubernetesAdapterService:
-        return KubernetesAdapterService(self.context, self.settings)
+    def _kubernetes_runtime(self) -> KubernetesRuntime:
+        return KubernetesRuntime(self.context, self.settings, self._workspace_path())
 
     # ------------------------------------------------------------------
     # Deploy / wait_ready — no-op locally, reuse the k8s flow in kubernetes mode.
@@ -263,37 +264,17 @@ class CliAdapterService(BaseAdapterService):
             self._sessions.abort(self.context.session_id)
             self._sessions.remove(self.context.session_id)
 
-        if self.is_kubernetes_mode:
-            return self._kubernetes_runtime().close()
-
-        repository_root = self._repository_root()
-        branch_name = self._branch_name_for_context(self.context)
-        worktree_path = self._resolved_worktree_path()
-
         log_json(
             "INFO",
             f"Closing {self.runtime_label} task environment",
             task_id=self.context.task_id,
-            branch=branch_name,
-            worktree_path=str(worktree_path),
         )
 
-        worktree_removed, branch_deleted = self._cleanup_worktree_branch(
-            repository_root,
-            branch_name,
-            worktree_path,
-            missing_worktree_is_removed=True,
-        )
+        if self.is_kubernetes_mode:
+            kubernetes_teardown = self._kubernetes_runtime().teardown()
+            return {**super().close(), **kubernetes_teardown}
 
-        return {
-            "action": "close",
-            "task_id": self.context.task_id,
-            "branch": branch_name,
-            "base_branch": self.context.base_branch,
-            "worktree_path": str(worktree_path),
-            "worktree_removed": worktree_removed,
-            "branch_deleted": branch_deleted,
-        }
+        return super().close()
 
 
 __all__ = ["CliAdapterService", "KUBERNETES_MODE", "LOCAL_MODE"]

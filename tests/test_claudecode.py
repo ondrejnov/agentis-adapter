@@ -11,14 +11,14 @@ import pytest
 
 from claude.api import create_app, _DISPATCH
 from common.config import Settings
-from common.adapter_base import BaseAdapterService
+from common.git_adapter import GitAdapterService
 from common.cli_session import KubectlExecTarget
 from common.models import (
     AdapterOptionsPayload,
     AgentExecutionContextPayload,
 )
 from claude.adapter import ClaudeCodeAdapterService
-from common.kubernetes_runtime import KubernetesAdapterService
+from common.kubernetes_runtime import KubernetesRuntime
 from claude.activity_mapper import ClaudeActivityMapper
 from claude.session_manager import ClaudeSessionManager, _ClaudeSession
 from common.integrations.github_pr import GithubPrResult
@@ -334,7 +334,7 @@ def test_deploy_runs_kubernetes_flow_when_mode_is_kubernetes(monkeypatch):
         invoked.append("deploy")
         return {"action": "deploy", "task_id": self.context.task_id, "status": "applied"}
 
-    monkeypatch.setattr(KubernetesAdapterService, "deploy", fake_super_deploy)
+    monkeypatch.setattr(KubernetesRuntime, "deploy", fake_super_deploy)
 
     adapter = ClaudeCodeAdapterService(
         context=make_context(namespace="task-7-demo"),
@@ -378,8 +378,8 @@ def test_close_aborts_session_and_skips_kubernetes(monkeypatch):
         git_calls.append(args)
         return ""
 
-    monkeypatch.setattr(BaseAdapterService, "_git_succeeds", staticmethod(fake_succeeds))
-    monkeypatch.setattr(BaseAdapterService, "_run_git", staticmethod(fake_run_git))
+    monkeypatch.setattr(GitAdapterService, "_git_succeeds", staticmethod(fake_succeeds))
+    monkeypatch.setattr(GitAdapterService, "_run_git", staticmethod(fake_run_git))
 
     context = make_context(session_id="ses_abc")
     adapter = ClaudeCodeAdapterService(
