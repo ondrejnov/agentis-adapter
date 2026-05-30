@@ -141,7 +141,16 @@ class BaseSessionManager:
         with self._lock:
             sess = self._sessions.get(session_id)
         if sess is None:
-            raise RuntimeError(f"Unknown {self._AGENT_LABEL} session {session_id!r}")
+            sess = _AgentSession(
+                session_id=session_id,
+                pending_key=f"{self._AGENT_LABEL}-resume-{uuid4().hex}",
+                context=context,
+                worktree=worktree,
+                kubectl_target=kubectl_target,
+                agent_session_id=session_id,
+            )
+            with self._lock:
+                self._sessions[session_id] = sess
 
         sess.context = context
         sess.worktree = worktree

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 
@@ -308,6 +309,9 @@ def test_mapper_seeds_user_prompt() -> None:
     mapper = OpenCodeActivityMapper(prompt="Popis ukolu")
     snapshot = mapper.snapshot()
     assert snapshot[0]["info"]["role"] == "user"
+    assert UUID(snapshot[0]["info"]["id"]).version == 7
+    assert UUID(snapshot[0]["parts"][0]["id"]).version == 7
+    assert snapshot[0]["parts"][0]["messageID"] == snapshot[0]["info"]["id"]
     assert snapshot[0]["parts"][0]["text"] == "Popis ukolu"
 
 
@@ -334,7 +338,11 @@ def test_mapper_builds_assistant_message_from_parts() -> None:
     assert len(snapshot) == 2
     assistant = snapshot[1]
     assert assistant["info"]["role"] == "assistant"
+    assert UUID(assistant["info"]["id"]).version == 7
     assert len(assistant["parts"]) == 1
+    assert UUID(assistant["parts"][0]["id"]).version == 7
+    assert assistant["parts"][0]["id"] != "prt_1"
+    assert assistant["parts"][0]["messageID"] == assistant["info"]["id"]
     assert assistant["parts"][0]["text"] == "hi there"
 
 

@@ -14,14 +14,24 @@ OpenCode transcriptu, který Agentis ``RunLogViewer`` umí vykreslit.
 from __future__ import annotations
 
 import copy
+import secrets
 import time
 from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 from opencode.runner import OpenCodeEvent
 
 
 def _now() -> float:
     return time.time()
+
+
+def _uuid7() -> str:
+    timestamp_ms = int(time.time() * 1000) & ((1 << 48) - 1)
+    rand_a = secrets.randbits(12)
+    rand_b = secrets.randbits(62)
+    value = (timestamp_ms << 80) | (0x7 << 76) | (rand_a << 64) | (0b10 << 62) | rand_b
+    return str(UUID(int=value))
 
 
 class OpenCodeActivityMapper:
@@ -45,8 +55,12 @@ class OpenCodeActivityMapper:
         self._messages: List[Dict[str, Any]] = []
         # messageID -> index do self._messages (jen assistant zprávy)
         self._msg_idx: Dict[str, int] = {}
+        # OpenCode messageID -> veřejné UUIDv7 message id v Agentis activity logu
+        self._message_ids: Dict[str, str] = {}
         # messageID -> {partID -> index do parts}
         self._part_idx: Dict[str, Dict[str, int]] = {}
+        # messageID -> {partID -> veřejné UUIDv7 part id v Agentis activity logu}
+        self._part_ids: Dict[str, Dict[str, str]] = {}
         self._init_user_message()
 
     # ------------------------------------------------------------------
@@ -72,8 +86,9 @@ class OpenCodeActivityMapper:
 
     def _init_user_message(self) -> None:
         now = _now()
+        message_id = _uuid7()
         info = {
-            "id": "msg_cli_user",
+            "id": message_id,
             "sessionID": self.session_id,
             "role": "user",
             "time": {"created": now},
@@ -82,9 +97,9 @@ class OpenCodeActivityMapper:
         if self.prompt:
             parts.append(
                 {
-                    "id": "prt_cli_user",
+                    "id": _uuid7(),
                     "sessionID": self.session_id,
-                    "messageID": "msg_cli_user",
+                    "messageID": message_id,
                     "type": "text",
                     "text": self.prompt,
                     "time": {"start": now, "end": now},
@@ -96,8 +111,9 @@ class OpenCodeActivityMapper:
         idx = self._msg_idx.get(message_id)
         if idx is not None:
             return idx
+        activity_message_id = _uuid7()
         info: Dict[str, Any] = {
-            "id": message_id,
+            "id": activity_message_id,
             "sessionID": self.session_id,
             "role": "assistant",
             "time": {"created": _now()},
@@ -117,7 +133,9 @@ class OpenCodeActivityMapper:
         self._messages.append({"info": info, "parts": []})
         idx = len(self._messages) - 1
         self._msg_idx[message_id] = idx
+        self._message_ids[message_id] = activity_message_id
         self._part_idx[message_id] = {}
+        self._part_ids[message_id] = {}
         return idx
 
     # ------------------------------------------------------------------
@@ -145,13 +163,17 @@ class OpenCodeActivityMapper:
         msg_index = self._ensure_assistant(message_id)
         stored = dict(part)
         stored.setdefault("sessionID", self.session_id)
+        stored["messageID"] = self._message_ids[message_id]
 
         parts = self._messages[msg_index]["parts"]
         existing = self._part_idx[message_id].get(part_id)
         if existing is None:
+            stored["id"] = _uuid7()
+            self._part_ids[message_id][part_id] = stored["id"]
             parts.append(stored)
             self._part_idx[message_id][part_id] = len(parts) - 1
         else:
+            stored["id"] = self._part_ids[message_id][part_id]
             parts[existing] = stored
 
         if part.get("type") == "step-finish":

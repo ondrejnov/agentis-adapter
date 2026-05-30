@@ -288,6 +288,29 @@ def test_session_manager_send_snapshots_feedback(monkeypatch, tmp_path: Path):
     assert calls == [(str(worktree), "claude-run-1-task-1-sess-1-abc123", "claude-send")]
 
 
+def test_session_manager_send_resumes_unknown_session_after_adapter_restart(monkeypatch, tmp_path: Path):
+    calls: list[tuple[str, str, str]] = []
+    spawned: list[tuple[_ClaudeSession, dict[str, Any]]] = []
+    manager = ClaudeSessionManager(settings=make_settings())
+    context = make_context(session_id="sess-1")
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    monkeypatch.setattr(
+        "common.session_manager.snapshot_sources_best_effort",
+        lambda worktree_arg, snapshot_key, label: calls.append((worktree_arg, snapshot_key, label)),
+    )
+    monkeypatch.setattr(manager, "_spawn_thread", lambda sess, **kwargs: spawned.append((sess, kwargs)))
+    monkeypatch.setattr("common.session_manager.uuid4", lambda: type("Uuid", (), {"hex": "abc123"})())
+
+    manager.send(session_id="sess-1", context=context, worktree=str(worktree), prompt="Feedback")
+
+    assert calls == [(str(worktree), "claude-run-1-task-1-sess-1-abc123", "claude-send")]
+    assert manager._sessions["sess-1"].agent_session_id == "sess-1"
+    assert spawned[0][0].session_id == "sess-1"
+    assert spawned[0][1]["resume_id"] == "sess-1"
+
+
 def test_add_message_passes_kubectl_target_in_kubernetes_mode():
     manager = MagicMock(spec=ClaudeSessionManager)
     context = make_context(session_id="ses_abc", namespace="task-7-demo")
