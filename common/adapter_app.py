@@ -17,7 +17,6 @@ async def _handle_jsonrpc_request(
     request: Request,
     dispatch: Mapping[str, JsonRpcRoute],
     *,
-    log_received_method: bool = False,
     catch_not_implemented: bool = False,
 ) -> JSONResponse:
     request_id = None
@@ -25,8 +24,6 @@ async def _handle_jsonrpc_request(
     params = None
     try:
         payload = await request.json()
-        if log_received_method:
-            print(f"Received request: {payload['method']}")
     except Exception as exc:
         log_internal_error("Failed to parse JSON-RPC request", exc, request_id, method, params)
         return JSONResponse(
@@ -48,10 +45,16 @@ def create_adapter_app(
     title: str,
     settings: Settings,
     configure_services: Callable[[FastAPI, Settings, SessionContextRegistry], None],
-    dispatch: Mapping[str, JsonRpcRoute],
     internal_dispatch: Mapping[str, JsonRpcRoute] | None = None,
     version: str = "0.1.0",
 ) -> FastAPI:
+    """Build the adapter's local HTTP app.
+
+    External Agentis JSON-RPC (``start``, ``add_message`` …) is delivered over the
+    passive WebSocket transport, not over HTTP. This app only serves ``/health`` and,
+    when ``internal_dispatch`` is provided, ``/api-internal`` for callbacks coming from
+    the agent runtime (e.g. the opencode pod reaching the adapter via ``AGENTIS_URL``).
+    """
     app = FastAPI(title=title, version=version)
     session_registry = SessionContextRegistry()
     app.state.session_registry = session_registry
@@ -60,10 +63,6 @@ def create_adapter_app(
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
-
-    @app.post("/api")
-    async def api(request: Request) -> JSONResponse:
-        return await _handle_jsonrpc_request(request, dispatch, log_received_method=True)
 
     if internal_dispatch is not None:
 

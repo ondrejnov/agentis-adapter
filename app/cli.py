@@ -14,10 +14,10 @@ from common.rpc.dispatcher import JsonRpcRoute
 from common.rpc.passive_websocket import run_passive_websocket
 
 
-_ADAPTER_APPS = {
-    "opencode": "opencode.api:app",
-    "claude": "claude.api:app",
-    "claudecode": "claude.api:app",
+_ADAPTER_MODULES = {
+    "opencode": "opencode.api",
+    "claude": "claude.api",
+    "claudecode": "claude.api",
 }
 
 
@@ -28,6 +28,12 @@ async def _run_websocket_transport(
     dispatch: Mapping[str, JsonRpcRoute],
     service_container: Any,
 ) -> None:
+    """Run the passive WebSocket client alongside a local HTTP listener.
+
+    External Agentis JSON-RPC is received over the outbound WebSocket connection.
+    The HTTP listener on ``host:port`` only serves internal callbacks (``/api-internal``)
+    from the agent runtime and the ``/health`` endpoint.
+    """
     config = uvicorn.Config(app, host=settings.host, port=settings.port, reload=False)
     server = uvicorn.Server(config)
 
@@ -56,19 +62,13 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentis-adapter")
     parser.add_argument(
         "--adapter",
-        choices=sorted(_ADAPTER_APPS),
+        choices=sorted(_ADAPTER_MODULES),
         required=True,
         help="Adapter runtime to serve.",
     )
-    parser.add_argument("--host", help="Bind host. Defaults to ADAPTER_HOST or 0.0.0.0.")
-    parser.add_argument("--port", type=int, help="Bind port. Defaults to ADAPTER_PORT or 8001.")
-    parser.add_argument(
-        "--transport",
-        choices=["http", "websocket"],
-        help="Startup transport. Defaults to ADAPTER_TRANSPORT or http.",
-    )
+    parser.add_argument("--host", help="Internal listener bind host. Defaults to ADAPTER_HOST or 0.0.0.0.")
+    parser.add_argument("--port", type=int, help="Internal listener bind port. Defaults to ADAPTER_PORT or 8001.")
     parser.add_argument("--id", help="Agentis adapter id. Defaults to AGENTIS_ADAPTER_ID.")
-    parser.add_argument("--reload", action="store_true", help="Enable uvicorn reload for local development.")
     return parser
 
 
@@ -79,28 +79,21 @@ def run(argv: Sequence[str] | None = None) -> None:
         os.environ["ADAPTER_HOST"] = args.host
     if args.port is not None:
         os.environ["ADAPTER_PORT"] = str(args.port)
-    if args.transport is not None:
-        os.environ["ADAPTER_TRANSPORT"] = args.transport
     if args.id is not None:
         os.environ["AGENTIS_ADAPTER_ID"] = args.id
     get_settings.cache_clear()
 
     settings = get_settings()
-    if settings.adapter_transport == "websocket":
-        module_path, _, _ = _ADAPTER_APPS[args.adapter].partition(":")
-        module = importlib.import_module(module_path)
-        app = module.create_app()
-        asyncio.run(
-            _run_websocket_transport(
-                app=app,
-                settings=settings,
-                dispatch=module._DISPATCH,
-                service_container=app.state,
-            )
+    module = importlib.import_module(_ADAPTER_MODULES[args.adapter])
+    app = module.create_app()
+    asyncio.run(
+        _run_websocket_transport(
+            app=app,
+            settings=settings,
+            dispatch=module._DISPATCH,
+            service_container=app.state,
         )
-        return
-
-    uvicorn.run(_ADAPTER_APPS[args.adapter], host=settings.host, port=settings.port, reload=args.reload)
+    )
 
 
 def main() -> None:

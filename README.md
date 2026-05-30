@@ -4,8 +4,8 @@ Samostatny FastAPI JSON-RPC adapter pro agenta. Projekt nema zadnou databazi a d
 
 ## Co umi
 
-- `POST /api` pro JSON-RPC 2.0 metody `start`, `add_message`, `question`, `approve`, `provider.sync_usage`
-- OpenCode plugin eventy `coding_session.*` a `task.*` prijima adapter API, zaloguje je a pak je preposila do endpointu z `AGENTIS_ENDPOINT`
+- pasivni WebSocket transport prijima JSON-RPC 2.0 metody `start`, `add_message`, `question`, `approve`, `git_merge`, `abort`, `close`, `provider.sync_usage` z Agentisu pres odchozi spojeni
+- OpenCode plugin eventy `coding_session.*` a `task.*` prijima adapter na `POST /api-internal`, zaloguje je a pak je preposila do endpointu z `AGENTIS_ENDPOINT`
 - `GET /health` pro healthcheck
 - `start` vytvori git branch a worktree podle `task_id`, a pak aplikuje Kubernetes manifest pres `kubectl`
 - placeholder substituce v Kubernetes manifestech: `[%NAMESPACE%]`, `[%WORKDIR%]`, `[%APP_HOST%]`, `[%MAIN_DIR%]`, `[%AGENTIS_URL%]`
@@ -34,14 +34,13 @@ agentis-adapter --adapter claude --host 0.0.0.0 --port 8002
 
 ### Pasivni WebSocket transport
 
-HTTP zustava vychozi transport. Pokud adapter bezi za NAT/firewallem a nema byt dostupny z internetu, zapni pasivni WebSocket rezim:
+Adapter se k Agentisu pripojuje odchozim WebSocket spojenim — to je jediny zpusob, jak adapter prijima externi JSON-RPC. Diky tomu nemusi byt adapter dostupny z internetu (zadny inbound port, ingress ani tunel). Nakonfiguruj endpoint, identitu adapteru a token:
 
 ```bash
-ADAPTER_TRANSPORT=websocket
 AGENTIS_WS_ENDPOINT=ws://127.0.0.1:8891/api/adapters/passive/ws
 AGENTIS_ADAPTER_ID=019e0000-0000-7000-8000-000000000123
 AGENTIS_TOKEN=interni-token
-poetry run agentis-adapter --adapter opencode --transport websocket
+poetry run agentis-adapter --adapter opencode
 ```
 
 V produkci pouzij TLS endpoint:
@@ -50,9 +49,7 @@ V produkci pouzij TLS endpoint:
 AGENTIS_WS_ENDPOINT=wss://agentis.example.com/api/adapters/passive/ws
 ```
 
-Ve WebSocket rezimu Agentis posila JSON-RPC requesty pres registrovane WebSocket spojeni a adapter vraci odpoved se stejnym `id`. Adapter soucasne spousti Uvicorn na `ADAPTER_HOST:ADAPTER_PORT` pro interni callbacky z agent runtime (`/api-internal`), proto musi `ADAPTER_PUBLIC_URL` ukazovat na adresu dostupnou z techto internich agentu.
-
-Rollback: nastav `ADAPTER_TRANSPORT=http`, ponech/pouzij existujici adapter URL nebo tunel v Agentisu a spust adapter bez `--transport websocket`.
+Agentis posila JSON-RPC requesty pres registrovane WebSocket spojeni a adapter vraci odpoved se stejnym `id`. Adapter soucasne spousti Uvicorn na `ADAPTER_HOST:ADAPTER_PORT`, ale uz jen pro interni callbacky z agent runtime (`/api-internal`) a `/health` — externi `POST /api` endpoint neexistuje. `ADAPTER_PUBLIC_URL` proto musi ukazovat na adresu dostupnou z techto internich agentu (napr. opencode podu).
 
 Pro interni instalaci z git repozitare lze pouzit napr.:
 
@@ -102,9 +99,8 @@ Script umi:
 
 ## Konfigurace pres environment
 
-- `ADAPTER_HOST` default `0.0.0.0`
-- `ADAPTER_PORT` default `8001`
-- `ADAPTER_TRANSPORT` default `http`; nastav `websocket` pro pasivni outbound spojeni
+- `ADAPTER_HOST` default `0.0.0.0` (bind interniho `/api-internal` listeneru)
+- `ADAPTER_PORT` default `8001` (port interniho `/api-internal` listeneru)
 - `AGENTIS_WS_ENDPOINT` WebSocket endpoint Agentisu, napr. lokalne `ws://127.0.0.1:8891/api/adapters/passive/ws`, produkcne `wss://agentis.example.com/api/adapters/passive/ws`
 - `AGENTIS_ADAPTER_ID` stabilni identita adapteru; idealne ID adapter entity v Agentisu
 - `AGENTIS_WS_HEARTBEAT_INTERVAL` default `30`

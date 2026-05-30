@@ -25,7 +25,6 @@ def make_settings(**overrides: Any) -> Settings:
         "public_base_url": "http://adapter.internal:8001",
         "agentis_endpoint": "http://agentis.local",
         "agentis_token": "super-secret-token",
-        "adapter_transport": "websocket",
         "agentis_ws_endpoint": "ws://127.0.0.1:8891/ws/adapters",
         "agentis_adapter_id": "adapter-1",
     }

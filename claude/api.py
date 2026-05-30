@@ -50,7 +50,6 @@ def create_app() -> FastAPI:
         title="Agentis ClaudeCode Adapter",
         settings=settings,
         configure_services=_configure_services,
-        dispatch=_DISPATCH,
     )
 
 

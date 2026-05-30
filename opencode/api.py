@@ -81,7 +81,6 @@ def create_app() -> FastAPI:
         title="Agentis OpenCode Adapter",
         settings=settings,
         configure_services=_configure_services,
-        dispatch=_DISPATCH,
         internal_dispatch=_INTERNAL_DISPATCH,
     )
 

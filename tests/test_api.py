@@ -5,10 +5,9 @@ from typing import cast
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
 from common.config import Settings
-from opencode.api import create_app
+from opencode.api import create_app, _DISPATCH
 from common.models import (
     AgentExecutionContextPayload,
     AgentAttachmentPayload,
@@ -25,10 +24,10 @@ from common.rpc.jsonrpc import AgentJsonRpcService
 from common.usage.claude import ClaudeUsageUnavailable, get_claude_usage
 from common.usage import provider as provider_usage
 from common.usage.provider import ProviderUsageSyncService
-from opencode import main
+from tests.support import RpcTestClient
 
 
-def make_client(service: AgentJsonRpcService | None = None) -> TestClient:
+def make_client(service: AgentJsonRpcService | None = None) -> RpcTestClient:
     app = create_app()
     if service is not None:
         app.state.agent_jsonrpc_service = service
@@ -37,7 +36,7 @@ def make_client(service: AgentJsonRpcService | None = None) -> TestClient:
             settings=service.settings,
             session_registry=service.session_registry,
         )
-    return TestClient(app)
+    return RpcTestClient(app, _DISPATCH)
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -3553,26 +3552,4 @@ def test_session_idle_skips_pr_when_repo_missing(monkeypatch):
         "status": "success",
         "message": "OpenCode session je neaktivní.",
         "data": {"session_id": "sess-1", "message_count": 1},
-    }
-
-
-def test_main_entrypoint_uses_adapter_settings(monkeypatch):
-    captured: dict[str, object] = {}
-
-    def fake_run(app: str, host: str, port: int, reload: bool) -> None:
-        captured["app"] = app
-        captured["host"] = host
-        captured["port"] = port
-        captured["reload"] = reload
-
-    monkeypatch.setattr("opencode.uvicorn.run", fake_run)
-    monkeypatch.setattr("opencode.get_settings", lambda: make_settings(host="127.0.0.1", port=9000))
-
-    main()
-
-    assert captured == {
-        "app": "opencode.api:app",
-        "host": "127.0.0.1",
-        "port": 9000,
-        "reload": False,
     }

@@ -1,10 +1,5 @@
-from __future__ import annotations
+"""OpenCode adapter package.
 
-import uvicorn
-
-from common.config import get_settings
-
-
-def main() -> None:
-    settings = get_settings()
-    uvicorn.run("opencode.api:app", host=settings.host, port=settings.port, reload=False)
+The adapter is launched through the ``agentis-adapter`` CLI (``app.cli``), which runs
+the passive WebSocket transport. There is no standalone HTTP launcher.
+"""

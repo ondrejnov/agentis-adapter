@@ -8,9 +8,8 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi.testclient import TestClient
 
-from claude.api import create_app
+from claude.api import create_app, _DISPATCH
 from common.config import Settings
 from common.models import (
     AdapterOptionsPayload,
@@ -22,6 +21,7 @@ from claude.activity_mapper import ClaudeActivityMapper
 from claude.session_manager import ClaudeSessionManager, _ClaudeSession
 from claude.client import KubectlExecTarget
 from common.integrations.github_pr import GithubPrResult
+from tests.support import RpcTestClient
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -410,7 +410,7 @@ def claudecode_client(monkeypatch):
     )
 
     app = create_app()
-    return TestClient(app), fake_manager
+    return RpcTestClient(app, _DISPATCH), fake_manager
 
 
 def test_health_endpoint(claudecode_client):
@@ -464,35 +464,6 @@ def test_unknown_method_returns_404(claudecode_client):
     )
     assert response.status_code == 404
     assert response.json()["error"]["code"] == -32601
-
-
-# ---------------------------------------------------------------------------
-# claudecode.py entrypoint
-# ---------------------------------------------------------------------------
-
-
-def test_claudecode_entrypoint_invokes_uvicorn(monkeypatch):
-    captured: dict[str, Any] = {}
-
-    def fake_run(app: str, host: str, port: int, reload: bool) -> None:
-        captured["app"] = app
-        captured["host"] = host
-        captured["port"] = port
-        captured["reload"] = reload
-
-    monkeypatch.setattr("claudecode.uvicorn.run", fake_run)
-    monkeypatch.setattr("claudecode.get_settings", lambda: make_settings(host="0.0.0.0", port=8002))
-
-    from claudecode import main
-
-    main()
-
-    assert captured == {
-        "app": "claude.api:app",
-        "host": "0.0.0.0",
-        "port": 8002,
-        "reload": False,
-    }
 
 
 # ---------------------------------------------------------------------------

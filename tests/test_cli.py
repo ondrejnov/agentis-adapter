@@ -6,51 +6,7 @@ from typing import Any
 from app.cli import run
 
 
-def test_cli_runs_opencode_adapter_on_requested_port(monkeypatch):
-    captured: dict[str, Any] = {}
-
-    def fake_run(app: str, host: str, port: int, reload: bool) -> None:
-        captured["app"] = app
-        captured["host"] = host
-        captured["port"] = port
-        captured["reload"] = reload
-
-    monkeypatch.setenv("ADAPTER_HOST", "0.0.0.0")
-    monkeypatch.setenv("ADAPTER_PORT", "7000")
-    monkeypatch.setattr("app.cli.uvicorn.run", fake_run)
-
-    run(["--adapter", "opencode", "--host", "127.0.0.1", "--port", "8001"])
-
-    assert captured == {
-        "app": "opencode.api:app",
-        "host": "127.0.0.1",
-        "port": 8001,
-        "reload": False,
-    }
-
-
-def test_cli_runs_claude_adapter_on_exact_requested_port(monkeypatch):
-    captured: dict[str, Any] = {}
-
-    def fake_run(app: str, host: str, port: int, reload: bool) -> None:
-        captured["app"] = app
-        captured["host"] = host
-        captured["port"] = port
-        captured["reload"] = reload
-
-    monkeypatch.setattr("app.cli.uvicorn.run", fake_run)
-
-    run(["--adapter", "claude", "--host", "127.0.0.1", "--port", "8002", "--reload"])
-
-    assert captured == {
-        "app": "claude.api:app",
-        "host": "127.0.0.1",
-        "port": 8002,
-        "reload": True,
-    }
-
-
-def test_cli_websocket_transport_runs_internal_http_listener(monkeypatch):
+def test_cli_runs_websocket_transport_with_internal_http_listener(monkeypatch):
     captured: dict[str, Any] = {}
 
     class FakeServer:
@@ -80,8 +36,6 @@ def test_cli_websocket_transport_runs_internal_http_listener(monkeypatch):
     run([
         "--adapter",
         "opencode",
-        "--transport",
-        "websocket",
         "--host",
         "127.0.0.1",
         "--port",
@@ -93,7 +47,6 @@ def test_cli_websocket_transport_runs_internal_http_listener(monkeypatch):
     assert captured["config"].host == "127.0.0.1"
     assert captured["config"].port == 8101
     assert captured["config"].app.state is captured["service_container"]
-    assert captured["settings"].adapter_transport == "websocket"
     assert captured["settings"].agentis_adapter_id == "opencode"
     assert "start" in captured["dispatch"]
     assert captured["serve_started"] is True

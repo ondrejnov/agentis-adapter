@@ -70,7 +70,6 @@ class Settings:
     claude_pod_selector: str = "deployment/opencode"
     claude_pod_container: str = "opencode"
     kubectl_command: str = "kubectl"
-    adapter_transport: str = "http"
     agentis_ws_endpoint: str | None = None
     agentis_adapter_id: str | None = None
     websocket_heartbeat_interval: float = 30.0
@@ -80,10 +79,6 @@ class Settings:
     websocket_reconnect_max_attempts: int = 0
 
     def validate_passive_websocket(self) -> None:
-        if self.adapter_transport not in {"http", "websocket"}:
-            raise ValueError("ADAPTER_TRANSPORT must be 'http' or 'websocket'")
-        if self.adapter_transport != "websocket":
-            return
         if not self.agentis_ws_endpoint:
             raise ValueError("AGENTIS_WS_ENDPOINT is required for WebSocket transport")
         if not self.agentis_adapter_id:
@@ -138,7 +133,6 @@ def _build_settings() -> Settings:
         claude_pod_selector=_get_env(env, "CLAUDE_POD_SELECTOR", "deployment/opencode") or "deployment/opencode",
         claude_pod_container=_get_env(env, "CLAUDE_POD_CONTAINER", "opencode") or "opencode",
         kubectl_command=_get_env(env, "KUBECTL_COMMAND", "kubectl") or "kubectl",
-        adapter_transport=(_get_env(env, "ADAPTER_TRANSPORT", "http") or "http").strip().lower(),
         agentis_ws_endpoint=_get_env(env, "AGENTIS_WS_ENDPOINT"),
         agentis_adapter_id=_get_env(env, "AGENTIS_ADAPTER_ID"),
         websocket_heartbeat_interval=float(_get_env(env, "AGENTIS_WS_HEARTBEAT_INTERVAL", "30") or "30"),

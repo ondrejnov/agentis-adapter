@@ -7,11 +7,11 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi.testclient import TestClient
 
 from common.config import Settings
 from common.models import AdapterOptionsPayload, AgentExecutionContextPayload
-from opencode.api import create_app
+from opencode.api import create_app, _DISPATCH
+from tests.support import RpcTestClient
 from opencode.adapter import OpenCodeAdapterService
 from claude.client import KubectlExecTarget
 from opencode.runner import OpenCodeRunner, OpenCodeEvent, OpenCodeRunConfig
@@ -496,7 +496,7 @@ def opencode_client(monkeypatch):
     )
 
     app = create_app()
-    return TestClient(app), fake_manager
+    return RpcTestClient(app, _DISPATCH), fake_manager
 
 
 def test_health_endpoint(opencode_client):
