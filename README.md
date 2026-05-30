@@ -10,6 +10,10 @@ Samostatny FastAPI JSON-RPC adapter pro agenta. Projekt nema zadnou databazi a d
 - `start` vytvori git branch a worktree podle `task_id`, a pak aplikuje Kubernetes manifest pres `kubectl`
 - placeholder substituce v Kubernetes manifestech: `[%NAMESPACE%]`, `[%WORKDIR%]`, `[%APP_HOST%]`, `[%MAIN_DIR%]`, `[%AGENTIS_URL%]`
 
+## Vyvojarska dokumentace
+
+Podrobny popis architektury, flow adapteru, session lifecycle a checklist pro pridani noveho adapteru je v [`docs/development.md`](docs/development.md).
+
 ## Lokalni start
 
 ```bash
