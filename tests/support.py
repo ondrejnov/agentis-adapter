@@ -1,10 +1,10 @@
-"""Test helpers for the adapter HTTP/WebSocket transport split.
+"""Test helpers for the adapter WebSocket transport.
 
-External Agentis JSON-RPC (``start``, ``add_message`` …) is no longer served over an
-HTTP ``/api`` route; in production it arrives over the passive WebSocket transport.
-``RpcTestClient`` lets existing tests keep calling ``client.post("/api", json=...)`` by
-routing those payloads through the same dispatcher the WebSocket client uses, while
-``/api-internal`` and ``/health`` still go through a real ``TestClient``.
+External Agentis JSON-RPC (``start``, ``add_message`` …) is not served over HTTP; in
+production it arrives over the passive WebSocket transport. ``RpcTestClient`` lets
+existing tests keep calling ``client.post("/api", json=...)`` by routing those payloads
+through the same dispatcher the WebSocket client uses, while ``/health`` still goes
+through a real ``TestClient``.
 """
 
 from __future__ import annotations

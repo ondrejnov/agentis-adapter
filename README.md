@@ -5,8 +5,8 @@ Samostatny FastAPI JSON-RPC adapter pro agenta. Projekt nema zadnou databazi a d
 ## Co umi
 
 - pasivni WebSocket transport prijima JSON-RPC 2.0 metody `start`, `add_message`, `question`, `approve`, `git_merge`, `abort`, `close`, `provider.sync_usage` z Agentisu pres odchozi spojeni
-- OpenCode plugin eventy `coding_session.*` a `task.*` prijima adapter na `POST /api-internal`, zaloguje je a pak je preposila do endpointu z `AGENTIS_ENDPOINT`
-- `GET /health` pro healthcheck
+- aktivitu agenta (komentare, dokoncovaci akce, adapter eventy) adapter cte primo z postupneho vystupu `opencode`/`claude` CLI a forwarduje do endpointu z `AGENTIS_ENDPOINT` — agent runtime uz nedela zadne callbacky zpet do adapteru
+- `GET /health` na ASGI aplikaci pro healthcheck (adapter ale neposlucha na zadnem inbound portu)
 - `start` vytvori git branch a worktree podle `task_id`, a pak aplikuje Kubernetes manifest pres `kubectl`
 - placeholder substituce v Kubernetes manifestech: `[%NAMESPACE%]`, `[%WORKDIR%]`, `[%APP_HOST%]`, `[%MAIN_DIR%]`, `[%AGENTIS_URL%]`
 
@@ -14,8 +14,8 @@ Samostatny FastAPI JSON-RPC adapter pro agenta. Projekt nema zadnou databazi a d
 
 ```bash
 poetry install
-poetry run agentis-adapter --adapter opencode --port 8001
-poetry run agentis-adapter --adapter claude --port 8002
+poetry run agentis-adapter --adapter opencode
+poetry run agentis-adapter --adapter claude
 ```
 
 Adaptery:
@@ -25,11 +25,11 @@ Adaptery:
 
 Pro environment promenne lze vyjit z `.env.example`.
 
-CLI argumenty `--host` a `--port` maji prioritu pred hodnotami z `.env`:
+CLI argument `--id` ma prioritu pred `AGENTIS_ADAPTER_ID` z `.env`:
 
 ```bash
-agentis-adapter --adapter opencode --host 0.0.0.0 --port 8001
-agentis-adapter --adapter claude --host 0.0.0.0 --port 8002
+agentis-adapter --adapter opencode --id dev-opencode
+agentis-adapter --adapter claude --id dev-claude
 ```
 
 ### Pasivni WebSocket transport
@@ -49,7 +49,7 @@ V produkci pouzij TLS endpoint:
 AGENTIS_WS_ENDPOINT=wss://agentis.example.com/api/adapters/passive/ws
 ```
 
-Agentis posila JSON-RPC requesty pres registrovane WebSocket spojeni a adapter vraci odpoved se stejnym `id`. Adapter soucasne spousti Uvicorn na `ADAPTER_HOST:ADAPTER_PORT`, ale uz jen pro interni callbacky z agent runtime (`/api-internal`) a `/health` — externi `POST /api` endpoint neexistuje. `ADAPTER_PUBLIC_URL` proto musi ukazovat na adresu dostupnou z techto internich agentu (napr. opencode podu).
+Agentis posila JSON-RPC requesty pres registrovane WebSocket spojeni a adapter vraci odpoved se stejnym `id`. Adapter neposlucha na zadnem inbound portu — externi `POST /api` ani interni `POST /api-internal` endpoint neexistuje. Agent runtime nedela zadne callbacky zpet; adapter cte aktivitu primo z postupneho vystupu CLI.
 
 Pro interni instalaci z git repozitare lze pouzit napr.:
 
@@ -99,8 +99,6 @@ Script umi:
 
 ## Konfigurace pres environment
 
-- `ADAPTER_HOST` default `0.0.0.0` (bind interniho `/api-internal` listeneru)
-- `ADAPTER_PORT` default `8001` (port interniho `/api-internal` listeneru)
 - `AGENTIS_WS_ENDPOINT` WebSocket endpoint Agentisu, napr. lokalne `ws://127.0.0.1:8891/api/adapters/passive/ws`, produkcne `wss://agentis.example.com/api/adapters/passive/ws`
 - `AGENTIS_ADAPTER_ID` stabilni identita adapteru; idealne ID adapter entity v Agentisu
 - `AGENTIS_WS_HEARTBEAT_INTERVAL` default `30`
