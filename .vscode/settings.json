@@ -1,0 +1,10 @@
+{
+    //"agentisChat.backendUrl": "http://10.0.0.205:5173",
+    //"agentisChat.chatUrl":  "http://10.0.0.205:5173/chat",
+    "agentisChat.projectId": "019dc3c9-1e34-71a2-bc69-c80f8cf0eac1",
+    "python.testing.pytestArgs": [
+        "tests"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
+}

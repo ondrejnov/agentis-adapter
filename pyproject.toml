@@ -1,0 +1,41 @@
+[tool.poetry]
+name = "agentis-kubernetes-adapter"
+version = "0.1.0"
+description = "Standalone FastAPI JSON-RPC API for the Agentis Kubernetes adapter"
+authors = ["GitHub Copilot <copilot@github.com>"]
+packages = [
+    { include = "app" },
+    { include = "common" },
+    { include = "opencode" },
+    { include = "claude" },
+]
+include = [
+    { path = "opencode_api.json", format = ["sdist", "wheel"] },
+]
+
+[tool.poetry.scripts]
+agentis-adapter = "app.cli:main"
+
+[tool.poetry.dependencies]
+python = ">=3.13,<3.14"
+fastapi = "^0.115.8"
+uvicorn = "^0.34.0"
+pydantic = "^2.10.6"
+requests = "^2.33.1"
+websockets = "^15.0.1"
+
+[tool.poetry.group.dev.dependencies]
+httpx = "^0.28.1"
+pytest = "^8.4.2"
+ruff = "^0.14.3"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 120
+
+[tool.pytest.ini_options]
+pythonpath = "."
+testpaths = ["tests"]
