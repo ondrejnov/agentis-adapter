@@ -22,7 +22,6 @@ Pro pohodlnější použití jsou k dispozici i typed dataclassy a helper
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import json
 import os
@@ -30,47 +29,17 @@ import shlex
 import shutil
 import signal
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Sequence
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
 
+import asyncio
+
+from common.cli_session import KubectlExecTarget, unbounded_line_reader as _unbounded_line_reader
 from common.local_setup import build_local_setup_shell_command
 
-
-_STREAM_READ_CHUNK_SIZE = 64 * 1024
 
 # Po terminálním `result` eventu necháme claude CLI doběhnout jen krátce; pokud
 # stdout neuzavře a sám neskončí (vídáno u `kubectl exec`), tvrdě ho ukončíme.
 _PROC_EXIT_GRACE_SEC = 10.0
-
-
-def _unbounded_line_reader(stream: Any) -> Callable[[], Awaitable[bytes]]:
-    """Return a readline-like coroutine that is not capped by StreamReader's line limit."""
-    buffer = bytearray()
-    eof = False
-
-    async def read_line() -> bytes:
-        nonlocal eof
-
-        while True:
-            separator_at = buffer.find(b"\n")
-            if separator_at >= 0:
-                line = bytes(buffer[: separator_at + 1])
-                del buffer[: separator_at + 1]
-                return line
-
-            if eof:
-                if not buffer:
-                    return b""
-                line = bytes(buffer)
-                buffer.clear()
-                return line
-
-            chunk = await stream.read(_STREAM_READ_CHUNK_SIZE)
-            if chunk:
-                buffer.extend(chunk)
-            else:
-                eof = True
-
-    return read_line
 
 
 # ---------------------------------------------------------------------------
@@ -94,16 +63,6 @@ class ClaudeEvent:
 # ---------------------------------------------------------------------------
 # Konfigurace
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class KubectlExecTarget:
-    """Spustí claude CLI uvnitř k8s podu přes `kubectl exec` místo lokálně."""
-
-    namespace: str
-    selector: str = "deployment/opencode"  # nebo "pod/<name>"
-    container: Optional[str] = "opencode"
-    kubectl: str = "kubectl"
 
 
 @dataclass

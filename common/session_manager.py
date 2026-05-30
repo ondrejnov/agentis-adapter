@@ -42,7 +42,7 @@ from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 from common.integrations.github_pr import GithubPrError, GithubPrResult, GithubPrService
 
 if TYPE_CHECKING:
-    from claude.client import KubectlExecTarget
+    from common.cli_session import KubectlExecTarget
 
 
 _AGENT_SESSION_START_TIMEOUT_SEC = 15.0

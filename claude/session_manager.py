@@ -13,8 +13,9 @@ from __future__ import annotations
 from typing import Optional
 
 from common.session_manager import BaseSessionManager, _AgentSession
+from common.cli_session import KubectlExecTarget
 from claude.activity_mapper import ClaudeActivityMapper
-from claude.client import ClaudeCodeClient, ClaudeRunConfig, KubectlExecTarget
+from claude.client import ClaudeCodeClient, ClaudeRunConfig
 
 # Backwards-compatible alias — the session dataclass is now agent-agnostic.
 _ClaudeSession = _AgentSession

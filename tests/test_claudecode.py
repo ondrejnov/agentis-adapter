@@ -11,6 +11,8 @@ import pytest
 
 from claude.api import create_app, _DISPATCH
 from common.config import Settings
+from common.adapter_base import BaseAdapterService
+from common.cli_session import KubectlExecTarget
 from common.models import (
     AdapterOptionsPayload,
     AgentExecutionContextPayload,
@@ -19,7 +21,6 @@ from claude.adapter import ClaudeCodeAdapterService
 from common.kubernetes_runtime import KubernetesAdapterService
 from claude.activity_mapper import ClaudeActivityMapper
 from claude.session_manager import ClaudeSessionManager, _ClaudeSession
-from claude.client import KubectlExecTarget
 from common.integrations.github_pr import GithubPrResult
 from tests.support import RpcTestClient
 
@@ -354,8 +355,8 @@ def test_close_aborts_session_and_skips_kubernetes(monkeypatch):
         git_calls.append(args)
         return ""
 
-    monkeypatch.setattr(KubernetesAdapterService, "_git_succeeds", staticmethod(fake_succeeds))
-    monkeypatch.setattr(KubernetesAdapterService, "_run_git", staticmethod(fake_run_git))
+    monkeypatch.setattr(BaseAdapterService, "_git_succeeds", staticmethod(fake_succeeds))
+    monkeypatch.setattr(BaseAdapterService, "_run_git", staticmethod(fake_run_git))
 
     context = make_context(session_id="ses_abc")
     adapter = ClaudeCodeAdapterService(

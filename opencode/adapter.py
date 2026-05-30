@@ -1,61 +1,25 @@
-"""Adapter that runs OpenCode through `opencode run`.
+"""Adapter that runs OpenCode through a one-shot `opencode run`.
 
-Na rozdíl od ``KubernetesAdapterService`` nedeployuje OpenCode web server ani
-nepoužívá REST/interní API — OpenCode se spustí na jedno zadání promptu
-a jeho streamovaný výstup forwardujeme do Agentisu (viz
-``OpenCodeSessionManager``). Lifecycle je shodný s Claude Code adaptérem,
-proto z něj dědíme a měníme jen runtime-specifické kroky.
+Na rozdíl od :class:`KubernetesAdapterService` nedeployuje OpenCode web server
+ani interní REST/API — `opencode run --format json` se spustí na jedno zadání
+promptu a jeho streamovaný výstup forwardujeme do Agentisu (viz
+:class:`OpenCodeSessionManager`).
+
+Sourozenec :class:`ClaudeCodeAdapterService`: oba sdílejí lifecycle ze společné
+:class:`CliAdapterService` a nemají spolu nic společného navzájem. OpenCode se
+od Claude liší jen labelem a tím, že běží vždy defaultně lokálně (neřeší
+``claude_run_mode``).
 """
 
 from __future__ import annotations
 
-from typing import Any
-
-from common.config import Settings
-from common.models import AgentExecutionContextPayload
-from common.adapter_base import log_json
-from claude.adapter import KUBERNETES_MODE, LOCAL_MODE, ClaudeCodeAdapterService
-from opencode.session_manager import OpenCodeSessionManager
+from common.cli_adapter import KUBERNETES_MODE, LOCAL_MODE, CliAdapterService
 
 
-class OpenCodeAdapterService(ClaudeCodeAdapterService):
-    """Variant adapter that runs local `opencode run` for the task worktree."""
+class OpenCodeAdapterService(CliAdapterService):
+    """Adapter driving a local (or `kubectl exec`-ed) `opencode run`."""
 
-    def __init__(
-        self,
-        context: AgentExecutionContextPayload,
-        settings: Settings,
-        session_manager: OpenCodeSessionManager,
-    ) -> None:
-        super().__init__(context, settings, session_manager)
-        # OpenCode běží defaultně lokálně; `claude_run_mode` se zde nepoužívá.
-        runtime = context.adapter.runtime if context.adapter and context.adapter.runtime else None
-        self._mode = (runtime or LOCAL_MODE).lower()
-
-    def deploy(self) -> dict[str, Any]:
-        if self.is_kubernetes_mode:
-            return super().deploy()
-        log_json(
-            "INFO",
-            "Skipping Kubernetes deploy for OpenCode adapter",
-            task_id=self.context.task_id,
-        )
-        return {
-            "action": "deploy",
-            "task_id": self.context.task_id,
-            "status": "skipped",
-            "reason": "opencode_local",
-        }
-
-    def wait_ready(self, timeout: float = 300.0, interval: float = 2.0) -> dict[str, Any]:
-        if self.is_kubernetes_mode:
-            return super().wait_ready(timeout=timeout, interval=interval)
-        return {
-            "action": "wait_ready",
-            "task_id": self.context.task_id,
-            "url": "local://opencode",
-            "status": "skipped",
-        }
+    runtime_label = "opencode"
 
 
 __all__ = ["OpenCodeAdapterService", "KUBERNETES_MODE", "LOCAL_MODE"]

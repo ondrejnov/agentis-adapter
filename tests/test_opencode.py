@@ -9,11 +9,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from common.config import Settings
+from common.cli_session import KubectlExecTarget
 from common.models import AdapterOptionsPayload, AgentExecutionContextPayload
 from opencode.api import create_app, _DISPATCH
 from tests.support import RpcTestClient
 from opencode.adapter import OpenCodeAdapterService
-from claude.client import KubectlExecTarget
 from opencode.runner import OpenCodeRunner, OpenCodeEvent, OpenCodeRunConfig
 from opencode.activity_mapper import OpenCodeActivityMapper
 from opencode.session_manager import OpenCodeSessionManager

@@ -32,7 +32,7 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
 
-from claude.client import KubectlExecTarget, _unbounded_line_reader
+from common.cli_session import KubectlExecTarget, unbounded_line_reader as _unbounded_line_reader
 from common.local_setup import build_local_setup_shell_command
 
 
