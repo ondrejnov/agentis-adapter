@@ -250,7 +250,7 @@ def test_session_manager_start_snapshots_sources(monkeypatch, tmp_path: Path):
     def fake_spawn(sess: _ClaudeSession, **_: Any) -> None:
         manager._bind_session_id(sess, "sess-1")
 
-    monkeypatch.setattr("claude.session_manager.snapshot_sources_best_effort", fake_snapshot)
+    monkeypatch.setattr("common.session_manager.snapshot_sources_best_effort", fake_snapshot)
     monkeypatch.setattr(manager, "_spawn_thread", fake_spawn)
 
     session_id = manager.start(context=context, worktree=str(worktree), prompt="Popis ukolu")
@@ -272,15 +272,15 @@ def test_session_manager_send_snapshots_feedback(monkeypatch, tmp_path: Path):
         pending_key="pending",
         context=context,
         worktree=str(worktree),
-        claude_session_id="sess-1",
+        agent_session_id="sess-1",
     )
 
     monkeypatch.setattr(
-        "claude.session_manager.snapshot_sources_best_effort",
+        "common.session_manager.snapshot_sources_best_effort",
         lambda worktree_arg, snapshot_key, label: calls.append((worktree_arg, snapshot_key, label)),
     )
     monkeypatch.setattr(manager, "_spawn_thread", lambda *args, **kwargs: None)
-    monkeypatch.setattr("claude.session_manager.uuid4", lambda: type("Uuid", (), {"hex": "abc123"})())
+    monkeypatch.setattr("common.session_manager.uuid4", lambda: type("Uuid", (), {"hex": "abc123"})())
 
     manager.send(session_id="sess-1", context=context, worktree=str(worktree), prompt="Feedback")
 
@@ -498,13 +498,13 @@ def test_session_manager_abort_kills_local_process_group(monkeypatch):
     manager._sessions["ses_local"] = sess
 
     killed: list[tuple[int, int]] = []
-    monkeypatch.setattr("claude.session_manager.os.getpgid", lambda pid: 999)
+    monkeypatch.setattr("common.session_manager.os.getpgid", lambda pid: 999)
     monkeypatch.setattr(
-        "claude.session_manager.os.killpg",
+        "common.session_manager.os.killpg",
         lambda pgid, sig: killed.append((pgid, sig)),
     )
     remote_pkill = MagicMock()
-    monkeypatch.setattr(manager, "_remote_pkill_claude", remote_pkill)
+    monkeypatch.setattr(manager, "_remote_pkill_agent", remote_pkill)
 
     manager.abort("ses_local")
 
@@ -528,7 +528,7 @@ def test_session_manager_abort_pkills_remote_claude_for_kubectl_session(monkeypa
     sess.proc_holder["proc"] = proc
     manager._sessions["ses_k8s"] = sess
 
-    monkeypatch.setattr("claude.session_manager.shutil.which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setattr("common.session_manager.shutil.which", lambda cmd: f"/usr/bin/{cmd}")
     captured: dict[str, Any] = {}
 
     def fake_run(args, **kwargs):
@@ -536,7 +536,7 @@ def test_session_manager_abort_pkills_remote_claude_for_kubectl_session(monkeypa
         captured["kwargs"] = kwargs
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr("claude.session_manager.subprocess.run", fake_run)
+    monkeypatch.setattr("common.session_manager.subprocess.run", fake_run)
 
     manager.abort("ses_k8s")
 
@@ -789,11 +789,11 @@ def test_session_manager_stream_adds_completion_attachments_and_actions(monkeypa
         ],
     )
     monkeypatch.setattr(
-        "claude.session_manager.collect_screenshot_images",
+        "common.session_manager.collect_screenshot_images",
         lambda project_root: [{"name": "result.png", "content": "cG5n"}] if project_root == sess.worktree else [],
     )
     monkeypatch.setattr(
-        "claude.session_manager.write_changes_diff_best_effort",
+        "common.session_manager.write_changes_diff_best_effort",
         lambda worktree, snapshot_key, label: type(
             "Result",
             (),

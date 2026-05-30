@@ -159,9 +159,8 @@ class ClaudeCodeAdapterService(KubernetesAdapterService):
             "session_id": session_id,
         }
 
-    def question_reply(self, request_id: str, answers: list[list[str]], pod_url: str | None = None) -> dict[str, Any]:
-        # Claude CLI nemá HITL otázky tohoto typu — zatím no-op.
-        raise NotImplementedError("Claude adapter does not support interactive questions yet")
+    def question_reply(self, request_id: str, answers: list[list[str]], pod_url: str | None = None):
+        return None
 
     def abort(self, session_id: str) -> dict[str, Any]:
         self._sessions.abort(session_id)

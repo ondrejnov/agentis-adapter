@@ -5,19 +5,19 @@ json`) — bez web REST API a bez interního API pluginu. Streamovaný výstup
 parsujeme a forwardujeme do Agentisu přímo, stejně jako u Claude Code adaptéru.
 
 Veškerá orchestrace (streaming, store_activity_log, dokončovací akce) se dědí
-z ``ClaudeSessionManager``; přepisujeme jen agentně specifické hooky.
+z ``BaseSessionManager``; přepisujeme jen agentně specifické hooky.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-from claude.session_manager import ClaudeSessionManager, _ClaudeSession
+from common.session_manager import BaseSessionManager, _AgentSession
 from opencode.runner import OpenCodeRunner, OpenCodeRunConfig
 from opencode.activity_mapper import OpenCodeActivityMapper
 
 
-class OpenCodeSessionManager(ClaudeSessionManager):
+class OpenCodeSessionManager(BaseSessionManager):
     """Owns background `opencode run` runs keyed by the OpenCode session_id."""
 
     _AGENT_LABEL = "opencode"
@@ -39,10 +39,8 @@ class OpenCodeSessionManager(ClaudeSessionManager):
             session_id_hint=session_id_hint,
         )
 
-    def _build_client(self, sess: _ClaudeSession, resume_id: Optional[str]) -> OpenCodeRunner:
+    def _build_client(self, sess: _AgentSession, resume_id: Optional[str]) -> OpenCodeRunner:
         adapter_opts = sess.context.adapter
-        # Záměrně NEnastavujeme AGENTIS_URL — opencode plugin tak neprovádí žádná
-        # volání interního API; aktivitu streamujeme a forwardujeme my sami.
         env: dict[str, str] = {"IS_SANDBOX": "1"}
         config = OpenCodeRunConfig(
             cwd=sess.worktree,
