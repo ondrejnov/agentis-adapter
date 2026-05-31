@@ -215,6 +215,7 @@ class CliAdapterService(GitAdapterService):
             "action": "start_session",
             "task_id": self.context.task_id,
             "session_id": session_id,
+            "snapshot_key": self._sessions.get_snapshot_key(session_id),
         }
 
     def add_message(self, message: str, pod_url: str | None = None) -> dict[str, Any]:
@@ -236,6 +237,7 @@ class CliAdapterService(GitAdapterService):
             "action": "add_message",
             "task_id": self.context.task_id,
             "session_id": session_id,
+            "snapshot_key": self._sessions.get_snapshot_key(session_id),
         }
 
     def abort(self, session_id: str) -> dict[str, Any]:

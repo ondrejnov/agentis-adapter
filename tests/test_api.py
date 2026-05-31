@@ -455,6 +455,9 @@ def test_jsonrpc_happy_path_flow_runs_adapter_without_dry_run():
         def question_reply(self, request_id: str, answers: list[list[str]], pod_url: str) -> dict[str, Any]:
             return {"action": "question_reply", "request_id": request_id, "answers": answers, "pod_url": pod_url}
 
+        def restore_snapshot(self, snapshot_key: str) -> dict[str, str]:
+            return {"action": "undo", "snapshot_key": snapshot_key}
+
     service = AgentJsonRpcService(
         settings=make_settings(),
         adapter_factory=cast(Any, lambda context: FakeAdapter()),
@@ -519,6 +522,19 @@ def test_jsonrpc_happy_path_flow_runs_adapter_without_dry_run():
         "add_message",
     ]
     assert service.session_registry.get_snapshot_key("sess-1") == "snap-feedback"
+
+    undo_response = client.post(
+        "/api",
+        json={
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "undo",
+            "params": {"context": message_payload["run"]["context"]},
+        },
+    )
+    assert undo_response.status_code == 200
+    undo_payload = undo_response.json()["result"]
+    assert undo_payload["adapter"]["steps"] == [{"action": "undo", "snapshot_key": "snap-feedback"}]
 
     question_response = client.post(
         "/api",
@@ -2549,7 +2565,6 @@ def test_opencode_add_message_snapshots_before_prompt(monkeypatch):
     assert captured["client_base_url"] == "http://pod"
     assert captured["client_directory"] == "/srv/worktrees/task-1"
     assert captured["prompt_payload"]["parts"] == [{"type": "text", "text": "Feedback"}]
-
 
 
 

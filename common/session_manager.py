@@ -252,6 +252,10 @@ class BaseSessionManager:
         with self._lock:
             self._sessions.pop(session_id, None)
 
+    def get_snapshot_key(self, session_id: str) -> str | None:
+        with self._lock:
+            return self._sessions.get(session_id).snapshot_key if session_id in self._sessions else None
+
     def _bind_session_id(self, sess: _AgentSession, session_id: str) -> None:
         is_new_session = sess.session_id is None
         with self._lock:

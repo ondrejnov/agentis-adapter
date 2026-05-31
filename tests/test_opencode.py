@@ -452,6 +452,7 @@ def test_context_runtime_kubernetes_enables_kubernetes_mode() -> None:
 def test_start_session_starts_session_manager(monkeypatch) -> None:
     manager = MagicMock(spec=OpenCodeSessionManager)
     manager.start.return_value = "ses_abc"
+    manager.get_snapshot_key.return_value = "snap-start"
     monkeypatch.setattr(OpenCodeAdapterService, "_persist_agentis_session_id", lambda self, session_id: None)
 
     context = make_context()
@@ -463,7 +464,7 @@ def test_start_session_starts_session_manager(monkeypatch) -> None:
 
     result = adapter.start_session(pod_url="local://opencode")
 
-    assert result == {"action": "start_session", "task_id": "task-1", "session_id": "ses_abc"}
+    assert result == {"action": "start_session", "task_id": "task-1", "session_id": "ses_abc", "snapshot_key": "snap-start"}
     kwargs = manager.start.call_args.kwargs
     assert kwargs["worktree"] == "/srv/worktrees/task-1"
     assert kwargs["prompt"] == "Popis ukolu"
@@ -473,6 +474,7 @@ def test_start_session_starts_session_manager(monkeypatch) -> None:
 
 def test_add_message_forwards_to_session_manager() -> None:
     manager = MagicMock(spec=OpenCodeSessionManager)
+    manager.get_snapshot_key.return_value = "snap-send"
     context = make_context(session_id="ses_abc")
     adapter = OpenCodeAdapterService(
         context=context,
@@ -482,7 +484,7 @@ def test_add_message_forwards_to_session_manager() -> None:
 
     result = adapter.add_message("ahoj")
 
-    assert result == {"action": "add_message", "task_id": "task-1", "session_id": "ses_abc"}
+    assert result == {"action": "add_message", "task_id": "task-1", "session_id": "ses_abc", "snapshot_key": "snap-send"}
     manager.send.assert_called_once_with(
         session_id="ses_abc",
         context=context,

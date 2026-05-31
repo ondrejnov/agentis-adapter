@@ -12,6 +12,7 @@ from common.models import (
     GitMergeParams,
     QuestionParams,
     StartParams,
+    UndoParams,
 )
 from claude.adapter import ClaudeCodeAdapterService
 from claude.session_manager import ClaudeSessionManager
@@ -26,6 +27,7 @@ _DISPATCH: dict[str, JsonRpcRoute] = {
     "approve": JsonRpcRoute(ApproveParams, "approve"),
     "git_merge": JsonRpcRoute(GitMergeParams, "git_merge"),
     "abort": JsonRpcRoute(AbortParams, "abort"),
+    "undo": JsonRpcRoute(UndoParams, "undo"),
     "close": JsonRpcRoute(CloseParams, "close"),
 }
 

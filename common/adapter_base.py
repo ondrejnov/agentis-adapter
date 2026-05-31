@@ -183,7 +183,7 @@ class BaseAdapterService:
         answers: list[list[str]],
         pod_url: str | None = None,
     ) -> dict[str, Any] | None:
-        pass
+        pass  # empty function, ne kazdy adapter podporuje predani odpovedi a neni duvod na tom padat s chybou. Potichu se skipne.
 
     def abort(self, session_id: str) -> dict[str, Any]:
         raise NotImplementedError

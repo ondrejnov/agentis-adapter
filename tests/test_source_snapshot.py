@@ -103,6 +103,51 @@ def test_write_changes_diff_records_modified_and_created_files(monkeypatch, tmp_
     assert "previous diff must be ignored" not in diff
 
 
+def test_restore_source_snapshot_uses_rsync_without_delete_excluded(monkeypatch, tmp_path: Path):
+    worktree = tmp_path / "worktree"
+    snapshot = tmp_path / "snapshots" / "snap-1" / "source"
+    worktree.mkdir()
+    snapshot.mkdir(parents=True)
+    changes_diff = worktree / source_snapshot.CHANGES_DIFF_NAME
+    changes_diff.write_text("diff", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(source_snapshot, "SNAPSHOT_ROOT", tmp_path / "snapshots")
+    monkeypatch.setattr(source_snapshot.shutil, "which", lambda command: "/usr/bin/rsync" if command == "rsync" else None)
+
+    def fake_run(args: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(source_snapshot.subprocess, "run", fake_run)
+
+    result = source_snapshot.restore_source_snapshot(worktree, "snap-1")
+
+    assert result.status == "success"
+    assert not changes_diff.exists()
+    assert calls == [
+        [
+            "rsync",
+            "-a",
+            "--delete",
+            "--filter",
+            ":- .gitignore",
+            "--exclude",
+            ".git/",
+            "--exclude",
+            ".changes.diff",
+            "--exclude",
+            "__pycache__/",
+            "--exclude",
+            ".pytest_cache/",
+            "--exclude",
+            ".ruff_cache/",
+            f"{snapshot}/",
+            f"{worktree}/",
+        ]
+    ]
+
+
 def _read_simple_gitignore(source: Path) -> set[str]:
     gitignore = source / ".gitignore"
     if not gitignore.is_file():

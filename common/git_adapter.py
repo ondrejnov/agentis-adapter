@@ -20,6 +20,7 @@ from pathlib import Path
 from common.models import AgentExecutionContextPayload
 from common.adapter_base import BaseAdapterService, log_json
 from common.agentis import AgentisRunLogger
+from common.artifacts.source_snapshot import restore_source_snapshot
 
 
 class GitAdapterService(BaseAdapterService):
@@ -222,6 +223,27 @@ class GitAdapterService(BaseAdapterService):
             "base_branch": self.context.base_branch,
             "working_dir": str(worktree_path),
             "status": status,
+        }
+
+    def restore_snapshot(self, snapshot_key: str) -> dict[str, str | None]:
+        worktree_path = self._workspace_path()
+        result = restore_source_snapshot(worktree_path, snapshot_key)
+        if result.status != "success":
+            raise RuntimeError(result.reason or f"source snapshot restore {result.status}")
+        log_json(
+            "INFO",
+            "Source snapshot restored",
+            task_id=self.context.task_id,
+            run_id=self.context.run_id,
+            snapshot_key=snapshot_key,
+            working_dir=str(worktree_path),
+        )
+        return {
+            "action": "undo",
+            "task_id": self.context.task_id,
+            "run_id": self.context.run_id,
+            "snapshot_key": snapshot_key,
+            "working_dir": str(worktree_path),
         }
 
     def git_merge(self, message: str | None = None) -> dict[str, str | None]:

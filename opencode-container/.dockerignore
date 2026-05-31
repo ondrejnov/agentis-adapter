@@ -1,0 +1,5 @@
+agdoc/.git
+agdoc/.venv
+agdoc/.pytest_cache
+agdoc/.ruff_cache
+agdoc/**/__pycache__

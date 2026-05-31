@@ -18,6 +18,7 @@ from common.models import (
     RunStatePayload,
     StartParams,
     TaskStatus,
+    UndoParams,
 )
 from common.adapter_base import BaseAdapterService
 from common.kubernetes_runtime import KubernetesAdapterService
@@ -369,6 +370,39 @@ class AgentJsonRpcService:
             raise AgentJsonRpcException(500, f"Adapter error: {exc}") from exc
 
         self.session_registry.remove(session_id)
+
+        return {
+            "run": run.safe_dump(),
+            "adapter": {
+                "executed": True,
+                "steps": [step],
+            },
+        }
+
+    def undo(self, params: UndoParams) -> dict[str, Any]:
+        context = params.context
+        session_id = context.session_id
+        if not session_id:
+            raise AgentJsonRpcException(400, "Context must include session_id to undo changes")
+
+        snapshot_key = self.session_registry.get_snapshot_key(session_id)
+        if not snapshot_key:
+            raise AgentJsonRpcException(400, f"No source snapshot is registered for session {session_id}")
+
+        run = RunStatePayload(run_id=context.run_id, context=context)
+        run.opencode_session_id = session_id
+        try:
+            adapter = self._adapter_factory(context)
+            step = self._run_adapter_step(
+                adapter,
+                kind="undo",
+                started_message="Vracím pracovní strom do posledního snapshotu.",
+                success_message="Pracovní strom byl vrácen do posledního snapshotu.",
+                callback=lambda: adapter.restore_snapshot(snapshot_key),
+            )
+        except Exception as exc:
+            run.status = "failed"
+            raise AgentJsonRpcException(500, f"Adapter error: {exc}") from exc
 
         return {
             "run": run.safe_dump(),

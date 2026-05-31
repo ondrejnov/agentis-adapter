@@ -101,6 +101,7 @@ def test_wait_ready_returns_local_url():
 def test_start_session_starts_session_manager_and_persists_session_id(monkeypatch):
     manager = MagicMock(spec=ClaudeSessionManager)
     manager.start.return_value = "ses_abc123"
+    manager.get_snapshot_key.return_value = "snap-start"
     persisted: list[str] = []
 
     monkeypatch.setattr(
@@ -122,6 +123,7 @@ def test_start_session_starts_session_manager_and_persists_session_id(monkeypatc
         "action": "start_session",
         "task_id": "task-1",
         "session_id": "ses_abc123",
+        "snapshot_key": "snap-start",
     }
     manager.start.assert_called_once()
     kwargs = manager.start.call_args.kwargs
@@ -134,6 +136,7 @@ def test_start_session_starts_session_manager_and_persists_session_id(monkeypatc
 
 def test_start_session_falls_back_to_title_when_description_missing(monkeypatch):
     manager = MagicMock(spec=ClaudeSessionManager)
+    manager.get_snapshot_key.return_value = "snap-send"
     manager.start.return_value = "ses_xyz"
     monkeypatch.setattr(ClaudeCodeAdapterService, "_persist_agentis_session_id", lambda self, session_id: None)
 
@@ -162,6 +165,7 @@ def test_add_message_requires_session_id():
 
 def test_add_message_forwards_to_session_manager():
     manager = MagicMock(spec=ClaudeSessionManager)
+    manager.get_snapshot_key.return_value = "snap-send"
     context = make_context(session_id="ses_abc")
     adapter = ClaudeCodeAdapterService(
         context=context,
@@ -175,6 +179,7 @@ def test_add_message_forwards_to_session_manager():
         "action": "add_message",
         "task_id": "task-1",
         "session_id": "ses_abc",
+        "snapshot_key": "snap-send",
     }
     manager.send.assert_called_once_with(
         session_id="ses_abc",

@@ -192,6 +192,12 @@ class AbortParams(BaseModel):
     context: AgentExecutionContextPayload
 
 
+class UndoParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    context: AgentExecutionContextPayload
+
+
 class ProviderSyncUsageParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

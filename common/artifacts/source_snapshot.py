@@ -89,6 +89,29 @@ def write_changes_diff(worktree: str | Path, snapshot_key: str) -> SourceSnapsho
     return SourceSnapshotResult(status="success", **result_base)
 
 
+def restore_source_snapshot(worktree: str | Path, snapshot_key: str) -> SourceSnapshotResult:
+    worktree_path = Path(worktree)
+    snapshot_dir = _snapshot_source_dir(snapshot_key)
+    result_base = {
+        "key": snapshot_key,
+        "worktree": str(worktree_path),
+        "snapshot_dir": str(snapshot_dir),
+    }
+    if not worktree_path.is_dir():
+        return SourceSnapshotResult(status="skipped", reason="missing_worktree", **result_base)
+    if not snapshot_dir.is_dir():
+        return SourceSnapshotResult(status="skipped", reason="missing_snapshot", **result_base)
+    if shutil.which("rsync") is None:
+        return SourceSnapshotResult(status="skipped", reason="missing_rsync", **result_base)
+
+    completed = _rsync_restore_filtered(snapshot_dir, worktree_path)
+    _remove_existing_changes_diff(worktree_path)
+    if completed.returncode != 0:
+        reason = (completed.stderr or completed.stdout or "rsync failed").strip()
+        return SourceSnapshotResult(status="failed", reason=reason, **result_base)
+    return SourceSnapshotResult(status="success", **result_base)
+
+
 def snapshot_sources_best_effort(worktree: str | Path, snapshot_key: str, *, label: str) -> SourceSnapshotResult:
     try:
         result = snapshot_sources(worktree, snapshot_key)
@@ -120,6 +143,21 @@ def write_changes_diff_best_effort(worktree: str | Path, snapshot_key: str, *, l
     return result
 
 
+def restore_source_snapshot_best_effort(worktree: str | Path, snapshot_key: str, *, label: str) -> SourceSnapshotResult:
+    try:
+        result = restore_source_snapshot(worktree, snapshot_key)
+    except Exception as exc:  # noqa: BLE001
+        result = SourceSnapshotResult(
+            status="failed",
+            key=snapshot_key,
+            worktree=str(worktree),
+            snapshot_dir=str(_snapshot_source_dir(snapshot_key)),
+            reason=str(exc),
+        )
+    _log_result(label, result)
+    return result
+
+
 def changes_diff_attachment(result: SourceSnapshotResult) -> dict[str, str] | None:
     if result.status != "success" or not result.diff_path:
         return None
@@ -144,6 +182,14 @@ def _snapshot_current_dir(snapshot_key: str) -> Path:
 
 def _rsync_filtered(source_dir: Path, target_dir: Path) -> subprocess.CompletedProcess[str]:
     args = ["rsync", "-a", "--delete", "--delete-excluded", "--filter", ":- .gitignore"]
+    for pattern in _EXCLUDES:
+        args.extend(["--exclude", pattern])
+    args.extend([f"{source_dir}/", f"{target_dir}/"])
+    return subprocess.run(args, capture_output=True, text=True, check=False)
+
+
+def _rsync_restore_filtered(source_dir: Path, target_dir: Path) -> subprocess.CompletedProcess[str]:
+    args = ["rsync", "-a", "--delete", "--filter", ":- .gitignore"]
     for pattern in _EXCLUDES:
         args.extend(["--exclude", pattern])
     args.extend([f"{source_dir}/", f"{target_dir}/"])
