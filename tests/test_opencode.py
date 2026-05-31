@@ -206,7 +206,38 @@ def test_stream_includes_stderr_in_nonzero_exit_error(monkeypatch) -> None:
     assert events[0] == {"type": "stderr", "line": "boom"}
     assert events[1]["type"] == "error"
     assert events[1]["exit_code"] == 1
-    assert events[1]["message"] == "opencode skončil s kódem 1: boom"
+    assert events[1]["message"].startswith("opencode skončil s kódem 1: boom")
+    assert "stderr (posledních 20 řádků):\nboom" in events[1]["message"]
+
+
+def test_stream_failure_message_prefers_context_over_end_marker(monkeypatch) -> None:
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
+        return _FakeProcess(
+            stdout_lines=["non-json diagnostic\n"],
+            stderr_lines=["real failure\n", "--- End ---\n"],
+            returncode=1,
+        )
+
+    monkeypatch.setattr(
+        "opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+    )
+
+    async def collect_events() -> list[dict[str, Any]]:
+        client = OpenCodeRunner(config=OpenCodeRunConfig(command="/usr/bin/opencode", cwd="/work/project"))
+        return [{"type": event.type, **event.data} async for event in client.stream("tajny prompt")]
+
+    events = asyncio.run(collect_events())
+    error = next(event for event in events if event["type"] == "error")
+
+    assert error["message"].startswith("opencode skončil s kódem 1: real failure")
+    assert "opencode skončil s kódem 1: --- End ---" not in error["message"]
+    assert (
+        "příkaz: /usr/bin/opencode run '<prompt>' --format json --dangerously-skip-permissions"
+        in error["message"]
+    )
+    assert "cwd: /work/project" in error["message"]
+    assert "stdout neparsované řádky (posledních 20):\nnon-json diagnostic" in error["message"]
+    assert "tajny prompt" not in error["message"]
 
 
 def test_normalize_emits_session_start_once_then_part() -> None:

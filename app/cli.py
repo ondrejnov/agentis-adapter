@@ -16,6 +16,7 @@ _ADAPTER_MODULES = {
     "opencode": "opencode.api",
     "claude": "claude.api",
     "claudecode": "claude.api",
+    "slack": "slack.api",
 }
 
 
@@ -56,6 +57,15 @@ def run(argv: Sequence[str] | None = None) -> None:
     settings = get_settings()
     module = importlib.import_module(_ADAPTER_MODULES[args.adapter])
     app = module.create_app()
+
+    # Ingestion adapters (e.g. Slack) drive their own foreground loop instead of
+    # the passive WebSocket transport: they push tasks into Agentis rather than
+    # receiving agent runtime JSON-RPC.
+    run_adapter = getattr(module, "run_adapter", None)
+    if run_adapter is not None:
+        run_adapter(settings=settings, service_container=app.state)
+        return
+
     asyncio.run(
         _run_websocket_transport(
             settings=settings,

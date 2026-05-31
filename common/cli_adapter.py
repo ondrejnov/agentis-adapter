@@ -238,9 +238,6 @@ class CliAdapterService(GitAdapterService):
             "session_id": session_id,
         }
 
-    def question_reply(self, request_id: str, answers: list[list[str]], pod_url: str | None = None) -> dict[str, Any]:
-        raise NotImplementedError
-
     def abort(self, session_id: str) -> dict[str, Any]:
         self._sessions.abort(session_id)
         log_json(

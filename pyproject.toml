@@ -8,6 +8,7 @@ packages = [
     { include = "common" },
     { include = "opencode" },
     { include = "claude" },
+    { include = "slack" },
 ]
 include = [
     { path = "opencode_api.json", format = ["sdist", "wheel"] },
@@ -23,6 +24,7 @@ uvicorn = "^0.34.0"
 pydantic = "^2.10.6"
 requests = "^2.33.1"
 websockets = "^15.0.1"
+slack-bolt = "^1.21.2"
 
 [tool.poetry.group.dev.dependencies]
 httpx = "^0.28.1"

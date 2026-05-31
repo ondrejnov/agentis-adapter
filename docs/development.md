@@ -416,6 +416,39 @@ def create_app() -> FastAPI:
     )
 ```
 
+## Slack ingestion adapter
+
+Slack adapter (`slack/`) je jiny druh adapteru nez `claude`/`opencode`. Neni to
+agenti runtime, ktery prijima JSON-RPC pres pasivni WebSocket, ale **ingestion
+zdroj**: posloucha Slack a kdyz nekdo otaguje bota, vytvori z mention Agentis
+task a spusti run na zvolenem execution adapteru (`SLACK_DEFAULT_ADAPTER`,
+napr. `claude`).
+
+```mermaid
+flowchart LR
+    U[Uzivatel @bot] -- app_mention --> SB[Slack socket mode]
+    SB --> SVC[SlackMentionService]
+    SVC -- task.save + task.start_run --> AG[Agentis]
+    AG -- start(context) --> EX[claude/opencode adapter]
+```
+
+Dusledky a odlisnosti:
+
+- Spousti se stejnym CLI: `agentis-adapter --adapter slack`. Misto WebSocket
+  transportu vsak `app/cli.py` zavola modulovy hook `run_adapter`, ktery nabehne
+  Slack socket-mode listener (blokujici). Ostatni adaptery `run_adapter` nemaji
+  a bezi dal pres pasivni WebSocket.
+- `slack.api.create_app` postavi jen service container a `/health`; `_DISPATCH`
+  je prazdny, protoze Slack adapter zadny inbound Agentis JSON-RPC neprijima.
+- `slack_bolt` se importuje az v `run_adapter`, takze testy i `/health` bezi bez
+  nainstalovaneho Slack SDK.
+- `SlackMentionService` je transport-agnosticky (eventy jsou plain dicty), takze
+  jde unit-testovat bez ziveho Slacku — viz `tests/test_slack.py`.
+- Guardy (`slack/guards.py`) resi Slack retry dedup, rate limit a ignorovani
+  bot/self zprav; `slack/text.py` normalizuje text a sklada Lexical description.
+- Vysledek behu zatim neposilame zpet do Slack vlakna — to by vyzadovalo nest
+  Slack `headers` skrz `AgentExecutionContextPayload` az do runtime adapteru.
+
 ## Na co si dat pozor
 
 - `session_id` musi prijit z CLI streamu rychle, jinak `start` timeoutne a session se abortne.
@@ -444,3 +477,4 @@ def create_app() -> FastAPI:
 | `opencode/*` | OpenCode adapter, runner, session manager a mapper. |
 | `claude/*` | Claude adapter, client, session manager a mapper. |
 | `common/kubernetes_runtime.py` | Kubernetes/OpenCode web runtime a manifest workflow. |
+| `slack/*` | Slack ingestion adapter: socket-mode listener, mention->task service, guards a text helpery. |

@@ -182,8 +182,8 @@ class BaseAdapterService:
         request_id: str,
         answers: list[list[str]],
         pod_url: str | None = None,
-    ) -> dict[str, Any]:
-        raise NotImplementedError
+    ) -> dict[str, Any] | None:
+        pass
 
     def abort(self, session_id: str) -> dict[str, Any]:
         raise NotImplementedError

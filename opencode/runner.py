@@ -115,9 +115,53 @@ class OpenCodeRunner:
 
         kubectl_tail = f"command terminated with exit code {returncode}"
         for line in reversed(lines):
-            if line != kubectl_tail:
+            if line != kubectl_tail and line not in {"--- Start ---", "--- End ---"}:
                 return line
         return lines[-1]
+
+    @staticmethod
+    def _safe_command_display(command: str, args: Sequence[str]) -> str:
+        display_args = [command, *args]
+        if len(display_args) >= 3 and display_args[1] == "run":
+            display_args[2] = "<prompt>"
+        return shlex.join(display_args)
+
+    @classmethod
+    def _failure_message(
+        cls,
+        cfg: OpenCodeRunConfig,
+        args: Sequence[str],
+        *,
+        returncode: int,
+        stderr_lines: list[str],
+        stdout_lines: list[str],
+    ) -> str:
+        message = f"opencode skončil s kódem {returncode}"
+        stderr_summary = cls._failure_stderr_summary(stderr_lines, returncode)
+        if stderr_summary:
+            message = f"{message}: {stderr_summary}"
+
+        details = [f"příkaz: {cls._safe_command_display(cfg.command, args)}"]
+        if cfg.cwd:
+            details.append(f"cwd: {cfg.cwd}")
+        if cfg.kubectl_target is not None:
+            target = cfg.kubectl_target
+            details.append(
+                "kubectl target: "
+                f"namespace={target.namespace}, selector={target.selector}, container={target.container or '-'}"
+            )
+
+        stderr_tail = [line for line in stderr_lines[-20:] if line.strip()]
+        if stderr_tail:
+            details.append("stderr (posledních 20 řádků):\n" + "\n".join(stderr_tail))
+
+        stdout_tail = [line for line in stdout_lines[-20:] if line.strip()]
+        if stdout_tail:
+            details.append("stdout neparsované řádky (posledních 20):\n" + "\n".join(stdout_tail))
+
+        if details:
+            message = f"{message}\n\nDetaily:\n" + "\n".join(details)
+        return message
 
     async def stream(
         self,
@@ -189,6 +233,7 @@ class OpenCodeRunner:
 
         stderr_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
         stderr_lines: List[str] = []
+        stdout_lines: List[str] = []
 
         async def _pump_stderr() -> None:
             assert proc.stderr is not None
@@ -246,6 +291,7 @@ class OpenCodeRunner:
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
+                    stdout_lines.append(line)
                     yield OpenCodeEvent("raw", {"line": line})
                     continue
 
@@ -271,16 +317,20 @@ class OpenCodeRunner:
                 yield OpenCodeEvent("stderr", {"line": line})
 
             if proc.returncode and proc.returncode != 0 and not produced_error:
-                message = f"opencode skončil s kódem {proc.returncode}"
-                stderr_summary = self._failure_stderr_summary(stderr_lines, proc.returncode)
-                if stderr_summary:
-                    message = f"{message}: {stderr_summary}"
+                message = self._failure_message(
+                    cfg,
+                    args,
+                    returncode=proc.returncode,
+                    stderr_lines=stderr_lines,
+                    stdout_lines=stdout_lines,
+                )
                 yield OpenCodeEvent(
                     "error",
                     {
                         "message": message,
                         "exit_code": proc.returncode,
                         "stderr": "\n".join(stderr_lines[-20:]),
+                        "stdout": "\n".join(stdout_lines[-20:]),
                     },
                 )
 
@@ -331,7 +381,8 @@ class OpenCodeRunner:
     def _capture_usage(self, part: Dict[str, Any]) -> None:
         tokens = part.get("tokens")
         if isinstance(tokens, dict):
-            cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+            cache_value = tokens.get("cache")
+            cache: Dict[str, Any] = cache_value if isinstance(cache_value, dict) else {}
             self.last_usage = {
                 "input_tokens": int(tokens.get("input") or 0),
                 "output_tokens": int(tokens.get("output") or 0),
