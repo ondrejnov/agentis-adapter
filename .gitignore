@@ -7,3 +7,4 @@ __pycache__/
 .changes.diff
 opencode-container/registry-secret.yaml
 opencode-container/agdoc/
+.vscode/last-open-files.json

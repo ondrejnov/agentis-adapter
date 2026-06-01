@@ -567,6 +567,34 @@ files = [
 ]
 
 [[package]]
+name = "slack-bolt"
+version = "1.28.0"
+description = "The Bolt Framework for Python"
+optional = false
+python-versions = ">=3.7"
+files = [
+    {file = "slack_bolt-1.28.0-py2.py3-none-any.whl", hash = "sha256:738d1ca5e7c7039b6e18103d29267ced6e18c2517053eff18991fdd593acce5c"},
+    {file = "slack_bolt-1.28.0.tar.gz", hash = "sha256:bfe367d867e8fb157a057248ebd4ac2d7f43acac6d0700fa31381db1e10f3b0f"},
+]
+
+[package.dependencies]
+slack_sdk = ">=3.38.0,<4"
+
+[[package]]
+name = "slack-sdk"
+version = "3.42.0"
+description = "The Slack API Platform SDK for Python"
+optional = false
+python-versions = ">=3.7"
+files = [
+    {file = "slack_sdk-3.42.0-py2.py3-none-any.whl", hash = "sha256:eb39aff97e476e10cc5a8ac29bd2e79a9959e880d9fe0c03b4e8f05b2ac996ff"},
+    {file = "slack_sdk-3.42.0.tar.gz", hash = "sha256:873db9e1f632ac650ffdbf9d8ba825f3e9e7e576a1e4f9604ccb2a15b3727e3d"},
+]
+
+[package.extras]
+optional = ["SQLAlchemy (>=1.4,<3)", "aiodns (>1.0)", "aiohttp (>=3.7.3,<4)", "boto3 (<=2)", "websocket-client (>=1,<2)", "websockets (>=9.1,<16)"]
+
+[[package]]
 name = "starlette"
 version = "0.46.2"
 description = "The little ASGI library that shines."
@@ -724,4 +752,4 @@ files = [
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.13,<3.14"
-content-hash = "31990f746065579b80ae035b58c8b315319d6fc9eb5095aac5b53352f1f0e9ab"
+content-hash = "a4c26be86ad1f81cd88e03859b3cc1c39213405a3bdd253a0ff2fba7bad577f3"

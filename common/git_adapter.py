@@ -88,6 +88,20 @@ class GitAdapterService(BaseAdapterService):
         repository_root = self._run_git(Path(self.context.working_dir), "rev-parse", "--show-toplevel")
         return Path(repository_root)
 
+    def _project_workspace_path(self) -> Path:
+        if not self.context.working_dir:
+            raise RuntimeError("working_dir is required")
+        try:
+            return self._repository_root()
+        except RuntimeError:
+            return Path(self.context.working_dir)
+
+    def _current_branch_or_none(self, workspace_path: Path) -> str | None:
+        try:
+            return self._run_git(workspace_path, "branch", "--show-current") or None
+        except RuntimeError:
+            return None
+
     def _resolve_base_ref(self, repository_root: Path) -> str:
         candidates = [self.context.base_branch]
         if "/" not in self.context.base_branch:
@@ -128,7 +142,7 @@ class GitAdapterService(BaseAdapterService):
 
     def _workspace_path(self) -> Path:
         if self.is_project_scope(self.context):
-            return self._repository_root()
+            return self._project_workspace_path()
         return self._resolved_worktree_path()
 
     # ------------------------------------------------------------------
@@ -136,19 +150,21 @@ class GitAdapterService(BaseAdapterService):
     # ------------------------------------------------------------------
 
     def create_worktree(self) -> dict[str, str | None]:
-        repository_root = self._repository_root()
-        print(f"Repository root: {repository_root}")
         if self.is_project_scope(self.context):
-            current_branch = self._run_git(repository_root, "branch", "--show-current") or None
+            workspace_path = self._project_workspace_path()
+            current_branch = self._current_branch_or_none(workspace_path)
             return {
                 "action": "create_worktree",
                 "task_id": self.context.task_id,
                 "branch": current_branch,
                 "base_branch": self.context.base_branch,
-                "working_dir": str(repository_root),
+                "working_dir": str(workspace_path),
                 "status": "skipped",
                 "reason": "project_scope",
             }
+
+        repository_root = self._repository_root()
+        print(f"Repository root: {repository_root}")
 
         branch_name = self._branch_name_for_context(self.context)
         print(f"Branch name for task: {branch_name}")
@@ -249,9 +265,9 @@ class GitAdapterService(BaseAdapterService):
     def git_merge(self, message: str | None = None) -> dict[str, str | None]:
         """Rebase the task branch and fast-forward it into the project's base branch."""
         del message
-        repository_root = self._repository_root()
         if self.is_project_scope(self.context):
-            current_branch = self._run_git(repository_root, "branch", "--show-current") or None
+            workspace_path = self._project_workspace_path()
+            current_branch = self._current_branch_or_none(workspace_path)
             return {
                 "action": "git_merge",
                 "task_id": self.context.task_id,
@@ -259,8 +275,10 @@ class GitAdapterService(BaseAdapterService):
                 "base_branch": self.context.base_branch,
                 "status": "skipped",
                 "reason": "project_scope",
-                "repository_root": str(repository_root),
+                "repository_root": str(workspace_path),
             }
+
+        repository_root = self._repository_root()
 
         branch_name = self._branch_name_for_context(self.context)
         base_branch = self.context.base_branch
@@ -427,10 +445,10 @@ class GitAdapterService(BaseAdapterService):
         branch_deleted = self._delete_branch(repository_root, branch_name)
         return worktree_removed, branch_deleted
 
-    def close(self) -> dict[str, str | None]:
-        repository_root = self._repository_root()
+    def close(self) -> dict[str, str | bool | None]:
         if self.is_project_scope(self.context):
-            current_branch = self._run_git(repository_root, "branch", "--show-current") or None
+            workspace_path = self._project_workspace_path()
+            current_branch = self._current_branch_or_none(workspace_path)
             return {
                 "action": "close",
                 "task_id": self.context.task_id,
@@ -438,10 +456,12 @@ class GitAdapterService(BaseAdapterService):
                 "base_branch": self.context.base_branch,
                 "status": "skipped",
                 "reason": "project_scope",
-                "repository_root": str(repository_root),
+                "repository_root": str(workspace_path),
                 "worktree_removed": False,
                 "branch_deleted": False,
             }
+
+        repository_root = self._repository_root()
 
         branch_name = self._branch_name_for_context(self.context)
         worktree_path = self._resolved_worktree_path()

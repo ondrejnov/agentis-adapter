@@ -1715,6 +1715,39 @@ def test_project_scope_uses_current_branch_workspace_and_project_manifest(monkey
     assert captured["source_path"] == "/tmp/manifests/opencode-project.yaml"
 
 
+def test_project_scope_allows_working_dir_without_git(tmp_path):
+    service = KubernetesAdapterService(
+        AgentExecutionContextPayload(
+            run_id="run-1",
+            task_id="task-1",
+            title="Implementace nove funkce",
+            project_slug="Agentis Core",
+            working_dir=str(tmp_path),
+            adapter=AdapterOptionsPayload(scope="project"),
+        ),
+        make_settings(manifest_path=Path("/tmp/manifests")),
+    )
+
+    assert service.create_worktree() == {
+        "action": "create_worktree",
+        "task_id": "task-1",
+        "branch": None,
+        "base_branch": "master",
+        "working_dir": str(tmp_path),
+        "status": "skipped",
+        "reason": "project_scope",
+    }
+    assert service.git_merge() == {
+        "action": "git_merge",
+        "task_id": "task-1",
+        "branch": None,
+        "base_branch": "master",
+        "status": "skipped",
+        "reason": "project_scope",
+        "repository_root": str(tmp_path),
+    }
+
+
 def test_project_scope_deploy_reuses_existing_environment(monkeypatch):
     class FakeParser:
         def __init__(self, **_: Any) -> None:
@@ -2565,7 +2598,6 @@ def test_opencode_add_message_snapshots_before_prompt(monkeypatch):
     assert captured["client_base_url"] == "http://pod"
     assert captured["client_directory"] == "/srv/worktrees/task-1"
     assert captured["prompt_payload"]["parts"] == [{"type": "text", "text": "Feedback"}]
-
 
 
 
