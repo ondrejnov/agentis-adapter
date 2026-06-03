@@ -18,14 +18,19 @@ from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 DONE_STATUS = 5
 DEFAULT_LIMIT = 1
 KNOWLEDGE_LABEL_ID = "019e06c8-135d-798f-9747-64e6955708e4"
+CODE_LABEL_NAME = "code"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Export Agentis tasks that are done, assigned to a project, and have no labels."
+        description="Export Agentis tasks that are done, assigned to a project, and labeled as code."
     )
     parser.add_argument("--project", default="Agentis", help="Exact project name to export from. Default: Agentis")
     parser.add_argument("--project-id", help="Project UUID. If set, project lookup by name is skipped.")
+    parser.add_argument(
+        "--code-label", default=CODE_LABEL_NAME, help=f"Exact label name to filter by. Default: {CODE_LABEL_NAME}"
+    )
+    parser.add_argument("--code-label-id", help="Label UUID. If set, label lookup by name is skipped.")
     parser.add_argument("--endpoint", help="Agentis base URL. Defaults to AGENTIS_ENDPOINT/.env settings.")
     parser.add_argument("--token", help="Agentis API token. Defaults to AGENTIS_TOKEN/.env settings.")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help=f"Page size. Default: {DEFAULT_LIMIT}")
@@ -93,6 +98,30 @@ def resolve_project_id(client: AgentisJsonRpcClient, project_name: str, limit: i
     return str(project_id)
 
 
+def resolve_label_id(client: AgentisJsonRpcClient, label_name: str, limit: int) -> str:
+    labels = list(
+        paged_get_list(
+            client,
+            "label.get_list",
+            {"name": label_name},
+            limit=limit,
+            sort={"column": "name", "direction": "asc"},
+        )
+    )
+    exact_matches = [label for label in labels if label.get("name") == label_name]
+
+    if not exact_matches:
+        raise RuntimeError(f"Label {label_name!r} was not found.")
+    if len(exact_matches) > 1:
+        ids = ", ".join(str(label.get("id")) for label in exact_matches)
+        raise RuntimeError(f"Label name {label_name!r} is ambiguous. Use --code-label-id. Matching IDs: {ids}")
+
+    label_id = exact_matches[0].get("id")
+    if not label_id:
+        raise RuntimeError(f"Label {label_name!r} has no id in the API response.")
+    return str(label_id)
+
+
 def build_updated_filter(from_date: str | None) -> dict[str, str] | None:
     if not from_date:
         return None
@@ -109,8 +138,10 @@ def build_updated_filter(from_date: str | None) -> dict[str, str] | None:
     }
 
 
-def fetch_tasks(client: AgentisJsonRpcClient, project_id: str, limit: int, from_date: str | None) -> list[dict[str, Any]]:
-    filter_values: dict[str, Any] = {"project": project_id, "status": DONE_STATUS, "labels": {"empty": True}}
+def fetch_tasks(
+    client: AgentisJsonRpcClient, project_id: str, label_id: str, limit: int, from_date: str | None
+) -> list[dict[str, Any]]:
+    filter_values: dict[str, Any] = {"project": project_id, "status": DONE_STATUS, "labels": {"id": label_id}}
     updated_filter = build_updated_filter(from_date)
     if updated_filter:
         filter_values["updated"] = updated_filter
@@ -192,7 +223,8 @@ def main() -> int:
     try:
         with AgentisJsonRpcClient(endpoint=endpoint, token=token) as client:
             project_id = args.project_id or resolve_project_id(client, args.project, args.limit)
-            tasks = fetch_tasks(client, project_id, args.limit, args.from_date)
+            label_id = args.code_label_id or resolve_label_id(client, args.code_label, args.limit)
+            tasks = fetch_tasks(client, project_id, label_id, args.limit, args.from_date)
 
             for task in tasks:
                 task_id = str(task["id"])

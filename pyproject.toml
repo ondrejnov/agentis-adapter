@@ -16,6 +16,7 @@ include = [
 
 [tool.poetry.scripts]
 agentis-adapter = "app.cli:main"
+agentiscode = "app.agentiscode:main"
 
 [tool.poetry.dependencies]
 python = ">=3.13,<3.14"

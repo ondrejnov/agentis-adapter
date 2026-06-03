@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -62,9 +63,10 @@ def make_context(**overrides: Any) -> AgentExecutionContextPayload:
 class _FakeStdin:
     def __init__(self) -> None:
         self.closed = False
+        self.data = bytearray()
 
-    def write(self, data: bytes) -> None:  # pragma: no cover - prompt goes via argv
-        raise AssertionError("opencode must not write the prompt to stdin")
+    def write(self, data: bytes) -> None:
+        self.data.extend(data)
 
     async def drain(self) -> None:
         return None
@@ -106,10 +108,14 @@ class _FakeProcess:
 
 
 def test_build_args_places_prompt_and_flags() -> None:
-    args = OpenCodeRunConfig(model="openai/gpt-5", agent="build", variant="high").build_args("udelej X")
+    args = OpenCodeRunConfig(model="openai/gpt-5", agent="build", variant="high").build_args(
+        "precti prompt", prompt_file="/tmp/prompt.md"
+    )
     assert args == [
         "run",
-        "udelej X",
+        "precti prompt",
+        "--file",
+        "/tmp/prompt.md",
         "--format",
         "json",
         "--dangerously-skip-permissions",
@@ -123,7 +129,7 @@ def test_build_args_places_prompt_and_flags() -> None:
 
 
 def test_build_args_resume_session() -> None:
-    args = OpenCodeRunConfig(resume_session_id="ses_42").build_args("pokracuj")
+    args = OpenCodeRunConfig(resume_session_id="ses_42").build_args("pokracuj", prompt_file="/tmp/prompt.md")
     assert "--session" in args
     assert args[args.index("--session") + 1] == "ses_42"
 
@@ -136,9 +142,7 @@ def test_stream_wraps_local_opencode_with_local_setup(monkeypatch) -> None:
         captured["cwd"] = kwargs["cwd"]
         return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
 
-    monkeypatch.setattr(
-        "opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec
-    )
+    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
 
     async def collect_events() -> list[dict[str, Any]]:
         client = OpenCodeRunner(config=OpenCodeRunConfig(command="opencode", cwd="/work/project", model="haiku"))
@@ -150,21 +154,48 @@ def test_stream_wraps_local_opencode_with_local_setup(monkeypatch) -> None:
     assert captured["args"][:2] == ("bash", "-c")
     assert ". .agentis/local-setup.sh" in captured["args"][2]
     assert "exec opencode run 'Do X' --format json" in captured["args"][2]
+    assert "--file" not in captured["args"][2]
     assert "--model haiku" in captured["args"][2]
     assert captured["cwd"] == "/work/project"
 
 
+def test_stream_uses_temp_prompt_file_for_long_local_prompt(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(OpenCodeRunner, "_prompt_file_threshold_bytes", staticmethod(lambda: 10))
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
+        captured["args"] = args
+        return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+
+    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    async def collect_events() -> list[dict[str, Any]]:
+        client = OpenCodeRunner(config=OpenCodeRunConfig(command="opencode"))
+        return [{"type": event.type, **event.data} async for event in client.stream("x" * 11)]
+
+    events = asyncio.run(collect_events())
+
+    assert events == []
+    assert (
+        "exec opencode run 'Read the attached prompt file and follow its instructions exactly.'" in captured["args"][2]
+    )
+    prompt_match = re.search(r"--file (/tmp/opencode-prompt-[^ ]+\.md)", captured["args"][2])
+    assert prompt_match is not None
+    assert not Path(prompt_match.group(1)).exists()
+    assert "x" * 11 not in captured["args"][2]
+
+
 def test_stream_passes_config_env_into_kubectl_exec_shell(monkeypatch) -> None:
     captured: dict[str, Any] = {}
+    process = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
 
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
         captured["args"] = args
         captured["env"] = kwargs["env"]
-        return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+        return process
 
-    monkeypatch.setattr(
-        "opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec
-    )
+    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
 
     async def collect_events() -> list[dict[str, Any]]:
         client = OpenCodeRunner(
@@ -187,15 +218,57 @@ def test_stream_passes_config_env_into_kubectl_exec_shell(monkeypatch) -> None:
         "-c",
         "cd /work/project && exec env IS_SANDBOX=1 opencode run Ahoj --format json --dangerously-skip-permissions",
     )
+    assert process.stdin.data == bytearray()
+    assert process.stdin.closed is True
+
+
+def test_stream_uses_pod_temp_prompt_file_for_long_kubectl_prompt(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+    process = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+
+    monkeypatch.setattr(OpenCodeRunner, "_prompt_file_threshold_bytes", staticmethod(lambda: 10))
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
+        captured["args"] = args
+        captured["env"] = kwargs["env"]
+        return process
+
+    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    async def collect_events() -> list[dict[str, Any]]:
+        client = OpenCodeRunner(
+            config=OpenCodeRunConfig(
+                command="opencode",
+                cwd="/work/project",
+                env={"IS_SANDBOX": "1"},
+                kubectl_target=KubectlExecTarget(
+                    namespace="ns", selector="deployment/opencode", kubectl="/usr/bin/kubectl"
+                ),
+            )
+        )
+        return [{"type": event.type, **event.data} async for event in client.stream("x" * 11)]
+
+    events = asyncio.run(collect_events())
+
+    assert events == []
+    assert captured["env"]["IS_SANDBOX"] == "1"
+    assert captured["args"][-2] == "-c"
+    shell = captured["args"][-1]
+    assert shell.startswith("tmp=/tmp/opencode-prompt-")
+    assert 'trap \'rm -f "$tmp"\' EXIT; cat > "$tmp";' in shell
+    assert "cd /work/project && env IS_SANDBOX=1 opencode run" in shell
+    assert "--file /tmp/opencode-prompt-" in shell
+    assert "--format json --dangerously-skip-permissions" in shell
+    assert "x" * 11 not in shell
+    assert process.stdin.data.decode("utf-8") == "x" * 11
+    assert process.stdin.closed is True
 
 
 def test_stream_includes_stderr_in_nonzero_exit_error(monkeypatch) -> None:
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
         return _FakeProcess(stdout_lines=[], stderr_lines=["boom\n"], returncode=1)
 
-    monkeypatch.setattr(
-        "opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec
-    )
+    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
 
     async def collect_events() -> list[dict[str, Any]]:
         client = OpenCodeRunner(config=OpenCodeRunConfig(command="/usr/bin/opencode"))
@@ -218,9 +291,7 @@ def test_stream_failure_message_prefers_context_over_end_marker(monkeypatch) -> 
             returncode=1,
         )
 
-    monkeypatch.setattr(
-        "opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec
-    )
+    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
 
     async def collect_events() -> list[dict[str, Any]]:
         client = OpenCodeRunner(config=OpenCodeRunConfig(command="/usr/bin/opencode", cwd="/work/project"))
@@ -231,10 +302,7 @@ def test_stream_failure_message_prefers_context_over_end_marker(monkeypatch) -> 
 
     assert error["message"].startswith("opencode skončil s kódem 1: real failure")
     assert "opencode skončil s kódem 1: --- End ---" not in error["message"]
-    assert (
-        "příkaz: /usr/bin/opencode run '<prompt>' --format json --dangerously-skip-permissions"
-        in error["message"]
-    )
+    assert "příkaz: /usr/bin/opencode run '<prompt>' --format json --dangerously-skip-permissions" in error["message"]
     assert "cwd: /work/project" in error["message"]
     assert "stdout neparsované řádky (posledních 20):\nnon-json diagnostic" in error["message"]
     assert "tajny prompt" not in error["message"]
@@ -262,6 +330,29 @@ def test_normalize_emits_session_start_once_then_part() -> None:
         }
     )
     assert [e.type for e in second] == ["part"]
+
+
+def test_normalize_tool_execute_before_emits_tool_before() -> None:
+    client = OpenCodeRunner(config=OpenCodeRunConfig(command="opencode"))
+    client.session_id = "ses_1"
+
+    events = client._normalize(
+        {
+            "source": "opencode-tool-stream",
+            "type": "tool.execute.before",
+            "sessionID": "ses_1",
+            "callID": "call_abc",
+            "tool": "bash",
+            "input": {"command": "wc -l example.md", "workdir": "/var/www/agentis"},
+        }
+    )
+
+    assert [e.type for e in events] == ["tool_before"]
+    assert events[0].data == {
+        "callID": "call_abc",
+        "tool": "bash",
+        "input": {"command": "wc -l example.md", "workdir": "/var/www/agentis"},
+    }
 
 
 def test_normalize_error_extracts_nested_message() -> None:
@@ -319,9 +410,7 @@ def test_stream_parses_json_lines(monkeypatch) -> None:
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
         return _FakeProcess(stdout_lines=lines, stderr_lines=[], returncode=0)
 
-    monkeypatch.setattr(
-        "opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec
-    )
+    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
 
     async def collect_events() -> list[OpenCodeEvent]:
         client = OpenCodeRunner(config=OpenCodeRunConfig(command="/usr/bin/opencode"))
@@ -375,6 +464,65 @@ def test_mapper_builds_assistant_message_from_parts() -> None:
     assert assistant["parts"][0]["id"] != "prt_1"
     assert assistant["parts"][0]["messageID"] == assistant["info"]["id"]
     assert assistant["parts"][0]["text"] == "hi there"
+
+
+def test_mapper_tool_before_emits_running_then_completed_updates_in_place() -> None:
+    mapper = OpenCodeActivityMapper(prompt="x")
+    mapper.consume(OpenCodeEvent("session_start", {"session_id": "ses_1"}))
+
+    # step-start fixuje aktuální assistant zprávu, na kterou se běžící tool naváže.
+    step_start = {"id": "prt_s", "messageID": "msg_1", "sessionID": "ses_1", "type": "step-start"}
+    mapper.consume(OpenCodeEvent("part", {"part": step_start}))
+
+    before = {
+        "callID": "call_abc",
+        "tool": "bash",
+        "input": {"command": "wc -l example.md"},
+    }
+    assert mapper.consume(OpenCodeEvent("tool_before", before)) is True
+
+    snapshot = mapper.snapshot()
+    assistant = snapshot[1]
+    tool_parts = [p for p in assistant["parts"] if p["type"] == "tool"]
+    assert len(tool_parts) == 1
+    running = tool_parts[0]
+    assert running["state"]["status"] == "running"
+    assert running["callID"] == "call_abc"
+    assert running["state"]["input"] == {"command": "wc -l example.md"}
+    assert UUID(running["id"]).version == 7
+    running_id = running["id"]
+
+    # Dokončený tool part nese vlastní part id, ale stejné callID — musí
+    # přepsat běžící placeholder, ne přidat druhý.
+    completed = {
+        "id": "prt_tool",
+        "messageID": "msg_1",
+        "sessionID": "ses_1",
+        "type": "tool",
+        "tool": "bash",
+        "callID": "call_abc",
+        "state": {"status": "completed", "input": {"command": "wc -l example.md"}, "output": "101\n"},
+    }
+    mapper.consume(OpenCodeEvent("part", {"part": completed}))
+
+    snapshot = mapper.snapshot()
+    assistant = snapshot[1]
+    tool_parts = [p for p in assistant["parts"] if p["type"] == "tool"]
+    assert len(tool_parts) == 1
+    done = tool_parts[0]
+    assert done["state"]["status"] == "completed"
+    assert done["state"]["output"] == "101\n"
+    # Veřejné part id zůstává stabilní napříč running -> completed.
+    assert done["id"] == running_id
+
+
+def test_mapper_tool_before_without_message_is_ignored() -> None:
+    mapper = OpenCodeActivityMapper(prompt="x")
+    mapper.consume(OpenCodeEvent("session_start", {"session_id": "ses_1"}))
+
+    before = {"callID": "call_abc", "tool": "bash", "input": {}}
+    assert mapper.consume(OpenCodeEvent("tool_before", before)) is False
+    assert len(mapper.snapshot()) == 1  # jen úvodní user zpráva
 
 
 def test_mapper_step_finish_updates_tokens_and_cost() -> None:
@@ -464,7 +612,12 @@ def test_start_session_starts_session_manager(monkeypatch) -> None:
 
     result = adapter.start_session(pod_url="local://opencode")
 
-    assert result == {"action": "start_session", "task_id": "task-1", "session_id": "ses_abc", "snapshot_key": "snap-start"}
+    assert result == {
+        "action": "start_session",
+        "task_id": "task-1",
+        "session_id": "ses_abc",
+        "snapshot_key": "snap-start",
+    }
     kwargs = manager.start.call_args.kwargs
     assert kwargs["worktree"] == "/srv/worktrees/task-1"
     assert kwargs["prompt"] == "Popis ukolu"
@@ -484,7 +637,12 @@ def test_add_message_forwards_to_session_manager() -> None:
 
     result = adapter.add_message("ahoj")
 
-    assert result == {"action": "add_message", "task_id": "task-1", "session_id": "ses_abc", "snapshot_key": "snap-send"}
+    assert result == {
+        "action": "add_message",
+        "task_id": "task-1",
+        "session_id": "ses_abc",
+        "snapshot_key": "snap-send",
+    }
     manager.send.assert_called_once_with(
         session_id="ses_abc",
         context=context,

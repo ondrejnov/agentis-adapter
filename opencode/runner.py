@@ -14,26 +14,34 @@ session-loop logikou jako Claude Code (viz ``ClaudeSessionManager``):
 
   - session_start: {session_id}              (jakmile je znám sessionID)
   - part: {part}                             (libovolný OpenCode message Part)
+  - tool_before: {callID, tool, input}       (tool.execute.before — nástroj začal běžet)
   - error: {message, error}
   - stderr: {line}
   - raw: {event}                             (nerozpoznaný řádek)
 
-Na rozdíl od Claude se prompt nepředává přes stdin, ale jako poziční
-argument příkazu ``opencode run``.
+Dlouhé prompty se kvůli limitům délky argv předávají přes dočasný soubor a
+krátkou poziční zprávu příkazu ``opencode run``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shlex
 import shutil
+import tempfile
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
 
 from common.cli_session import KubectlExecTarget, unbounded_line_reader as _unbounded_line_reader
 from common.local_setup import build_local_setup_shell_command
+
+
+PROMPT_FILE_MESSAGE = "Read the attached prompt file and follow its instructions exactly."
+ARG_MAX_FALLBACK = 2 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -69,8 +77,11 @@ class OpenCodeRunConfig:
     timeout_sec: float = 0.0  # 0 = bez limitu
     kubectl_target: Optional[KubectlExecTarget] = None
 
-    def build_args(self, prompt: str) -> List[str]:
-        args: List[str] = ["run", prompt, "--format", "json"]
+    def build_args(self, message: str, *, prompt_file: Optional[str] = None) -> List[str]:
+        args: List[str] = ["run", message]
+        if prompt_file:
+            args += ["--file", prompt_file]
+        args += ["--format", "json"]
         if self.dangerously_skip_permissions:
             args.append("--dangerously-skip-permissions")
         if self.resume_session_id:
@@ -126,6 +137,14 @@ class OpenCodeRunner:
             display_args[2] = "<prompt>"
         return shlex.join(display_args)
 
+    @staticmethod
+    def _prompt_file_threshold_bytes() -> int:
+        return max(1, ARG_MAX_FALLBACK)
+
+    @classmethod
+    def _should_use_prompt_file(cls, prompt: str) -> bool:
+        return len(prompt.encode("utf-8")) > cls._prompt_file_threshold_bytes()
+
     @classmethod
     def _failure_message(
         cls,
@@ -171,7 +190,10 @@ class OpenCodeRunner:
     ) -> AsyncIterator[OpenCodeEvent]:
         cfg = self.config
         env = {**os.environ, **cfg.env}
-        args = cfg.build_args(prompt)
+        args: List[str]
+        prompt_stdin: Optional[bytes] = None
+        local_prompt_path: Optional[str] = None
+        use_prompt_file = self._should_use_prompt_file(prompt)
 
         if cfg.kubectl_target is not None:
             target = cfg.kubectl_target
@@ -179,13 +201,27 @@ class OpenCodeRunner:
                 yield OpenCodeEvent("error", {"message": f"kubectl nenalezeno v PATH: {target.kubectl}"})
                 return
 
+            if use_prompt_file:
+                pod_prompt_path = f"/tmp/opencode-prompt-{uuid.uuid4().hex}.md"
+                args = cfg.build_args(PROMPT_FILE_MESSAGE, prompt_file=pod_prompt_path)
+            else:
+                pod_prompt_path = None
+                args = cfg.build_args(prompt)
             inner_argv = [cfg.command, *args]
             if cfg.env:
                 env_argv = [f"{key}={value}" for key, value in cfg.env.items()]
                 inner_argv = ["env", *env_argv, *inner_argv]
-            inner = " ".join(shlex.quote(a) for a in inner_argv)
-            if cfg.cwd:
-                inner = f"cd {shlex.quote(cfg.cwd)} && exec {inner}"
+            command = " ".join(shlex.quote(a) for a in inner_argv)
+            if use_prompt_file:
+                if cfg.cwd:
+                    command = f"cd {shlex.quote(cfg.cwd)} && {command}"
+                assert pod_prompt_path is not None
+                inner = f'tmp={shlex.quote(pod_prompt_path)}; trap \'rm -f "$tmp"\' EXIT; cat > "$tmp"; {command}'
+                prompt_stdin = prompt.encode("utf-8")
+            else:
+                inner = f"exec {command}"
+                if cfg.cwd:
+                    inner = f"cd {shlex.quote(cfg.cwd)} && {inner}"
 
             kubectl_argv: List[str] = [target.kubectl, "-n", target.namespace, "exec", "-i", target.selector]
             if target.container:
@@ -205,18 +241,33 @@ class OpenCodeRunner:
                 yield OpenCodeEvent("error", {"message": "bash nenalezeno v PATH pro lokální spuštění opencode"})
                 return
 
+            if use_prompt_file:
+                with tempfile.NamedTemporaryFile(
+                    "w", encoding="utf-8", suffix=".md", prefix="opencode-prompt-", delete=False
+                ) as prompt_file:
+                    prompt_file.write(prompt)
+                    local_prompt_path = prompt_file.name
+                args = cfg.build_args(PROMPT_FILE_MESSAGE, prompt_file=local_prompt_path)
+            else:
+                args = cfg.build_args(prompt)
             local_command = build_local_setup_shell_command([cfg.command, *args])
-            proc = await asyncio.create_subprocess_exec(
-                "bash",
-                "-c",
-                local_command,
-                cwd=cfg.cwd,
-                env=env,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "bash",
+                    "-c",
+                    local_command,
+                    cwd=cfg.cwd,
+                    env=env,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
+                )
+            except BaseException:
+                if local_prompt_path is not None:
+                    with contextlib.suppress(OSError):
+                        os.unlink(local_prompt_path)
+                raise
 
         if on_proc_started is not None:
             try:
@@ -224,9 +275,11 @@ class OpenCodeRunner:
             except Exception:
                 pass
 
-        # Prompt je předán v argv; stdin rovnou zavřeme, ať proces neblokuje.
         assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
         try:
+            if prompt_stdin is not None:
+                proc.stdin.write(prompt_stdin)
+                await proc.stdin.drain()
             proc.stdin.close()
         except Exception:
             pass
@@ -313,6 +366,9 @@ class OpenCodeRunner:
                 if item:
                     stderr_lines.append(item)
                     tail.append(item)
+            if local_prompt_path is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(local_prompt_path)
             for line in tail:
                 yield OpenCodeEvent("stderr", {"line": line})
 
@@ -353,6 +409,23 @@ class OpenCodeRunner:
             message = self._error_message(error) or "OpenCode selhal"
             self.last_error = error if isinstance(error, dict) else {"message": message}
             out.append(OpenCodeEvent("error", {"message": message, "error": error}, raw=event))
+            return out
+
+        if etype == "tool.execute.before":
+            # `tool.execute.before` nemá `part` ani `messageID` — nese jen callID,
+            # název nástroje a vstup. Předáme je dál jako samostatný event, ze
+            # kterého mapper složí běžící (status=running) tool part.
+            out.append(
+                OpenCodeEvent(
+                    "tool_before",
+                    {
+                        "callID": event.get("callID"),
+                        "tool": event.get("tool"),
+                        "input": event.get("input"),
+                    },
+                    raw=event,
+                )
+            )
             return out
 
         part = event.get("part")

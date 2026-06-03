@@ -26,6 +26,10 @@ def _now() -> float:
     return time.time()
 
 
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
 def _uuid7() -> str:
     timestamp_ms = int(time.time() * 1000) & ((1 << 48) - 1)
     rand_a = secrets.randbits(12)
@@ -61,6 +65,9 @@ class OpenCodeActivityMapper:
         self._part_idx: Dict[str, Dict[str, int]] = {}
         # messageID -> {partID -> veřejné UUIDv7 part id v Agentis activity logu}
         self._part_ids: Dict[str, Dict[str, str]] = {}
+        # Poslední messageID z part eventu — `tool.execute.before` vlastní
+        # messageID nenese, takže běžící tool part navážeme na aktuální zprávu.
+        self._last_message_id: str = ""
         self._init_user_message()
 
     # ------------------------------------------------------------------
@@ -73,6 +80,8 @@ class OpenCodeActivityMapper:
     def consume(self, event: OpenCodeEvent) -> bool:
         if event.type == "session_start":
             return self._on_session_start(event.data.get("session_id"))
+        if event.type == "tool_before":
+            return self._on_tool_before(event.data)
         if event.type == "part":
             part = event.data.get("part")
             if isinstance(part, dict):
@@ -159,26 +168,65 @@ class OpenCodeActivityMapper:
         part_id = part.get("id")
         if not isinstance(part_id, str) or not part_id:
             return False
+        self._last_message_id = message_id
 
         msg_index = self._ensure_assistant(message_id)
         stored = dict(part)
         stored.setdefault("sessionID", self.session_id)
         stored["messageID"] = self._message_ids[message_id]
 
+        # Tool party deduplikujeme podle callID, ne podle OpenCode part id —
+        # běžící placeholder z `tool.execute.before` a pozdější dokončený
+        # `tool` part sdílejí callID, ale ne part id, takže by jinak vznikly dva.
+        key = self._dedup_key(part, part_id)
+
         parts = self._messages[msg_index]["parts"]
-        existing = self._part_idx[message_id].get(part_id)
+        existing = self._part_idx[message_id].get(key)
         if existing is None:
             stored["id"] = _uuid7()
-            self._part_ids[message_id][part_id] = stored["id"]
+            self._part_ids[message_id][key] = stored["id"]
             parts.append(stored)
-            self._part_idx[message_id][part_id] = len(parts) - 1
+            self._part_idx[message_id][key] = len(parts) - 1
         else:
-            stored["id"] = self._part_ids[message_id][part_id]
+            stored["id"] = self._part_ids[message_id][key]
             parts[existing] = stored
 
         if part.get("type") == "step-finish":
             self._apply_step_finish(msg_index, part)
         return True
+
+    @staticmethod
+    def _dedup_key(part: Dict[str, Any], part_id: str) -> str:
+        if part.get("type") == "tool":
+            call_id = part.get("callID")
+            if isinstance(call_id, str) and call_id:
+                return f"call:{call_id}"
+        return part_id
+
+    def _on_tool_before(self, data: Dict[str, Any]) -> bool:
+        call_id = data.get("callID")
+        if not isinstance(call_id, str) or not call_id:
+            return False
+        # Bez známé assistant zprávy nemáme kam běžící part připojit.
+        if not self._last_message_id:
+            return False
+
+        tool = data.get("tool")
+        tool_input = data.get("input")
+        part = {
+            "id": f"call:{call_id}",
+            "messageID": self._last_message_id,
+            "sessionID": self.session_id,
+            "type": "tool",
+            "tool": tool if isinstance(tool, str) else "",
+            "callID": call_id,
+            "state": {
+                "status": "running",
+                "input": tool_input if isinstance(tool_input, dict) else {},
+                "time": {"start": _now_ms()},
+            },
+        }
+        return self._on_part(part)
 
     def _apply_step_finish(self, msg_index: int, part: Dict[str, Any]) -> None:
         info = self._messages[msg_index]["info"]
