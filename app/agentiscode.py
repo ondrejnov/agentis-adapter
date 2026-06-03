@@ -13,6 +13,13 @@ Použití::
 Bez ``--json`` jde odpověď agenta na stdout a aktivita (nástroje, reasoning,
 souhrn) na stderr — klasický unixový tvar, kde stdout je výsledek. S ``--json``
 jde na stdout postupně proud JSON řádků (JSON Lines) ve sjednoceném formátu.
+
+Volitelně lze běh napojit na Agentis jako telemetrii — ``--task-id`` k tasku
+založí run a průběžně do něj posílá aktivitu agenta (viz
+:mod:`common.agentis_telemetry`)::
+
+    agentiscode --adapter claude --task-id <TASK_ID> \\
+        --agentis-api https://agentis.example/api --agentis-token TOKEN "udelej X"
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ import sys
 from typing import Any, Dict, Optional, Sequence
 
 from common.agentiscode import AgentConfig, AgentEvent, AgentWrapper, normalize_adapter
+from common.agentis_telemetry import AgentisTelemetry
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +164,23 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=0.0, help="Časový limit běhu v sekundách (0 = bez limitu).")
     parser.add_argument("--json", action="store_true", help="Streamuj sjednocené eventy jako JSON Lines na stdout.")
     parser.add_argument(
+        "--task-id",
+        metavar="TASK_ID",
+        help="Agentis task id — založí k němu run a průběžně do něj posílá aktivitu (telemetrie).",
+    )
+    parser.add_argument(
+        "--agentis-api",
+        metavar="URL",
+        default=os.environ.get("AGENTIS_ENDPOINT"),
+        help="Agentis JSON-RPC endpoint (default: $AGENTIS_ENDPOINT). Nutné s --task-id.",
+    )
+    parser.add_argument(
+        "--agentis-token",
+        metavar="TOKEN",
+        default=os.environ.get("AGENTIS_TOKEN"),
+        help="Agentis auth token (default: $AGENTIS_TOKEN).",
+    )
+    parser.add_argument(
         "prompt",
         nargs="*",
         help="Zadání pro agenta. Když chybí, načte se ze stdin.",
@@ -171,7 +196,12 @@ def _read_prompt(parts: Sequence[str]) -> str:
     return ""
 
 
-async def _run(config: AgentConfig, prompt: str, json_mode: bool) -> int:
+async def _run(
+    config: AgentConfig,
+    prompt: str,
+    json_mode: bool,
+    telemetry: Optional[AgentisTelemetry] = None,
+) -> int:
     wrapper = AgentWrapper(config)
     renderer: Any = JsonRenderer() if json_mode else TextRenderer()
 
@@ -179,6 +209,9 @@ async def _run(config: AgentConfig, prompt: str, json_mode: bool) -> int:
 
     def _on_proc(proc: asyncio.subprocess.Process) -> None:
         proc_holder["proc"] = proc
+
+    if telemetry is not None:
+        telemetry.start()
 
     exit_code = 0
     try:
@@ -188,11 +221,15 @@ async def _run(config: AgentConfig, prompt: str, json_mode: bool) -> int:
             elif event.type == "result" and event.data.get("is_error"):
                 exit_code = 1
             renderer.handle(event)
+            if telemetry is not None:
+                telemetry.handle(event)
     except asyncio.CancelledError:
         _kill(proc_holder.get("proc"))
         raise
     finally:
         renderer.finish()
+        if telemetry is not None:
+            telemetry.finish()
     return exit_code
 
 
@@ -218,21 +255,40 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     if not prompt:
         _parser().error("Chybí prompt (zadej ho jako argument nebo na stdin).")
 
+    cwd = args.cwd or os.getcwd()
     config = AgentConfig(
         adapter=args.adapter,
         model=args.model,
         effort=args.effort,
         agent=args.agent,
-        cwd=args.cwd or os.getcwd(),
+        cwd=cwd,
         resume_session_id=args.resume,
         timeout_sec=args.timeout,
     )
 
+    telemetry: Optional[AgentisTelemetry] = None
+    if args.task_id:
+        if not args.agentis_api:
+            _parser().error("--task-id vyžaduje --agentis-api URL (nebo $AGENTIS_ENDPOINT).")
+        telemetry = AgentisTelemetry(
+            task_id=args.task_id,
+            prompt=prompt,
+            adapter=normalize_adapter(args.adapter),
+            mode=args.agent or "build",
+            cwd=cwd,
+            endpoint=args.agentis_api,
+            token=args.agentis_token,
+            on_error=lambda message: sys.stderr.write(f"[agentiscode] {message}\n"),
+        )
+
     try:
-        return asyncio.run(_run(config, prompt, args.json))
+        return asyncio.run(_run(config, prompt, args.json, telemetry))
     except KeyboardInterrupt:
         sys.stderr.write("\nPřerušeno.\n")
         return 130
+    finally:
+        if telemetry is not None:
+            telemetry.close()
 
 
 def main() -> None:

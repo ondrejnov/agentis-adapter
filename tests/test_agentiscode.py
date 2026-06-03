@@ -232,3 +232,54 @@ def test_cli_requires_prompt(monkeypatch) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     with pytest.raises(SystemExit):
         run(["--adapter", "opencode"])
+
+
+def test_cli_task_id_requires_agentis_api(monkeypatch) -> None:
+    monkeypatch.delenv("AGENTIS_ENDPOINT", raising=False)
+    with pytest.raises(SystemExit):
+        run(["--adapter", "opencode", "--task-id", "task-1", "udelej", "X"])
+
+
+def test_cli_task_id_drives_telemetry(monkeypatch) -> None:
+    lines = [
+        json.dumps({"type": "text", "sessionID": "ses_1",
+                    "part": {"id": "p1", "messageID": "m1", "type": "text", "text": "Hello"}}) + "\n",
+    ]
+    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
+
+    events: dict[str, Any] = {"started": False, "handled": 0, "finished": False, "kwargs": None}
+
+    class FakeTelemetry:
+        def __init__(self, **kwargs: Any) -> None:
+            events["kwargs"] = kwargs
+
+        def start(self) -> str:
+            events["started"] = True
+            return "run-1"
+
+        def handle(self, event: AgentEvent) -> None:
+            events["handled"] += 1
+
+        def finish(self) -> None:
+            events["finished"] = True
+
+        def close(self) -> None:
+            events["closed"] = True
+
+    monkeypatch.setattr("app.agentiscode.AgentisTelemetry", FakeTelemetry)
+
+    exit_code = run([
+        "--adapter", "opencode",
+        "--task-id", "task-1",
+        "--agentis-api", "http://agentis.local/api",
+        "--agentis-token", "secret",
+        "udelej", "X",
+    ])
+
+    assert exit_code == 0
+    assert events["started"] and events["finished"] and events["closed"]
+    assert events["handled"] >= 1
+    assert events["kwargs"]["task_id"] == "task-1"
+    assert events["kwargs"]["endpoint"] == "http://agentis.local/api"
+    assert events["kwargs"]["token"] == "secret"
+    assert events["kwargs"]["adapter"] == "opencode"
