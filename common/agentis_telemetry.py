@@ -176,13 +176,31 @@ class AgentisTelemetry:
                 self._push_activity_log()
 
     def finish(self) -> None:
-        """Dopošle zbylou aktivitu a uzavře run ``idle`` adapter eventem."""
+        """Dopošle zbylou aktivitu a uzavře run.
+
+        Uzavření zrcadlí websocket flow a hlavně **zastaví točící se ikonku**:
+
+          1. ``task.add_agent_comment`` — uloží finální odpověď a shodí
+             ``run.running`` (jinak run zůstane navždy „running“),
+          2. ``{adapter}_run`` ``success``/``failed`` se **stejným event_id** jako
+             úvodní ``started`` — tím se rozpracovaný krok přepne z točícího se
+             spinneru na hotovo,
+          3. ``idle`` ``success``/``failed`` — dotlačí ``adapter_state`` do
+             koncového stavu (``starting`` je pořád „aktivní“) a vyšle
+             ``run.finished``.
+        """
         if self.run_id is None:
             return
         if self._session_bound and self._dirty:
             self._push_activity_log()
+
         status = "failed" if self._is_error else "success"
         message = "agentiscode běh selhal." if self._is_error else "agentiscode běh doběhl."
+
+        self._post_final_comment()
+        # Stejný event_id jako u startu → krok se přepne ze „started“ na výsledek.
+        self._emit_adapter_event(status, message=message)
+        # Koncový stav adapteru + run.finished (kind musí být přesně "idle").
         self._emit_adapter_event(status, kind="idle", message=message)
 
     # ------------------------------------------------------------------
@@ -201,6 +219,28 @@ class AgentisTelemetry:
         self._call("session.store_activity_log", {"session_id": self.session_id, "messages": self._mapper.snapshot()})
         self._dirty = False
 
+    def _post_final_comment(self) -> None:
+        # Shodí run.running (děje se jen tady) a doručí finální odpověď do tasku.
+        body = self._final_text()
+        if not body:
+            return
+        self._call(
+            "task.add_agent_comment",
+            {"run_id": self.run_id, "body": body, "comment_type": "primary"},
+        )
+
+    def _final_text(self) -> str:
+        for entry in reversed(self._mapper.snapshot()):
+            if (entry.get("info") or {}).get("role") != "assistant":
+                continue
+            text = ""
+            for part in entry.get("parts") or []:
+                if isinstance(part, dict) and part.get("type") == "text" and (part.get("text") or "").strip():
+                    text = part["text"].strip()
+            if text:
+                return text
+        return ""
+
     def _emit_adapter_event(
         self,
         status: str,
@@ -210,13 +250,15 @@ class AgentisTelemetry:
         data: Optional[dict[str, Any]] = None,
     ) -> None:
         event_kind = kind or self._kind
+        # Stabilní event_id (bez statusu) → started a success/failed se trefí do
+        # stejného kroku, takže se spinner přepne na hotovo místo dvou karet.
         self._call(
             "run.adapter_event",
             {
                 "run_id": self.run_id,
                 "kind": event_kind,
                 "status": status,
-                "event_id": f"{event_kind}:{self.run_id}:{status}",
+                "event_id": f"{event_kind}:{self.run_id}",
                 "message": message,
                 "data": data or {},
             },

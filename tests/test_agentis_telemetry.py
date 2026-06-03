@@ -81,12 +81,20 @@ def test_telemetry_full_run_creates_run_binds_session_and_pushes_logs() -> None:
     assert methods.index("run.store_session_id") < methods.index("session.store_activity_log")
     assert client.params_for("run.store_session_id") == {"run_id": "run-9", "session_id": "ses_1"}
 
-    # první adapter_event je started, poslední idle/success
-    started = client.calls[1]["params"]
-    assert started["status"] == "started"
-    finish = next(c["params"] for c in reversed(client.calls) if c["method"] == "run.adapter_event")
-    assert finish["status"] == "success"
-    assert finish["kind"] == "idle"
+    adapter_events = [c["params"] for c in client.calls if c["method"] == "run.adapter_event"]
+    started = adapter_events[0]
+    assert started["status"] == "started" and started["kind"] == "claude_run"
+    # started krok se uzavře STEJNÝM event_id → spinner se přepne na hotovo
+    run_step_finish = adapter_events[1]
+    assert run_step_finish["kind"] == "claude_run" and run_step_finish["status"] == "success"
+    assert run_step_finish["event_id"] == started["event_id"]
+    # koncový idle event uzavře adapter_state a vyšle run.finished
+    idle = adapter_events[2]
+    assert idle["kind"] == "idle" and idle["status"] == "success"
+
+    # finální odpověď se uloží jako primary komentář (shodí run.running)
+    comment = client.params_for("task.add_agent_comment")
+    assert comment == {"run_id": "run-9", "body": "Hello", "comment_type": "primary"}
 
     # uložená aktivita nese prompt i text agenta ve správném tvaru
     last_log = [c for c in client.calls if c["method"] == "session.store_activity_log"][-1]["params"]
