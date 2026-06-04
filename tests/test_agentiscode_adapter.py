@@ -9,7 +9,9 @@ import pytest
 from agentiscode.adapter import AgentisCodeAdapterService
 from agentiscode.api import _DISPATCH, create_app
 from agentiscode.session_manager import AgentisCodeSessionManager
+from common.cli_session import KubectlExecTarget
 from common.config import Settings
+from common.kubernetes.runtime import KubernetesRuntime
 from common.models import AdapterOptionsPayload, AgentExecutionContextPayload
 from tests.support import RpcTestClient
 
@@ -66,6 +68,7 @@ def test_session_manager_builds_agentiscode_command_with_telemetry() -> None:
         "4",
         "--agentis-api",
         "http://agentis.local",
+        "--last-message-to-comment",
         "--agentis-token",
         "secret-token",
         "--model",
@@ -86,6 +89,47 @@ def test_context_runtime_can_select_underlying_agentiscode_adapter() -> None:
 
     assert args[args.index("--adapter") + 1] == "claude"
     assert args[-3:] == ["--resume", "ses-1", "Udelej X"]
+
+
+def test_agentiscode_runtime_claude_does_not_enable_kubernetes(monkeypatch) -> None:
+    manager = MagicMock(spec=AgentisCodeSessionManager)
+    manager.start.return_value = "ses_local"
+    monkeypatch.setattr(AgentisCodeAdapterService, "_persist_agentis_session_id", lambda self, session_id: None)
+    context = make_context(adapter=AdapterOptionsPayload(runtime="claude", agent="build"))
+    adapter = AgentisCodeAdapterService(context=context, settings=make_settings(), session_manager=manager)
+
+    deploy_result = adapter.deploy()
+    adapter.start_session()
+
+    assert deploy_result["status"] == "skipped"
+    assert deploy_result["reason"] == "agentiscode_local"
+    assert "kubectl_target" not in manager.start.call_args.kwargs
+
+
+def test_agentiscode_kubernetes_runtime_runs_deploy_and_passes_kubectl_target(monkeypatch) -> None:
+    manager = MagicMock(spec=AgentisCodeSessionManager)
+    manager.start.return_value = "ses_k8s"
+    monkeypatch.setattr(AgentisCodeAdapterService, "_persist_agentis_session_id", lambda self, session_id: None)
+    monkeypatch.setattr(
+        KubernetesRuntime,
+        "deploy",
+        lambda self: {"action": "deploy", "task_id": self.context.task_id, "status": "applied"},
+    )
+    context = make_context(
+        namespace="task-7-demo",
+        adapter=AdapterOptionsPayload(runtime="kubernetes", agent="build"),
+    )
+    adapter = AgentisCodeAdapterService(context=context, settings=make_settings(), session_manager=manager)
+
+    deploy_result = adapter.deploy()
+    adapter.start_session()
+
+    assert deploy_result["status"] == "applied"
+    target = manager.start.call_args.kwargs["kubectl_target"]
+    assert isinstance(target, KubectlExecTarget)
+    assert target.namespace == "task-7-demo"
+    assert target.selector == "deployment/opencode"
+    assert target.container == "opencode"
 
 
 @pytest.fixture()

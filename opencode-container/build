@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGDOC_SOURCE="/var/www/agdoc"
 AGDOC_CONTEXT="${SCRIPT_DIR}/agdoc"
+AGENTIS_ADAPTER_SOURCE="/var/www/agentis-adapter"
+AGENTIS_ADAPTER_CONTEXT="${SCRIPT_DIR}/agentis-adapter"
 
 rm -rf "${AGDOC_CONTEXT}"
 mkdir -p "${AGDOC_CONTEXT}"
@@ -15,6 +17,18 @@ tar \
   --exclude='__pycache__' \
   -C "${AGDOC_SOURCE}" \
   -cf - . | tar -C "${AGDOC_CONTEXT}" -xf -
+
+rm -rf "${AGENTIS_ADAPTER_CONTEXT}"
+mkdir -p "${AGENTIS_ADAPTER_CONTEXT}"
+tar \
+  --exclude='.git' \
+  --exclude='.venv' \
+  --exclude='.pytest_cache' \
+  --exclude='.ruff_cache' \
+  --exclude='__pycache__' \
+  --exclude='opencode-container' \
+  -C "${AGENTIS_ADAPTER_SOURCE}" \
+  -cf - . | tar -C "${AGENTIS_ADAPTER_CONTEXT}" -xf -
 
 docker build -t rg.nl-ams.scw.cloud/reactis/opencode:1.2 "${SCRIPT_DIR}"
 docker push rg.nl-ams.scw.cloud/reactis/opencode:1.2

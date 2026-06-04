@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -10,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
+from common.cli_session import KubectlExecTarget
 from common.config import Settings
 from common.models import AgentExecutionContextPayload, completion_task_status
 
@@ -23,6 +26,7 @@ class _AgentisCodeSession:
     session_id: str | None
     context: AgentExecutionContextPayload
     worktree: str
+    kubectl_target: KubectlExecTarget | None = None
     proc: subprocess.Popen[str] | None = None
     thread: threading.Thread | None = None
     ready_event: threading.Event = field(default_factory=threading.Event)
@@ -37,8 +41,15 @@ class AgentisCodeSessionManager:
         self._sessions: dict[str, _AgentisCodeSession] = {}
         self._lock = threading.Lock()
 
-    def start(self, *, context: AgentExecutionContextPayload, worktree: str, prompt: str) -> str:
-        sess = _AgentisCodeSession(session_id=None, context=context, worktree=worktree)
+    def start(
+        self,
+        *,
+        context: AgentExecutionContextPayload,
+        worktree: str,
+        prompt: str,
+        kubectl_target: KubectlExecTarget | None = None,
+    ) -> str:
+        sess = _AgentisCodeSession(session_id=None, context=context, worktree=worktree, kubectl_target=kubectl_target)
         self._spawn_thread(sess, prompt=prompt, resume_id=None)
         if not sess.ready_event.wait(timeout=_SESSION_START_TIMEOUT_SEC):
             self.abort_session(sess)
@@ -49,8 +60,21 @@ class AgentisCodeSessionManager:
             self._sessions[sess.session_id] = sess
         return sess.session_id
 
-    def send(self, *, session_id: str, context: AgentExecutionContextPayload, worktree: str, prompt: str) -> None:
-        sess = _AgentisCodeSession(session_id=session_id, context=context, worktree=worktree)
+    def send(
+        self,
+        *,
+        session_id: str,
+        context: AgentExecutionContextPayload,
+        worktree: str,
+        prompt: str,
+        kubectl_target: KubectlExecTarget | None = None,
+    ) -> None:
+        sess = _AgentisCodeSession(
+            session_id=session_id,
+            context=context,
+            worktree=worktree,
+            kubectl_target=kubectl_target,
+        )
         with self._lock:
             self._sessions[session_id] = sess
         self._spawn_thread(sess, prompt=prompt, resume_id=session_id)
@@ -71,6 +95,13 @@ class AgentisCodeSessionManager:
     def abort_session(self, sess: _AgentisCodeSession) -> None:
         proc = sess.proc
         if proc is None or proc.poll() is not None:
+            return
+        if sess.kubectl_target is not None:
+            try:
+                proc.kill()
+            except Exception as exc:  # noqa: BLE001
+                sys.stderr.write(f"[agentiscode-session] kill kubectl client failed: {exc}\n")
+            self._remote_pkill_agentiscode(sess.kubectl_target)
             return
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -105,9 +136,13 @@ class AgentisCodeSessionManager:
 
     def _run_process(self, sess: _AgentisCodeSession, prompt: str, resume_id: str | None) -> None:
         args = self._build_args(sess.context, sess.worktree, prompt, resume_id)
+        cwd = sess.worktree
+        if sess.kubectl_target is not None:
+            args = self._build_kubectl_args(sess.kubectl_target, sess.worktree, args)
+            cwd = None
         proc = subprocess.Popen(
             args,
-            cwd=sess.worktree,
+            cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -148,6 +183,35 @@ class AgentisCodeSessionManager:
         except json.JSONDecodeError:
             return None
         return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _build_kubectl_args(target: KubectlExecTarget, worktree: str, args: list[str]) -> list[str]:
+        if shutil.which(target.kubectl) is None and not os.path.isabs(target.kubectl):
+            raise RuntimeError(f"kubectl CLI is not available on PATH: {target.kubectl}")
+        inner = " ".join(shlex.quote(arg) for arg in args)
+        if worktree:
+            inner = f"cd {shlex.quote(worktree)} && exec {inner}"
+        kubectl_args = [target.kubectl, "-n", target.namespace, "exec", "-i", target.selector]
+        if target.container:
+            kubectl_args.extend(["-c", target.container])
+        kubectl_args.extend(["--", "sh", "-c", inner])
+        return kubectl_args
+
+    @staticmethod
+    def _remote_pkill_agentiscode(target: KubectlExecTarget) -> None:
+        if shutil.which(target.kubectl) is None and not os.path.isabs(target.kubectl):
+            sys.stderr.write(f"[agentiscode-session] remote pkill skipped: kubectl not on PATH ({target.kubectl})\n")
+            return
+        args = [target.kubectl, "-n", target.namespace, "exec", target.selector]
+        if target.container:
+            args.extend(["-c", target.container])
+        args.extend(["--", "pkill", "-KILL", "-f", "agentiscode"])
+        try:
+            subprocess.run(args, capture_output=True, text=True, timeout=15.0, check=False)
+        except subprocess.TimeoutExpired:
+            sys.stderr.write("[agentiscode-session] remote pkill timed out\n")
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"[agentiscode-session] remote pkill failed: {exc}\n")
 
     def _build_args(
         self,

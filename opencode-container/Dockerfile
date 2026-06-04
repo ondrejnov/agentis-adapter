@@ -77,19 +77,14 @@ RUN npm install -g agent-browser
 RUN agent-browser install --with-deps
 RUN npx playwright install --with-deps chrome
 
-# RUN git clone https://github.com/ondrejnov/GitNexus.git
-# RUN cd GitNexus/gitnexus && npm install && npm run build
-# RUN ln -s /GitNexus/gitnexus/dist/cli/index.js /usr/local/bin/gitnexus
-# RUN chmod 777 /usr/local/bin/gitnexus
-
-#RUN pip install code-review-graph[all]
-
 RUN git clone https://github.com/ondrejnov/code-review-graph.git
 RUN pip install -e ./code-review-graph[communities,embeddings]
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
 COPY agdoc /opt/agdoc
 RUN pip install /opt/agdoc
+COPY agentis-adapter /opt/agentis-adapter
+RUN pip install /opt/agentis-adapter
 RUN python -c "from fastembed import LateInteractionTextEmbedding, SparseTextEmbedding; list(SparseTextEmbedding(model_name='Qdrant/bm25').embed(['agdoc cache probe'])); list(LateInteractionTextEmbedding(model_name='answerdotai/answerai-colbert-small-v1').embed(['agdoc cache probe']))" \
     && HF_HUB_OFFLINE=1 python -c "from fastembed import LateInteractionTextEmbedding, SparseTextEmbedding; list(SparseTextEmbedding(model_name='Qdrant/bm25', local_files_only=True).embed(['agdoc cache probe'])); list(LateInteractionTextEmbedding(model_name='answerdotai/answerai-colbert-small-v1', local_files_only=True).embed(['agdoc cache probe']))" \
     && chmod -R a+rX /opt/fastembed_cache /opt/huggingface_cache

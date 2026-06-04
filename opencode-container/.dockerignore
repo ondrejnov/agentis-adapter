@@ -3,3 +3,8 @@ agdoc/.venv
 agdoc/.pytest_cache
 agdoc/.ruff_cache
 agdoc/**/__pycache__
+agentis-adapter/.git
+agentis-adapter/.venv
+agentis-adapter/.pytest_cache
+agentis-adapter/.ruff_cache
+agentis-adapter/**/__pycache__

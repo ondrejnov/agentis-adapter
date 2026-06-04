@@ -5,6 +5,9 @@ __pycache__/
 .env
 .screenshots
 .changes.diff
+dist
 opencode-container/registry-secret.yaml
 opencode-container/agdoc/
+opencode-container/agentis-adapter/
+
 .vscode/last-open-files.json
