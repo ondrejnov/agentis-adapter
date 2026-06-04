@@ -177,7 +177,12 @@ def _parser() -> argparse.ArgumentParser:
         "--task-status",
         type=int,
         metavar="STATUS_ID",
-        help="Stav tasku nastavený při finálním task.add_agent_comment.",
+        help="Stav tasku nastavený při finálním task.add_agent_comment (jen s --last-message-to-comment).",
+    )
+    parser.add_argument(
+        "--last-message-to-comment",
+        action="store_true",
+        help="Po skončení běhu pošli poslední odpověď agenta jako primary komentář do Agentisu.",
     )
     parser.add_argument(
         "--agentis-api",
@@ -295,6 +300,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             cwd=cwd,
             run_id=args.run_id,
             task_status=args.task_status,
+            last_message_to_comment=args.last_message_to_comment,
             endpoint=args.agentis_api,
             token=args.agentis_token,
             on_error=_telemetry_error,

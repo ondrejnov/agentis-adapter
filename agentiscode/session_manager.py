@@ -176,6 +176,7 @@ class AgentisCodeSessionManager:
             str(completion_task_status(context)),
             "--agentis-api",
             self.settings.agentis_endpoint,
+            "--last-message-to-comment",
         ]
         if self.settings.agentis_token:
             args.extend(["--agentis-token", self.settings.agentis_token])

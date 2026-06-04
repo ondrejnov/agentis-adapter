@@ -94,6 +94,7 @@ class AgentisTelemetry:
         cwd: Optional[str] = None,
         run_id: Optional[str] = None,
         task_status: Optional[int] = None,
+        last_message_to_comment: bool = False,
         endpoint: Optional[str] = None,
         token: Optional[str] = None,
         timeout: float = 10.0,
@@ -109,6 +110,7 @@ class AgentisTelemetry:
         self.timeout = timeout
         self.run_id = run_id.strip() if isinstance(run_id, str) and run_id.strip() else None
         self.task_status = task_status
+        self.last_message_to_comment = last_message_to_comment
         self._on_error = on_error or (lambda message: None)
 
         self._client = client
@@ -184,8 +186,7 @@ class AgentisTelemetry:
 
         Uzavření zrcadlí websocket flow a hlavně **zastaví točící se ikonku**:
 
-          1. ``task.add_agent_comment`` — uloží finální odpověď a shodí
-             ``run.running`` (jinak run zůstane navždy „running“),
+          1. volitelně ``task.add_agent_comment`` — uloží finální odpověď do tasku,
           2. ``{adapter}_run`` ``success``/``failed`` se **stejným event_id** jako
              úvodní ``started`` — tím se rozpracovaný krok přepne z točícího se
              spinneru na hotovo,
@@ -201,7 +202,8 @@ class AgentisTelemetry:
         status = "failed" if self._is_error else "success"
         message = "agentiscode běh selhal." if self._is_error else "agentiscode běh doběhl."
 
-        self._post_final_comment()
+        if self.last_message_to_comment:
+            self._post_final_comment()
         # Stejný event_id jako u startu → krok se přepne ze „started“ na výsledek.
         self._emit_adapter_event(status, message=message)
         # Koncový stav adapteru + run.finished (kind musí být přesně "idle").
@@ -224,7 +226,7 @@ class AgentisTelemetry:
         self._dirty = False
 
     def _post_final_comment(self) -> None:
-        # Shodí run.running (děje se jen tady) a doručí finální odpověď do tasku.
+        # Doručí finální odpověď do tasku jen na explicitní požadavek CLI.
         body = self._final_text()
         if not body:
             return

@@ -110,13 +110,27 @@ def test_opencode_translator_emits_text_deltas_and_dedups_tools() -> None:
         OpenCodeEvent("tool_before", {"callID": "c1", "tool": "bash", "input": {"command": "ls"}}),
         OpenCodeEvent(
             "part",
-            {"part": {"id": "p2", "type": "tool", "callID": "c1", "tool": "bash",
-                      "state": {"status": "running", "input": {"command": "ls"}}}},
+            {
+                "part": {
+                    "id": "p2",
+                    "type": "tool",
+                    "callID": "c1",
+                    "tool": "bash",
+                    "state": {"status": "running", "input": {"command": "ls"}},
+                }
+            },
         ),
         OpenCodeEvent(
             "part",
-            {"part": {"id": "p2", "type": "tool", "callID": "c1", "tool": "bash",
-                      "state": {"status": "completed", "input": {"command": "ls"}, "output": "file.py"}}},
+            {
+                "part": {
+                    "id": "p2",
+                    "type": "tool",
+                    "callID": "c1",
+                    "tool": "bash",
+                    "state": {"status": "completed", "input": {"command": "ls"}, "output": "file.py"},
+                }
+            },
         ),
     ]:
         events.extend(translate(native))
@@ -151,8 +165,13 @@ def test_claude_translator_maps_tool_use_and_result() -> None:
     types = [e.type for e in events]
     assert types == ["session", "text", "tool", "tool", "result"]
     assert events[0].data["provider"] == "anthropic"
-    assert events[2].data == {"id": "t1", "name": "Read", "status": "running",
-                              "input": {"file_path": "/w/a.py"}, "title": "/w/a.py"}
+    assert events[2].data == {
+        "id": "t1",
+        "name": "Read",
+        "status": "running",
+        "input": {"file_path": "/w/a.py"},
+        "title": "/w/a.py",
+    }
     assert events[3].data == {"id": "t1", "status": "completed", "output": "data"}
     assert events[4].data["usage"] == {"input_tokens": 3}
 
@@ -164,11 +183,26 @@ def test_claude_translator_maps_tool_use_and_result() -> None:
 
 def test_wrapper_streams_opencode_and_synthesizes_result(monkeypatch) -> None:
     lines = [
-        json.dumps({"type": "text", "sessionID": "ses_9",
-                    "part": {"id": "p1", "messageID": "m1", "type": "text", "text": "Done"}}) + "\n",
-        json.dumps({"type": "step_finish", "sessionID": "ses_9",
-                    "part": {"type": "step-finish", "tokens": {"input": 10, "output": 5,
-                                                               "cache": {"read": 0, "write": 0}}, "cost": 0.03}}) + "\n",
+        json.dumps(
+            {
+                "type": "text",
+                "sessionID": "ses_9",
+                "part": {"id": "p1", "messageID": "m1", "type": "text", "text": "Done"},
+            }
+        )
+        + "\n",
+        json.dumps(
+            {
+                "type": "step_finish",
+                "sessionID": "ses_9",
+                "part": {
+                    "type": "step-finish",
+                    "tokens": {"input": 10, "output": 5, "cache": {"read": 0, "write": 0}},
+                    "cost": 0.03,
+                },
+            }
+        )
+        + "\n",
     ]
     monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
 
@@ -189,10 +223,18 @@ def test_wrapper_streams_opencode_and_synthesizes_result(monkeypatch) -> None:
 def test_wrapper_streams_claude_with_native_result(monkeypatch) -> None:
     lines = [
         json.dumps({"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-x", "cwd": "/w"}) + "\n",
-        json.dumps({"type": "assistant", "session_id": "s1",
-                    "message": {"content": [{"type": "text", "text": "Hi"}]}}) + "\n",
-        json.dumps({"type": "result", "session_id": "s1",
-                    "usage": {"input_tokens": 3, "output_tokens": 2}, "total_cost_usd": 0.01, "result": "ok"}) + "\n",
+        json.dumps({"type": "assistant", "session_id": "s1", "message": {"content": [{"type": "text", "text": "Hi"}]}})
+        + "\n",
+        json.dumps(
+            {
+                "type": "result",
+                "session_id": "s1",
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+                "total_cost_usd": 0.01,
+                "result": "ok",
+            }
+        )
+        + "\n",
     ]
     monkeypatch.setattr("claude.client.asyncio.create_subprocess_exec", _fake_subprocess(lines))
 
@@ -213,8 +255,14 @@ def test_wrapper_streams_claude_with_native_result(monkeypatch) -> None:
 
 def test_cli_json_mode_emits_json_lines(monkeypatch, capsys) -> None:
     lines = [
-        json.dumps({"type": "text", "sessionID": "ses_1",
-                    "part": {"id": "p1", "messageID": "m1", "type": "text", "text": "Hello"}}) + "\n",
+        json.dumps(
+            {
+                "type": "text",
+                "sessionID": "ses_1",
+                "part": {"id": "p1", "messageID": "m1", "type": "text", "text": "Hello"},
+            }
+        )
+        + "\n",
     ]
     monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
 
@@ -242,8 +290,14 @@ def test_cli_task_id_requires_agentis_api(monkeypatch) -> None:
 
 def test_cli_task_id_drives_telemetry(monkeypatch) -> None:
     lines = [
-        json.dumps({"type": "text", "sessionID": "ses_1",
-                    "part": {"id": "p1", "messageID": "m1", "type": "text", "text": "Hello"}}) + "\n",
+        json.dumps(
+            {
+                "type": "text",
+                "sessionID": "ses_1",
+                "part": {"id": "p1", "messageID": "m1", "type": "text", "text": "Hello"},
+            }
+        )
+        + "\n",
     ]
     monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
 
@@ -268,13 +322,20 @@ def test_cli_task_id_drives_telemetry(monkeypatch) -> None:
 
     monkeypatch.setattr("app.agentiscode.AgentisTelemetry", FakeTelemetry)
 
-    exit_code = run([
-        "--adapter", "opencode",
-        "--task-id", "task-1",
-        "--agentis-api", "http://agentis.local/api",
-        "--agentis-token", "secret",
-        "udelej", "X",
-    ])
+    exit_code = run(
+        [
+            "--adapter",
+            "opencode",
+            "--task-id",
+            "task-1",
+            "--agentis-api",
+            "http://agentis.local/api",
+            "--agentis-token",
+            "secret",
+            "udelej",
+            "X",
+        ]
+    )
 
     assert exit_code == 0
     assert events["started"] and events["finished"] and events["closed"]
@@ -283,3 +344,55 @@ def test_cli_task_id_drives_telemetry(monkeypatch) -> None:
     assert events["kwargs"]["endpoint"] == "http://agentis.local/api"
     assert events["kwargs"]["token"] == "secret"
     assert events["kwargs"]["adapter"] == "opencode"
+    assert events["kwargs"]["last_message_to_comment"] is False
+
+
+def test_cli_last_message_to_comment_enables_final_comment(monkeypatch) -> None:
+    lines = [
+        json.dumps(
+            {
+                "type": "text",
+                "sessionID": "ses_1",
+                "part": {"id": "p1", "messageID": "m1", "type": "text", "text": "Hello"},
+            }
+        )
+        + "\n",
+    ]
+    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
+
+    events: dict[str, Any] = {"kwargs": None}
+
+    class FakeTelemetry:
+        def __init__(self, **kwargs: Any) -> None:
+            events["kwargs"] = kwargs
+
+        def start(self) -> str:
+            return "run-1"
+
+        def handle(self, event: AgentEvent) -> None:
+            return None
+
+        def finish(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("app.agentiscode.AgentisTelemetry", FakeTelemetry)
+
+    exit_code = run(
+        [
+            "--adapter",
+            "opencode",
+            "--task-id",
+            "task-1",
+            "--agentis-api",
+            "http://agentis.local/api",
+            "--last-message-to-comment",
+            "udelej",
+            "X",
+        ]
+    )
+
+    assert exit_code == 0
+    assert events["kwargs"]["last_message_to_comment"] is True

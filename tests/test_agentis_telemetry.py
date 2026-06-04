@@ -98,9 +98,8 @@ def test_telemetry_full_run_creates_run_binds_session_and_pushes_logs() -> None:
     idle = adapter_events[2]
     assert idle["kind"] == "idle" and idle["status"] == "success"
 
-    # finální odpověď se uloží jako primary komentář (shodí run.running)
-    comment = client.params_for("task.add_agent_comment")
-    assert comment == {"run_id": "run-9", "body": "Hello", "comment_type": "primary"}
+    # finální odpověď se bez explicitního opt-in neposílá jako task komentář
+    assert "task.add_agent_comment" not in methods
 
     # uložená aktivita nese prompt i text agenta ve správném tvaru
     last_log = [c for c in client.calls if c["method"] == "session.store_activity_log"][-1]["params"]
@@ -130,6 +129,7 @@ def test_telemetry_final_comment_can_set_task_status() -> None:
         adapter="claude",
         run_id="run-existing",
         task_status=4,
+        last_message_to_comment=True,
         client=client,
     )
 
