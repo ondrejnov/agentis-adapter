@@ -256,10 +256,9 @@ class AgentisCodeSessionManager:
         return args
 
     def _underlying_adapter(self, context: AgentExecutionContextPayload) -> str:
-        runtime = context.adapter.runtime.strip().lower() if context.adapter and context.adapter.runtime else ""
-        if runtime in _UNDERLYING_ADAPTERS:
-            return runtime
-        return self.settings.agentiscode_adapter
+        if context.adapter and context.adapter.model and "claude" in context.adapter.model:
+            return "claude"
+        return "opencode"
 
 
 __all__ = ["AgentisCodeSessionManager"]
