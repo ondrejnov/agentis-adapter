@@ -41,7 +41,9 @@ def _stream() -> list[AgentEvent]:
         AgentEvent("text", {"text": "Hello"}),
         AgentEvent("tool", {"id": "t1", "name": "Read", "status": "running", "input": {"file_path": "/w/a.py"}}),
         AgentEvent("tool", {"id": "t1", "status": "completed", "output": "data"}),
-        AgentEvent("result", {"session_id": "ses_1", "usage": {"input_tokens": 3}, "cost_usd": 0.02, "is_error": False}),
+        AgentEvent(
+            "result", {"session_id": "ses_1", "usage": {"input_tokens": 3}, "cost_usd": 0.02, "is_error": False}
+        ),
     ]
 
 
@@ -52,7 +54,11 @@ def test_unified_to_native_maps_event_types() -> None:
     running = _unified_to_native(AgentEvent("tool", {"id": "t", "name": "Read", "status": "running"}))
     assert running.type == "tool_use" and running.data["id"] == "t"
     completed = _unified_to_native(AgentEvent("tool", {"id": "t", "status": "completed", "output": "ok"}))
-    assert completed.type == "tool_result" and completed.data == {"tool_use_id": "t", "content": "ok", "is_error": False}
+    assert completed.type == "tool_result" and completed.data == {
+        "tool_use_id": "t",
+        "content": "ok",
+        "is_error": False,
+    }
     errored = _unified_to_native(AgentEvent("tool", {"id": "t", "status": "error", "error": "bad"}))
     assert errored.data == {"tool_use_id": "t", "content": "bad", "is_error": True}
     assert _unified_to_native(AgentEvent("result", {"is_error": False})).type == "result"
@@ -103,6 +109,43 @@ def test_telemetry_full_run_creates_run_binds_session_and_pushes_logs() -> None:
     assert roles[0] == "user" and "assistant" in roles
 
 
+def test_telemetry_uses_existing_run_id_without_starting_new_run() -> None:
+    client = FakeClient()
+    telemetry = AgentisTelemetry(
+        task_id="task-1", prompt="udelej X", adapter="claude", run_id="run-existing", client=client
+    )
+
+    run_id = telemetry.start()
+
+    assert run_id == "run-existing"
+    assert client.methods() == ["run.adapter_event"]
+    assert client.calls[0]["params"]["run_id"] == "run-existing"
+
+
+def test_telemetry_final_comment_can_set_task_status() -> None:
+    client = FakeClient()
+    telemetry = AgentisTelemetry(
+        task_id="task-1",
+        prompt="udelej X",
+        adapter="claude",
+        run_id="run-existing",
+        task_status=4,
+        client=client,
+    )
+
+    telemetry.start()
+    for event in _stream():
+        telemetry.handle(event)
+    telemetry.finish()
+
+    assert client.params_for("task.add_agent_comment") == {
+        "run_id": "run-existing",
+        "body": "Hello",
+        "comment_type": "primary",
+        "status": 4,
+    }
+
+
 def test_telemetry_marks_failed_run_on_error_result() -> None:
     client = FakeClient(results={"task.start_run": {"item": {"id": "run-err"}}})
     telemetry = AgentisTelemetry(task_id="task-1", prompt="x", adapter="opencode", client=client)
@@ -118,9 +161,7 @@ def test_telemetry_marks_failed_run_on_error_result() -> None:
 def test_telemetry_disables_itself_when_run_id_missing() -> None:
     client = FakeClient(results={"task.start_run": {"item": {}}})
     errors: list[str] = []
-    telemetry = AgentisTelemetry(
-        task_id="task-1", prompt="x", adapter="claude", client=client, on_error=errors.append
-    )
+    telemetry = AgentisTelemetry(task_id="task-1", prompt="x", adapter="claude", client=client, on_error=errors.append)
 
     assert telemetry.start() is None
     assert telemetry.active is False
@@ -138,9 +179,7 @@ def test_telemetry_swallows_rpc_errors() -> None:
         fail_methods={"session.store_activity_log"},
     )
     errors: list[str] = []
-    telemetry = AgentisTelemetry(
-        task_id="task-1", prompt="x", adapter="claude", client=client, on_error=errors.append
-    )
+    telemetry = AgentisTelemetry(task_id="task-1", prompt="x", adapter="claude", client=client, on_error=errors.append)
     telemetry.start()
     # nesmí vyhodit výjimku, jen ohlásit přes on_error
     for event in _stream():

@@ -169,6 +169,17 @@ def _parser() -> argparse.ArgumentParser:
         help="Agentis task id — založí k němu run a průběžně do něj posílá aktivitu (telemetrie).",
     )
     parser.add_argument(
+        "--run-id",
+        metavar="RUN_ID",
+        help="Existující Agentis run id — telemetry se zapíše do něj místo založení nového runu.",
+    )
+    parser.add_argument(
+        "--task-status",
+        type=int,
+        metavar="STATUS_ID",
+        help="Stav tasku nastavený při finálním task.add_agent_comment.",
+    )
+    parser.add_argument(
         "--agentis-api",
         metavar="URL",
         default=os.environ.get("AGENTIS_ENDPOINT"),
@@ -267,18 +278,26 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     telemetry: Optional[AgentisTelemetry] = None
-    if args.task_id:
+    if args.task_id or args.run_id:
+        if args.run_id and not args.task_id:
+            _parser().error("--run-id vyžaduje --task-id kvůli identifikaci tasku.")
         if not args.agentis_api:
-            _parser().error("--task-id vyžaduje --agentis-api URL (nebo $AGENTIS_ENDPOINT).")
+            _parser().error("--task-id/--run-id vyžaduje --agentis-api URL (nebo $AGENTIS_ENDPOINT).")
+
+        def _telemetry_error(message: str) -> None:
+            sys.stderr.write(f"[agentiscode] {message}\n")
+
         telemetry = AgentisTelemetry(
             task_id=args.task_id,
             prompt=prompt,
             adapter=normalize_adapter(args.adapter),
             mode=args.agent or "build",
             cwd=cwd,
+            run_id=args.run_id,
+            task_status=args.task_status,
             endpoint=args.agentis_api,
             token=args.agentis_token,
-            on_error=lambda message: sys.stderr.write(f"[agentiscode] {message}\n"),
+            on_error=_telemetry_error,
         )
 
     try:

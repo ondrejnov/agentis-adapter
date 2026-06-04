@@ -6,6 +6,7 @@ authors = ["GitHub Copilot <copilot@github.com>"]
 packages = [
     { include = "app" },
     { include = "common" },
+    { include = "agentiscode" },
     { include = "opencode" },
     { include = "claude" },
     { include = "slack" },

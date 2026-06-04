@@ -77,6 +77,8 @@ class Settings:
     websocket_reconnect_initial_delay: float = 1.0
     websocket_reconnect_max_delay: float = 30.0
     websocket_reconnect_max_attempts: int = 0
+    agentiscode_command: str = "agentiscode"
+    agentiscode_adapter: str = "opencode"
 
     def validate_passive_websocket(self) -> None:
         if not self.agentis_ws_endpoint:
@@ -142,6 +144,8 @@ def _build_settings() -> Settings:
         websocket_reconnect_initial_delay=float(_get_env(env, "AGENTIS_WS_RECONNECT_INITIAL_DELAY", "1") or "1"),
         websocket_reconnect_max_delay=float(_get_env(env, "AGENTIS_WS_RECONNECT_MAX_DELAY", "30") or "30"),
         websocket_reconnect_max_attempts=int(_get_env(env, "AGENTIS_WS_RECONNECT_MAX_ATTEMPTS", "0") or "0"),
+        agentiscode_command=_get_env(env, "AGENTISCODE_COMMAND", "agentiscode") or "agentiscode",
+        agentiscode_adapter=(_get_env(env, "AGENTISCODE_ADAPTER", "opencode") or "opencode").strip().lower(),
     )
 
 

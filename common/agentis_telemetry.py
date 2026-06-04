@@ -92,6 +92,8 @@ class AgentisTelemetry:
         adapter: str,
         mode: str = "build",
         cwd: Optional[str] = None,
+        run_id: Optional[str] = None,
+        task_status: Optional[int] = None,
         endpoint: Optional[str] = None,
         token: Optional[str] = None,
         timeout: float = 10.0,
@@ -105,6 +107,8 @@ class AgentisTelemetry:
         self.task_id = normalized_task_id
         self.adapter = adapter
         self.timeout = timeout
+        self.run_id = run_id.strip() if isinstance(run_id, str) and run_id.strip() else None
+        self.task_status = task_status
         self._on_error = on_error or (lambda message: None)
 
         self._client = client
@@ -115,7 +119,6 @@ class AgentisTelemetry:
             self._client = AgentisJsonRpcClient(endpoint=endpoint, token=token, timeout=timeout)
 
         self._mapper = ClaudeActivityMapper(prompt=prompt, mode=mode, agent=adapter, cwd=cwd)
-        self.run_id: Optional[str] = None
         self.session_id: Optional[str] = None
         self._session_bound = False
         self._dirty = False
@@ -142,11 +145,12 @@ class AgentisTelemetry:
 
     def start(self) -> Optional[str]:
         """Založí run k tasku (bez spuštění adapteru) a vrátí jeho ``run_id``."""
-        result = self._call("task.start_run", {"id": self.task_id, "start_adapter": False})
-        if isinstance(result, dict):
-            item = result.get("item")
-            if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
-                self.run_id = item["id"]
+        if self.run_id is None:
+            result = self._call("task.start_run", {"id": self.task_id, "start_adapter": False})
+            if isinstance(result, dict):
+                item = result.get("item")
+                if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]:
+                    self.run_id = item["id"]
         if self.run_id is None:
             self._on_error("Agentis task.start_run nevrátil run id; telemetrie je vypnutá.")
             return None
@@ -224,9 +228,12 @@ class AgentisTelemetry:
         body = self._final_text()
         if not body:
             return
+        params: dict[str, Any] = {"run_id": self.run_id, "body": body, "comment_type": "primary"}
+        if self.task_status is not None:
+            params["status"] = self.task_status
         self._call(
             "task.add_agent_comment",
-            {"run_id": self.run_id, "body": body, "comment_type": "primary"},
+            params,
         )
 
     def _final_text(self) -> str:

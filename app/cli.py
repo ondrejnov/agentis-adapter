@@ -13,6 +13,7 @@ from common.rpc.passive_websocket import run_passive_websocket
 
 
 _ADAPTER_MODULES = {
+    "agentiscode": "agentiscode.api",
     "opencode": "opencode.api",
     "claude": "claude.api",
     "claudecode": "claude.api",
