@@ -9,12 +9,21 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from common.cli_session import KubectlExecTarget
 from common.config import Settings
 from common.models import AgentExecutionContextPayload, completion_task_status
+from common.session_manager import BaseSessionManager
+from common.artifacts.expected import collect_expected_artifacts
+from common.artifacts.screenshots import collect_screenshot_images
+from common.artifacts.source_snapshot import (
+    build_snapshot_key,
+    changes_diff_attachment,
+    snapshot_sources_best_effort,
+    write_changes_diff_best_effort,
+)
 
 
 _SESSION_START_TIMEOUT_SEC = 300.0
@@ -30,11 +39,27 @@ class _AgentisCodeSession:
     proc: subprocess.Popen[str] | None = None
     thread: threading.Thread | None = None
     ready_event: threading.Event = field(default_factory=threading.Event)
+    abort_event: threading.Event = field(default_factory=threading.Event)
     start_error: str | None = None
+    snapshot_key: str | None = None
+    final_text_chunks: list[str] = field(default_factory=list)
+    final_text_open: bool = False
+    is_error: bool = False
 
 
 class AgentisCodeSessionManager:
     """Runs `agentiscode` CLI jobs and lets the CLI report telemetry to Agentis."""
+
+    _AGENT_LABEL = "agentiscode"
+    _completion_actions = staticmethod(BaseSessionManager._completion_actions)
+    _normalize_adapter_event_status = staticmethod(BaseSessionManager._normalize_adapter_event_status)
+    _commit_session_changes = BaseSessionManager._commit_session_changes
+    _ensure_pull_request = BaseSessionManager._ensure_pull_request
+    _run_completed_process = BaseSessionManager._run_completed_process
+    _start_dev_server = BaseSessionManager._start_dev_server
+    _finish_session_actions = BaseSessionManager._finish_session_actions
+    _agentis_call = BaseSessionManager._agentis_call
+    _emit_adapter_event = BaseSessionManager._emit_adapter_event
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -50,6 +75,9 @@ class AgentisCodeSessionManager:
         kubectl_target: KubectlExecTarget | None = None,
     ) -> str:
         sess = _AgentisCodeSession(session_id=None, context=context, worktree=worktree, kubectl_target=kubectl_target)
+        pending_key = f"agentiscode-pending-{uuid4().hex}"
+        sess.snapshot_key = build_snapshot_key(self._AGENT_LABEL, context.run_id, context.task_id, pending_key)
+        snapshot_sources_best_effort(worktree, sess.snapshot_key, label="agentiscode-start")
         self._spawn_thread(sess, prompt=prompt, resume_id=None)
         if not sess.ready_event.wait(timeout=_SESSION_START_TIMEOUT_SEC):
             self.abort_session(sess)
@@ -75,6 +103,10 @@ class AgentisCodeSessionManager:
             worktree=worktree,
             kubectl_target=kubectl_target,
         )
+        sess.snapshot_key = build_snapshot_key(
+            self._AGENT_LABEL, context.run_id, context.task_id, session_id, uuid4().hex
+        )
+        snapshot_sources_best_effort(worktree, sess.snapshot_key, label="agentiscode-send")
         with self._lock:
             self._sessions[session_id] = sess
         self._spawn_thread(sess, prompt=prompt, resume_id=session_id)
@@ -89,10 +121,13 @@ class AgentisCodeSessionManager:
         with self._lock:
             self._sessions.pop(session_id, None)
 
-    def get_snapshot_key(self, session_id: str) -> None:
-        return None
+    def get_snapshot_key(self, session_id: str) -> str | None:
+        with self._lock:
+            sess = self._sessions.get(session_id)
+        return sess.snapshot_key if sess is not None else None
 
     def abort_session(self, sess: _AgentisCodeSession) -> None:
+        sess.abort_event.set()
         proc = sess.proc
         if proc is None or proc.poll() is not None:
             return
@@ -162,11 +197,71 @@ class AgentisCodeSessionManager:
                 if isinstance(session_id, str) and session_id:
                     sess.session_id = session_id
                     sess.ready_event.set()
+            self._consume_output_event(sess, payload)
 
         returncode = proc.wait()
+        if returncode != 0:
+            sess.is_error = True
         if not sess.ready_event.is_set():
             sess.start_error = f"agentiscode exited before session_id (exit_code={returncode})"
             sess.ready_event.set()
+        self._finish_agentiscode_session(sess)
+
+    @staticmethod
+    def _consume_output_event(sess: _AgentisCodeSession, payload: dict[str, Any]) -> None:
+        event_type = payload.get("type")
+        raw_data = payload.get("data")
+        data = raw_data if isinstance(raw_data, dict) else payload
+        if event_type == "text":
+            text = data.get("text")
+            if isinstance(text, str) and text:
+                if not sess.final_text_open:
+                    sess.final_text_chunks.clear()
+                sess.final_text_chunks.append(text)
+                sess.final_text_open = True
+        elif event_type in {"reasoning", "tool"}:
+            sess.final_text_open = False
+        elif event_type == "error" or (event_type == "result" and data.get("is_error")):
+            sess.is_error = True
+
+    def _finish_agentiscode_session(self, sess: _AgentisCodeSession) -> None:
+        if sess.abort_event.is_set() or not sess.session_id:
+            return
+
+        try:
+            attachments = self._finish_session_actions(cast(Any, sess), sess.session_id)
+            if sess.snapshot_key:
+                diff_result = write_changes_diff_best_effort(
+                    sess.worktree,
+                    sess.snapshot_key,
+                    label="agentiscode-finish",
+                )
+                diff_attachment = changes_diff_attachment(diff_result)
+                if diff_attachment:
+                    attachments.append(diff_attachment)
+
+            body = "".join(sess.final_text_chunks).strip()
+            if body:
+                params: dict[str, Any] = {
+                    "session_id": sess.session_id,
+                    "body": body,
+                    "attachments": attachments,
+                    "images": collect_screenshot_images(sess.worktree),
+                    "artifacts": collect_expected_artifacts(sess.context, sess.worktree),
+                    "status": completion_task_status(sess.context),
+                    "comment_type": "primary",
+                    "actions": self._completion_actions(sess.context),
+                }
+                self._agentis_call(method="task.add_agent_comment", params=params)
+        finally:
+            self._emit_adapter_event(
+                sess.context,
+                kind="idle",
+                status="failed" if sess.is_error else "success",
+                event_id=f"idle:{sess.session_id}:agentiscode-finish",
+                message="agentiscode session selhala." if sess.is_error else "agentiscode session doběhla.",
+                data={"session_id": sess.session_id},
+            )
 
     @staticmethod
     def _drain_stderr(proc: subprocess.Popen[str]) -> None:
@@ -240,7 +335,6 @@ class AgentisCodeSessionManager:
             str(completion_task_status(context)),
             "--agentis-api",
             self.settings.agentis_endpoint,
-            "--last-message-to-comment",
         ]
         if self.settings.agentis_token:
             args.extend(["--agentis-token", self.settings.agentis_token])
@@ -256,6 +350,12 @@ class AgentisCodeSessionManager:
         return args
 
     def _underlying_adapter(self, context: AgentExecutionContextPayload) -> str:
+        if context.adapter and context.adapter.runtime:
+            runtime = context.adapter.runtime.strip().lower()
+            if runtime in {"claude", "claudecode", "claude-code", "cloud", "cc"}:
+                return "claude"
+            if runtime in {"opencode", "oc"}:
+                return "opencode"
         if context.adapter and context.adapter.model and "claude" in context.adapter.model:
             return "claude"
         return "opencode"
