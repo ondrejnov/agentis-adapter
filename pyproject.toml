@@ -1,7 +1,7 @@
 [tool.poetry]
-name = "agentis-kubernetes-adapter"
+name = "agentis-adapter"
 version = "0.1.0"
-description = "Standalone FastAPI JSON-RPC API for the Agentis Kubernetes adapter"
+description = "Standalone FastAPI JSON-RPC API for the Agentis adapter"
 authors = ["GitHub Copilot <copilot@github.com>"]
 packages = [
     { include = "app" },
