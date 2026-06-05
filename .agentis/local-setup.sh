@@ -8,5 +8,3 @@ elif git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/
     . "$main_worktree/.venv/bin/activate"
   fi
 fi
-
-echo "agentis-adapter" > /tmp/local-setup.txt

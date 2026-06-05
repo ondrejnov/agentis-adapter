@@ -5,6 +5,7 @@ __pycache__/
 .env
 .screenshots
 .changes.diff
+.code-review-graph
 dist
 opencode-container/registry-secret.yaml
 opencode-container/agdoc/
