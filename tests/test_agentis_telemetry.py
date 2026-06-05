@@ -146,6 +146,28 @@ def test_telemetry_final_comment_can_set_task_status() -> None:
     }
 
 
+def test_telemetry_final_comment_uses_only_last_text_message() -> None:
+    client = FakeClient()
+    telemetry = AgentisTelemetry(
+        task_id="task-1",
+        prompt="udelej X",
+        adapter="claude",
+        run_id="run-existing",
+        last_message_to_comment=True,
+        client=client,
+    )
+
+    telemetry.start()
+    telemetry.handle(AgentEvent("session", {"session_id": "ses_1"}))
+    telemetry.handle(AgentEvent("text", {"text": "Starsi odpoved."}))
+    telemetry.handle(AgentEvent("reasoning", {"text": "premyslim"}))
+    telemetry.handle(AgentEvent("text", {"text": "Final"}))
+    telemetry.handle(AgentEvent("text", {"text": "ni odpoved."}))
+    telemetry.finish()
+
+    assert client.params_for("task.add_agent_comment")["body"] == "Finalni odpoved."
+
+
 def test_telemetry_marks_failed_run_on_error_result() -> None:
     client = FakeClient(results={"task.start_run": {"item": {"id": "run-err"}}})
     telemetry = AgentisTelemetry(task_id="task-1", prompt="x", adapter="opencode", client=client)

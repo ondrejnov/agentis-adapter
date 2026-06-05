@@ -126,6 +126,8 @@ class AgentisTelemetry:
         self._dirty = False
         self._is_error = False
         self._kind = f"{adapter}_run"
+        self._final_text_chunks: list[str] = []
+        self._final_text_open = False
 
     def __enter__(self) -> "AgentisTelemetry":
         return self
@@ -166,6 +168,16 @@ class AgentisTelemetry:
 
         if event.type == "error" or (event.type == "result" and event.data.get("is_error")):
             self._is_error = True
+
+        if event.type == "text":
+            text = event.data.get("text")
+            if isinstance(text, str) and text:
+                if not self._final_text_open:
+                    self._final_text_chunks.clear()
+                self._final_text_chunks.append(text)
+                self._final_text_open = True
+        elif event.type in {"reasoning", "tool"}:
+            self._final_text_open = False
 
         if event.type == "session" and not self._session_bound:
             session_id = event.data.get("session_id")
@@ -239,16 +251,7 @@ class AgentisTelemetry:
         )
 
     def _final_text(self) -> str:
-        for entry in reversed(self._mapper.snapshot()):
-            if (entry.get("info") or {}).get("role") != "assistant":
-                continue
-            text = ""
-            for part in entry.get("parts") or []:
-                if isinstance(part, dict) and part.get("type") == "text" and (part.get("text") or "").strip():
-                    text = part["text"].strip()
-            if text:
-                return text
-        return ""
+        return "".join(self._final_text_chunks).strip()
 
     def _emit_adapter_event(
         self,
