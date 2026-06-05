@@ -242,6 +242,10 @@ class ClaudeActivityMapper:
         self._messages: List[Dict[str, Any]] = []
         self._user_msg_idx: Optional[int] = None
         self._assistant: Optional[_AssistantState] = None
+        # True, jakmile zapíšeme per-turn tokeny (z assistant zpráv / step-finishů).
+        # Pak finální `result` (kumulativní) už do transcriptu nepouštíme, ať se
+        # tokeny nezdvojí.
+        self._tokens_from_steps = False
         self._init_user_message()
 
     # ------------------------------------------------------------------
@@ -263,10 +267,12 @@ class ClaudeActivityMapper:
             "thinking": self._on_thinking,
             "tool_use": self._on_tool_use,
             "tool_result": self._on_tool_result,
+            "assistant_message": self._on_assistant_message,
+            "step_finish": self._on_step_finish,
             "result": self._on_result,
-            # assistant_message a user_message ignorujeme — vše už máme z dílčích
-            # eventů (text/thinking/tool_use/tool_result). raw/stderr/error
-            # jsou jen logy.
+            # text/thinking/tool_use/tool_result skládají obsah zprávy;
+            # assistant_message slouží jen k zápisu per-turn tokenů (usage).
+            # user_message a raw/stderr/error jsou jen logy.
         }
         handler = handlers.get(event.type)
         if not handler:
@@ -477,39 +483,66 @@ class ClaudeActivityMapper:
             }
         return True
 
-    def _on_result(self, data: Dict[str, Any]) -> bool:
-        state = self._ensure_assistant()
-        info = self._messages[state.msg_idx]["info"]
-        info["time"]["completed"] = _now()
-        usage = data.get("usage") or {}
-        info["tokens"] = {
+    @staticmethod
+    def _tokens_from_usage(usage: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        usage = usage or {}
+        return {
             "input": int(usage.get("input_tokens") or 0),
             "output": int(usage.get("output_tokens") or 0),
-            "reasoning": 0,
+            "reasoning": int(usage.get("reasoning_tokens") or 0),
             "cache": {
                 "read": int(usage.get("cache_read_input_tokens") or 0),
                 "write": int(usage.get("cache_creation_input_tokens") or usage.get("cache_write_tokens") or 0),
             },
         }
-        cost = data.get("cost_usd")
+
+    def _finalize_assistant(self, usage: Optional[Dict[str, Any]], cost: Any, finish: str) -> bool:
+        """Uzavře aktuální assistant zprávu: zapíše její *vlastní* tokeny, cost
+        a přidá StepFinishPart. Sčítá se per-message, takže každý turn nese své
+        tokeny (viz `_on_step_finish` / `_on_result`)."""
+        state = self._ensure_assistant()
+        info = self._messages[state.msg_idx]["info"]
+        info["time"]["completed"] = _now()
+        info["tokens"] = self._tokens_from_usage(usage)
         if isinstance(cost, (int, float)):
             info["cost"] = float(cost)
-        info["finish"] = "stop" if not data.get("is_error") else (data.get("subtype") or "error")
+        info["finish"] = finish
         # StepFinishPart — užitečné pro UI v Agentisu
-        msg_id = info["id"]
         self._messages[state.msg_idx]["parts"].append(
             {
                 "id": _prt_id(),
                 "sessionID": self.session_id,
-                "messageID": msg_id,
+                "messageID": info["id"],
                 "type": "step-finish",
-                "reason": info["finish"],
+                "reason": finish,
                 "cost": info.get("cost") or 0,
                 "tokens": info["tokens"],
             }
         )
         state.closed = True
         return True
+
+    def _on_assistant_message(self, data: Dict[str, Any]) -> bool:
+        # Claude posílá `usage` na každé assistant zprávě (per-turn). Uzavřeme jí
+        # aktuální zprávu s jejími vlastními tokeny, ať jdou sčítat napříč turny.
+        message = data.get("message")
+        usage = message.get("usage") if isinstance(message, dict) else None
+        if not isinstance(usage, dict) or not usage:
+            return False
+        self._tokens_from_steps = True
+        return self._finalize_assistant(usage, None, "stop")
+
+    def _on_step_finish(self, data: Dict[str, Any]) -> bool:
+        self._tokens_from_steps = True
+        return self._finalize_assistant(data.get("usage"), data.get("cost_usd"), "stop")
+
+    def _on_result(self, data: Dict[str, Any]) -> bool:
+        if self._tokens_from_steps:
+            # Per-turn tokeny už máme; finální `result` je kumulativní a jen by je
+            # zopakoval → do transcriptu ho nepřidáváme (run-end řeší adapter event).
+            return False
+        finish = "stop" if not data.get("is_error") else (data.get("subtype") or "error")
+        return self._finalize_assistant(data.get("usage"), data.get("cost_usd"), finish)
 
     # ------------------------------------------------------------------
     # Util

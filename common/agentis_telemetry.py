@@ -55,6 +55,8 @@ def _unified_to_native(event: AgentEvent) -> Optional[ClaudeEvent]:
             content = d.get("error") if is_error else d.get("output")
             return ClaudeEvent("tool_result", {"tool_use_id": d.get("id"), "content": content, "is_error": is_error})
         return None
+    if t == "step":
+        return ClaudeEvent("step_finish", {"usage": d.get("usage"), "cost_usd": d.get("cost_usd")})
     if t == "result":
         return ClaudeEvent(
             "result",
@@ -125,6 +127,7 @@ class AgentisTelemetry:
         self._session_bound = False
         self._dirty = False
         self._is_error = False
+        self._step_seen = False
         self._kind = f"{adapter}_run"
         self._final_text_chunks: list[str] = []
         self._final_text_open = False
@@ -176,8 +179,17 @@ class AgentisTelemetry:
                     self._final_text_chunks.clear()
                 self._final_text_chunks.append(text)
                 self._final_text_open = True
-        elif event.type in {"reasoning", "tool"}:
+        elif event.type in {"reasoning", "tool", "step"}:
             self._final_text_open = False
+
+        if event.type == "step":
+            self._step_seen = True
+        elif event.type == "result" and self._step_seen:
+            # Per-turn tokeny už máme z `step` eventů; finální `result` by je jen
+            # zopakoval (u OpenCode dokonce jen poslední turn) → do transcriptu
+            # ho už nepouštíme. Run-end (is_error) je zachycen výše, zbytek řeší
+            # finish().
+            return
 
         if event.type == "session" and not self._session_bound:
             session_id = event.data.get("session_id")

@@ -17,9 +17,14 @@ Jednotný event slovník (``AgentEvent.type``):
   - ``text``      {text}                 (assistant text — vždy *delta*, append-only)
   - ``reasoning`` {text}                 (reasoning/thinking — vždy delta)
   - ``tool``      {id, name?, status, input?, title?, output?, error?}
+  - ``step``      {usage?, cost_usd?}     (jeden dokončený turn/message — per-turn usage)
   - ``result``    {session_id?, usage?, cost_usd?, is_error}
   - ``error``     {message}
   - ``stderr``    {line}
+
+``step`` se vydává po každém dokončeném assistant turnu a nese usage *jen toho
+turnu* (ne kumulativní). Díky tomu lze tokeny sčítat napříč turny — finální
+``result`` u některých adaptérů (OpenCode) nese jen poslední turn / kontext.
 
 ``tool`` event se vydává při startu nástroje (``status="running"``) a znovu při
 jeho dokončení (``status="completed"`` / ``"error"``); obě fáze sdílejí ``id``.
@@ -216,11 +221,19 @@ class _ClaudeTranslator:
                     },
                 )
             ]
+        if t == "assistant_message":
+            # Každá assistant zpráva nese vlastní `usage` toho turnu → vydáme
+            # per-turn `step`, ať jde sčítat napříč turny (text/tool bloky už
+            # máme z dílčích eventů, tady bereme jen usage).
+            usage = (d.get("message") or {}).get("usage")
+            if isinstance(usage, dict) and usage:
+                return [AgentEvent("step", {"usage": dict(usage), "cost_usd": None})]
+            return []
         if t == "error":
             return [AgentEvent("error", {"message": d.get("message")})]
         if t == "stderr":
             return [AgentEvent("stderr", {"line": d.get("line")})]
-        # assistant_message / user_message / raw — vše podstatné už máme z dílčích eventů.
+        # user_message / raw — vše podstatné už máme z dílčích eventů.
         return []
 
 
@@ -287,8 +300,33 @@ class _OpenCodeTranslator:
                 input_=state.get("input"),
                 extra=extra,
             )
-        # step-start / step-finish — souhrn se odvodí z runner.last_usage na konci.
+        if ptype == "step-finish":
+            # Per-turn usage — OpenCode posílá `step-finish` na každý turn, takže
+            # tokeny lze sčítat (runner.last_usage drží jen poslední turn).
+            return self._step_event(part)
+        # step-start — souhrn už máme z dílčích eventů.
         return []
+
+    @staticmethod
+    def _step_event(part: Dict[str, Any]) -> List[AgentEvent]:
+        tokens = part.get("tokens")
+        if not isinstance(tokens, dict):
+            return []
+        cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+        usage = {
+            "input_tokens": int(tokens.get("input") or 0),
+            "output_tokens": int(tokens.get("output") or 0),
+            "reasoning_tokens": int(tokens.get("reasoning") or 0),
+            "cache_read_input_tokens": int(cache.get("read") or 0),
+            "cache_creation_input_tokens": int(cache.get("write") or 0),
+        }
+        cost = part.get("cost")
+        return [
+            AgentEvent(
+                "step",
+                {"usage": usage, "cost_usd": float(cost) if isinstance(cost, (int, float)) else None},
+            )
+        ]
 
     def _text_delta(self, part: Dict[str, Any]) -> str:
         part_id = part.get("id")

@@ -108,6 +108,35 @@ def test_telemetry_full_run_creates_run_binds_session_and_pushes_logs() -> None:
     assert roles[0] == "user" and "assistant" in roles
 
 
+def test_telemetry_records_per_turn_tokens_across_messages() -> None:
+    # Dva turny, každý s vlastním `step` usage. Tokeny musí sednout per-message,
+    # ať jdou sčítat — finální `result` je už nesmí zopakovat.
+    client = FakeClient(results={"task.start_run": {"item": {"id": "run-1"}}})
+    telemetry = AgentisTelemetry(task_id="task-1", prompt="udelej X", adapter="claude", client=client)
+    telemetry.start()
+
+    telemetry.handle(AgentEvent("session", {"adapter": "claude", "session_id": "ses_1"}))
+    telemetry.handle(AgentEvent("text", {"text": "First"}))
+    telemetry.handle(AgentEvent("step", {"usage": {"input_tokens": 10, "output_tokens": 4}, "cost_usd": 0.01}))
+    telemetry.handle(AgentEvent("text", {"text": "Second"}))
+    telemetry.handle(AgentEvent("step", {"usage": {"input_tokens": 20, "output_tokens": 6}, "cost_usd": 0.02}))
+    telemetry.handle(
+        AgentEvent("result", {"session_id": "ses_1", "usage": {"input_tokens": 20}, "cost_usd": 0.02, "is_error": False})
+    )
+    telemetry.finish()
+
+    messages = [c for c in client.calls if c["method"] == "session.store_activity_log"][-1]["params"]["messages"]
+    assistant = [m for m in messages if m["info"]["role"] == "assistant"]
+    # Každý turn = vlastní assistant zpráva s vlastními tokeny (žádná navíc z result).
+    assert len(assistant) == 2
+    assert assistant[0]["info"]["tokens"]["input"] == 10
+    assert assistant[0]["info"]["tokens"]["output"] == 4
+    assert assistant[1]["info"]["tokens"]["input"] == 20
+    assert assistant[1]["info"]["tokens"]["output"] == 6
+    # Součet napříč turny dává reálnou spotřebu, ne jen poslední kontext.
+    assert sum(m["info"]["tokens"]["input"] for m in assistant) == 30
+
+
 def test_telemetry_uses_existing_run_id_without_starting_new_run() -> None:
     client = FakeClient()
     telemetry = AgentisTelemetry(

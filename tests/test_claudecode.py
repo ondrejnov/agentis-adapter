@@ -931,6 +931,44 @@ def test_mapper_result_maps_cache_creation_to_cache_write():
     }
 
 
+def _event(event_type: str, data: dict[str, Any]) -> Any:
+    return type("Event", (), {"type": event_type, "data": data})()
+
+
+def test_mapper_records_per_turn_tokens_from_assistant_messages():
+    # Dva turny, každý s vlastním usage na assistant zprávě. Tokeny musí sednout
+    # per-message a finální (kumulativní) result je už nesmí zopakovat.
+    mapper = ClaudeActivityMapper(prompt="x")
+    mapper.consume(_event("session_start", {"session_id": "sid"}))
+
+    mapper.consume(_event("text", {"text": "First"}))
+    mapper.consume(_event("assistant_message", {"message": {"usage": {"input_tokens": 10, "output_tokens": 4}}}))
+    mapper.consume(_event("text", {"text": "Second"}))
+    mapper.consume(_event("assistant_message", {"message": {"usage": {"input_tokens": 20, "output_tokens": 6}}}))
+    mapper.consume(_event("result", {"usage": {"input_tokens": 20, "output_tokens": 6}, "cost_usd": 0.05}))
+
+    assistant = [m for m in mapper.snapshot() if m["info"]["role"] == "assistant"]
+    assert len(assistant) == 2
+    assert assistant[0]["info"]["tokens"]["input"] == 10
+    assert assistant[0]["info"]["tokens"]["output"] == 4
+    assert assistant[1]["info"]["tokens"]["input"] == 20
+    assert assistant[1]["info"]["tokens"]["output"] == 6
+    assert sum(m["info"]["tokens"]["input"] for m in assistant) == 30
+
+
+def test_mapper_falls_back_to_result_tokens_without_per_turn_usage():
+    # Bez assistant usage zůstává chování zpětně kompatibilní: tokeny z resultu.
+    mapper = ClaudeActivityMapper(prompt="x")
+    mapper.consume(_event("session_start", {"session_id": "sid"}))
+    mapper.consume(_event("text", {"text": "Hi"}))
+    mapper.consume(_event("result", {"usage": {"input_tokens": 7, "output_tokens": 3}, "cost_usd": 0.01}))
+
+    assistant = [m for m in mapper.snapshot() if m["info"]["role"] == "assistant"]
+    assert len(assistant) == 1
+    assert assistant[0]["info"]["tokens"]["input"] == 7
+    assert assistant[0]["info"]["tokens"]["output"] == 3
+
+
 def test_mapper_tool_use_bash_title_falls_back_to_command_when_no_description():
     mapper = ClaudeActivityMapper(prompt="x")
     part = _emit_tool_use(mapper, "Bash", {"command": "ls -la"})

@@ -212,8 +212,13 @@ def test_wrapper_streams_opencode_and_synthesizes_result(monkeypatch) -> None:
 
     events = asyncio.run(collect())
     types = [e.type for e in events]
-    assert types == ["session", "text", "result"]
-    # OpenCode nemá nativní result — wrapper ho dopočítá z runner.last_usage.
+    # `step-finish` se převede na per-turn `step`; OpenCode nemá nativní result,
+    # takže ho wrapper dopočítá z runner.last_usage na konci.
+    assert types == ["session", "text", "step", "result"]
+    step = events[2]
+    assert step.data["usage"]["input_tokens"] == 10
+    assert step.data["usage"]["output_tokens"] == 5
+    assert step.data["cost_usd"] == 0.03
     result = events[-1]
     assert result.data["usage"]["input_tokens"] == 10
     assert result.data["cost_usd"] == 0.03
