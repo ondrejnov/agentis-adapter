@@ -15,6 +15,7 @@ from common.git_adapter import GitAdapterService
 from common.cli_session import KubectlExecTarget
 from common.models import (
     AdapterOptionsPayload,
+    AgentAttachmentPayload,
     AgentExecutionContextPayload,
 )
 from claude.adapter import ClaudeCodeAdapterService
@@ -150,6 +151,39 @@ def test_start_session_falls_back_to_title_when_description_missing(monkeypatch)
     adapter.start_session()
 
     assert manager.start.call_args.kwargs["prompt"] == "Implementace nove funkce"
+
+
+def test_start_session_materializes_image_attachments_for_cli_prompt(monkeypatch, tmp_path: Path):
+    manager = MagicMock(spec=ClaudeSessionManager)
+    manager.get_snapshot_key.return_value = "snap-start"
+    manager.start.return_value = "ses_img"
+    monkeypatch.setattr(ClaudeCodeAdapterService, "_persist_agentis_session_id", lambda self, session_id: None)
+
+    context = make_context(
+        attachments=[
+            AgentAttachmentPayload(
+                path="screenshot.png",
+                filename="screenshot.png",
+                mime="image/png",
+                content_base64="iVBORw0KGgo=",
+            )
+        ]
+    )
+    adapter = ClaudeCodeAdapterService(
+        context=context,
+        settings=make_settings(worktree_root=tmp_path),
+        session_manager=manager,
+    )
+
+    adapter.start_session()
+
+    attachment_path = tmp_path / "task-1" / ".agentis" / "attachments" / "001-screenshot.png"
+    assert attachment_path.read_bytes() == b"\x89PNG\r\n\x1a\n"
+    prompt = manager.start.call_args.kwargs["prompt"]
+    assert "<attachments>" in prompt
+    assert "1. image: 001-screenshot.png" in prompt
+    assert "path: .agentis/attachments/001-screenshot.png" in prompt
+    assert "mime: image/png" in prompt
 
 
 def test_add_message_requires_session_id():

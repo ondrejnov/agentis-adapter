@@ -36,9 +36,13 @@ class AgentisCodeAdapterService(CliAdapterService):
                 chunks.append(stripped)
         return "\n\n".join(chunks)
 
-    def _build_initial_prompt(self) -> str:
+    def _build_initial_prompt(self, worktree: str | None = None) -> str:
         prompt = self._join_prompt_parts(self.context.user_prompt, self.context.description)
-        return prompt or self.context.title.strip()
+        attachments_block = self._build_attachments_block(self._materialize_attachments(worktree) if worktree else [])
+        return self._join_prompt_parts(prompt, attachments_block) or self._join_prompt_parts(
+            self.context.title,
+            attachments_block,
+        )
 
 
 __all__ = ["AgentisCodeAdapterService", "KUBERNETES_MODE", "LOCAL_MODE"]
