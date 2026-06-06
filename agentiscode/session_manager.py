@@ -12,8 +12,9 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 from uuid import uuid4
 
-from common.cli_session import KubectlExecTarget
+from common.cli_session import KubectlExecTarget, agent_job_runner, write_agent_prompt_file
 from common.config import Settings
+from common.kubernetes.agent_job import AgentJobRunner
 from common.models import AgentExecutionContextPayload, completion_task_status
 from common.session_manager import BaseSessionManager
 from common.artifacts.expected import collect_expected_artifacts
@@ -45,6 +46,9 @@ class _AgentisCodeSession:
     final_text_chunks: list[str] = field(default_factory=list)
     final_text_open: bool = False
     is_error: bool = False
+    # Set when the agent runs as a Kubernetes Job.
+    job_runner: AgentJobRunner | None = None
+    prompt_path: str | None = None
 
 
 class AgentisCodeSessionManager:
@@ -58,6 +62,7 @@ class AgentisCodeSessionManager:
     _run_completed_process = BaseSessionManager._run_completed_process
     _start_dev_server = BaseSessionManager._start_dev_server
     _finish_session_actions = BaseSessionManager._finish_session_actions
+    _finish_session_actions_kubernetes = BaseSessionManager._finish_session_actions_kubernetes
     _agentis_call = BaseSessionManager._agentis_call
     _emit_adapter_event = BaseSessionManager._emit_adapter_event
 
@@ -132,11 +137,13 @@ class AgentisCodeSessionManager:
         if proc is None or proc.poll() is not None:
             return
         if sess.kubectl_target is not None:
+            # `proc` is only the local `kubectl logs -f` client; the agent runs as
+            # a Job in the cluster, so delete the whole Job (cascade kills the pod).
             try:
                 proc.kill()
             except Exception as exc:  # noqa: BLE001
                 sys.stderr.write(f"[agentiscode-session] kill kubectl client failed: {exc}\n")
-            self._remote_pkill_agentiscode(sess.kubectl_target)
+            self._delete_agent_job(sess.kubectl_target)
             return
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -170,20 +177,37 @@ class AgentisCodeSessionManager:
             sys.stderr.write(f"[agentiscode-session] crashed: {exc!r}\n")
 
     def _run_process(self, sess: _AgentisCodeSession, prompt: str, resume_id: str | None) -> None:
-        args = self._build_args(sess.context, sess.worktree, prompt, resume_id)
-        cwd = sess.worktree
         if sess.kubectl_target is not None:
-            args = self._build_kubectl_args(sess.kubectl_target, sess.worktree, args)
-            cwd = None
-        print(args)
-        proc = subprocess.Popen(
-            args,
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
+            # Run the agent as a one-shot Job and stream its pod logs. The prompt
+            # is materialised on the shared workspace and read by the Job.
+            target = sess.kubectl_target
+            sess.prompt_path = write_agent_prompt_file(sess.worktree, target.namespace, prompt)
+            args = self._build_args(sess.context, sess.worktree, prompt, resume_id, include_prompt=False)
+            command_script = (
+                f"cd {shlex.quote(sess.worktree)} && exec {shlex.join(args)} "
+                f'"$(cat {shlex.quote(sess.prompt_path)})"'
+            )
+            runner = agent_job_runner(target)
+            sess.job_runner = runner
+            runner.ensure_namespace()
+            runner.apply(command_script)
+            pod = runner.wait_for_pod()
+            proc = subprocess.Popen(
+                runner.logs_argv(pod),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        else:
+            args = self._build_args(sess.context, sess.worktree, prompt, resume_id)
+            proc = subprocess.Popen(
+                args,
+                cwd=sess.worktree,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
         sess.proc = proc
         stderr_thread = threading.Thread(target=self._drain_stderr, args=(proc,), daemon=True)
         stderr_thread.start()
@@ -207,6 +231,21 @@ class AgentisCodeSessionManager:
             sess.start_error = f"agentiscode exited before session_id (exit_code={returncode})"
             sess.ready_event.set()
         self._finish_agentiscode_session(sess)
+        self._cleanup_job(sess)
+
+    @staticmethod
+    def _cleanup_job(sess: _AgentisCodeSession) -> None:
+        """Best-effort removal of the agent Job and the prompt file."""
+        if sess.job_runner is not None:
+            try:
+                sess.job_runner.delete()
+            except Exception as exc:  # noqa: BLE001
+                sys.stderr.write(f"[agentiscode-session] agent job delete failed: {exc}\n")
+        if sess.prompt_path is not None:
+            try:
+                os.unlink(sess.prompt_path)
+            except OSError:
+                pass
 
     @staticmethod
     def _consume_output_event(sess: _AgentisCodeSession, payload: dict[str, Any]) -> None:
@@ -281,33 +320,26 @@ class AgentisCodeSessionManager:
         return payload if isinstance(payload, dict) else None
 
     @staticmethod
-    def _build_kubectl_args(target: KubectlExecTarget, worktree: str, args: list[str]) -> list[str]:
+    def _delete_agent_job(target: KubectlExecTarget) -> None:
         if shutil.which(target.kubectl) is None and not os.path.isabs(target.kubectl):
-            raise RuntimeError(f"kubectl CLI is not available on PATH: {target.kubectl}")
-        inner = " ".join(shlex.quote(arg) for arg in args)
-        if worktree:
-            inner = f"cd {shlex.quote(worktree)} && exec {inner}"
-        kubectl_args = [target.kubectl, "-n", target.namespace, "exec", "-i", target.selector]
-        if target.container:
-            kubectl_args.extend(["-c", target.container])
-        kubectl_args.extend(["--", "sh", "-c", inner])
-        return kubectl_args
-
-    @staticmethod
-    def _remote_pkill_agentiscode(target: KubectlExecTarget) -> None:
-        if shutil.which(target.kubectl) is None and not os.path.isabs(target.kubectl):
-            sys.stderr.write(f"[agentiscode-session] remote pkill skipped: kubectl not on PATH ({target.kubectl})\n")
+            sys.stderr.write(f"[agentiscode-session] agent job delete skipped: kubectl not on PATH ({target.kubectl})\n")
             return
-        args = [target.kubectl, "-n", target.namespace, "exec", target.selector]
-        if target.container:
-            args.extend(["-c", target.container])
-        args.extend(["--", "pkill", "-TERM", "-f", "agentiscode"])
+        args = [
+            target.kubectl,
+            "-n",
+            target.namespace,
+            "delete",
+            "job",
+            target.job_name,
+            "--ignore-not-found=true",
+            "--wait=false",
+        ]
         try:
             subprocess.run(args, capture_output=True, text=True, timeout=15.0, check=False)
         except subprocess.TimeoutExpired:
-            sys.stderr.write("[agentiscode-session] remote pkill timed out\n")
+            sys.stderr.write("[agentiscode-session] agent job delete timed out\n")
         except Exception as exc:  # noqa: BLE001
-            sys.stderr.write(f"[agentiscode-session] remote pkill failed: {exc}\n")
+            sys.stderr.write(f"[agentiscode-session] agent job delete failed: {exc}\n")
 
     def _build_args(
         self,
@@ -315,6 +347,8 @@ class AgentisCodeSessionManager:
         worktree: str,
         prompt: str,
         resume_id: str | None,
+        *,
+        include_prompt: bool = True,
     ) -> list[str]:
         if not self.settings.agentis_endpoint:
             raise RuntimeError("AGENTIS_ENDPOINT is required for agentiscode telemetry")
@@ -347,7 +381,8 @@ class AgentisCodeSessionManager:
             args.extend(["--agent", adapter_opts.agent])
         if resume_id:
             args.extend(["--resume", resume_id])
-        args.append(prompt)
+        if include_prompt:
+            args.append(prompt)
         return args
 
     def _underlying_adapter(self, context: AgentExecutionContextPayload) -> str:

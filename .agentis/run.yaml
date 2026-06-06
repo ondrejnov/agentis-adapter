@@ -1,0 +1,105 @@
+# Deklarativní spuštění agenta jako jednorázový Kubernetes Job.
+#
+# Nahrazuje dřívější dlouhoběžící Deployment s `opencode serve`. Agent (CLI
+# `agentiscode` / `opencode run` / `claude --print`) běží jako Job, který po
+# dokončení skončí. Konkrétní příkaz vkládá adaptér do `command` kontejneru;
+# tady je jen deklarativní popis prostředí (image, env, volumes), aby Job viděl
+# stejný sdílený workspace (/var/www hostPath) jako CI kroky.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agent-run
+  namespace: "[%NAMESPACE%]"
+  labels:
+    app: agent-run
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: agent-run
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: agent
+          image: rg.nl-ams.scw.cloud/reactis/opencode:1.2
+          imagePullPolicy: IfNotPresent
+          workingDir: "[%WORKDIR%]"
+          # Konkrétní příkaz (agentiscode / opencode / claude) vkládá adaptér.
+          command: ["/bin/bash", "-lc", "echo 'no agent command injected' >&2; exit 1"]
+          env:
+            - name: PYTHONPATH
+              value: "[%WORKDIR%]/backend"
+            - name: HOME
+              value: /root
+            - name: AGENTIS_URL
+              value: "[%AGENTIS_URL%]"
+            - name: AGENT_BROWSER_SCREENSHOT_DIR
+              value: "[%WORKDIR%]/.screenshots"
+            - name: IS_SANDBOX
+              value: "1"
+            - name: PATH
+              value: "[%WORKDIR%]/.venv/bin:/root/.opencode/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          volumeMounts:
+            - name: gitconfig
+              mountPath: /root/.gitconfig
+              readOnly: true
+            - name: gitnexus
+              mountPath: /root/.gitnexus
+            - name: gh-config
+              mountPath: /root/.config/gh
+              readOnly: true
+            - name: opencode-config
+              mountPath: /root/.config/opencode
+            - name: opencode-share
+              mountPath: /root/.local/share/opencode
+            - name: claudecode
+              mountPath: /root/.claude
+            - name: codex
+              mountPath: /root/.codex
+            - name: www
+              mountPath: /var/www/
+          securityContext:
+            allowPrivilegeEscalation: true
+      volumes:
+        - name: gitnexus
+          hostPath:
+            path: /root/.gitnexus
+        - name: gitconfig
+          hostPath:
+            path: /root/.gitconfig
+            type: FileOrCreate
+        - name: gh-config
+          hostPath:
+            path: /root/.config/gh
+            type: DirectoryOrCreate
+        - name: opencode-config
+          hostPath:
+            path: /root/.config/opencode
+            type: DirectoryOrCreate
+        - name: opencode-share
+          hostPath:
+            path: /root/.local/share/opencode
+            type: DirectoryOrCreate
+        - name: claudecode
+          hostPath:
+            path: /root/.claude
+            type: DirectoryOrCreate
+        - name: npm-cache
+          hostPath:
+            path: /root/.npm
+            type: DirectoryOrCreate
+        - name: poetry-cache
+          hostPath:
+            path: /root/.cache/pypoetry
+            type: DirectoryOrCreate
+        - name: codex
+          hostPath:
+            path: /root/.codex
+        - name: www
+          hostPath:
+            path: /var/www
+      dnsPolicy: ClusterFirst
+      imagePullSecrets:
+        - name: registry

@@ -7,7 +7,7 @@ Tento dokument popisuje, jak funguje Agentis adapter, co v kodu znamena adapter,
 - **Agentis** je ridici aplikace a ticket system. Posila adapteru JSON-RPC pozadavky a prijima zpet udalosti, komentare, activity log a vysledky.
 - **Adapter proces** je dlouho bezici Python proces spusteny prikazem `agentis-adapter --adapter <typ>`. Sam se pripoji do Agentisu pres odchozi WebSocket a neposloucha verejny inbound RPC endpoint.
 - **Adapter service** je trida, ktera umi pripravit prostredi pro jeden konkretni run: git worktree, volitelny deploy, cekani na runtime, start session, pridani zpravy, abort, merge a cleanup.
-- **Runtime** je skutecne prostredi, kde bezi agent. Typicky lokalni CLI proces (`claude`, `opencode run`) nebo CLI spustene uvnitr Kubernetes podu pres `kubectl exec`.
+- **Runtime** je skutecne prostredi, kde bezi agent. Typicky lokalni CLI proces (`claude`, `opencode run`) nebo CLI spustene jako jednorazovy Kubernetes `Job` (deklarovany v `.agentis/run.yaml`), jehoz logy adapter streamuje pres `kubectl logs -f`. Drive se misto Jobu pouzival dlouhobezici Deployment + `kubectl exec`.
 - **Session** je dlouhodobejsi konverzacni kontext konkretniho agenta. V Agentisu se persistuje `session_id`, aby dalsi `add_message` navazal na stejnou agenti session.
 - **Run** je jedno zpracovani tasku nebo jedne zpravy v Agentisu. Run nese `run_id`, `task_id`, prompt, metadata projektu a volby adapteru.
 - **Activity log** je prubezny log udalosti agenta normalizovany do formatu, ktery Agentis umi zobrazit jako prubeh prace.
@@ -210,7 +210,7 @@ flowchart TD
 
 `send` navazuje na existujici session a spousti novy CLI run s resume parametrem.
 
-`abort` zabije lokalni process group nebo pri Kubernetes modu nejdriv ukonci lokalni `kubectl exec` stream a pak vola `pkill` uvnitr podu.
+`abort` zabije lokalni process group nebo pri Kubernetes modu nejdriv ukonci lokalni `kubectl logs -f` stream a pak smaze cely agent `Job` (`kubectl delete job`), cimz spadne i pod.
 
 ## CLI klient a mapper
 
@@ -270,7 +270,17 @@ Zodpovednosti:
 - ceka na URL OpenCode runtime,
 - vytvari `opencode.json` z template, pokud `requires_agentis_init = True`.
 
-CLI adaptery v defaultnim lokalnim modu Kubernetes nepouziji. Pri `context.adapter.runtime = "kubernetes"` deleguji `deploy`, `wait_ready` a teardown na `KubernetesRuntime` a samotne CLI spousti pres `kubectl exec` v podu.
+CLI adaptery v defaultnim lokalnim modu Kubernetes nepouziji. Pri
+`context.adapter.runtime = "kubernetes"`:
+
+- `deploy` uz nenasazuje dlouhobezici Deployment — jen zajisti namespace
+  (agent bezi jako Job),
+- `wait_ready` je no-op (neni na co cekat),
+- samotne CLI bezi jako jednorazovy `Job` z `.agentis/run.yaml` (prikaz vklada
+  adapter, prompt se predava souborem na sdilenem `/var/www` hostPath) a jeho
+  logy se streamuji pres `kubectl logs -f`,
+- dokoncovaci kroky (commit, pull request) bezi take jako Joby, deklarovane v
+  `.agentis/ci.yaml` v sekci `finish:` (viz `KubernetesRuntime.run_finish_step`).
 
 ## Dokonceni session
 
@@ -283,12 +293,17 @@ Po dobehnuti CLI runu `BaseSessionManager`:
 - posle `task.add_agent_comment` s finalnim textem, screenshoty a expected artifacts,
 - posle `run.adapter_event` typu `<agent>_idle`.
 
-`_finish_session_actions` u tasku s `project_github_repo` navic:
+`_finish_session_actions` se v Kubernetes modu (kdyz session ma `kubectl_target`)
+chova deklarativne: spusti kroky z `.agentis/ci.yaml` sekce `finish:` jako Joby
+(commit, pull request) a kazdy reportuje jako adapter event `finish`. Dev server
+preview se v tomto modu nespousti.
+
+V lokalnim modu u tasku s `project_github_repo`:
 
 - prida IDE link, pokud `context.ide` existuje,
 - commitne zmeny v task worktree,
 - zalozi nebo najde GitHub PR,
-- spusti `run-dev.sh` lokalne nebo pres `kubectl exec`,
+- spusti `run-dev.sh` lokalne,
 - prida attachment na dev server.
 
 ## Jak pridat novy CLI adapter
@@ -474,4 +489,7 @@ Dusledky a odlisnosti:
 | `opencode/*` | OpenCode adapter, runner, session manager a mapper. |
 | `claude/*` | Claude adapter, client, session manager a mapper. |
 | `common/kubernetes_runtime.py` | Kubernetes/OpenCode web runtime a manifest workflow. |
+| `common/kubernetes/agent_job.py` | Spusteni agent CLI jako jednorazovy Job (`.agentis/run.yaml`) a streamovani jeho logu. |
+| `common/kubernetes/ci_workflow.py` | Parser `.agentis/ci.yaml` (faze `setup:` a `finish:`) a builder Job manifestu kroku. |
+| `.agentis/run.yaml` | Deklarativni Job manifest agenta (image, env, volumes); prikaz vklada adapter. |
 | `slack/*` | Slack ingestion adapter: socket-mode listener, mention->task service, guards a text helpery. |

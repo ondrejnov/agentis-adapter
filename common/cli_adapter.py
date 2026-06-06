@@ -26,6 +26,7 @@ from common.models import AgentExecutionContextPayload
 from common.cli_session import KubectlExecTarget
 from common.adapter_base import log_json
 from common.git_adapter import GitAdapterService
+from common.kubernetes.agent_job import resolve_run_manifest_path
 from common.kubernetes.ci_workflow import CiStep
 from common.kubernetes.runtime import KubernetesRuntime
 
@@ -85,11 +86,20 @@ class CliAdapterService(GitAdapterService):
 
     def _kubectl_target(self) -> KubectlExecTarget:
         namespace = KubernetesRuntime.namespace_for_context(self.context, self.settings)
+        workspace = self._workspace_path()
+        run_manifest = resolve_run_manifest_path(workspace, self.context.working_dir)
+        if run_manifest is None:
+            raise RuntimeError(
+                "Agent run manifest .agentis/run.yaml was not found in the workspace or source repository"
+            )
         return KubectlExecTarget(
             namespace=namespace,
             selector=self.settings.claude_pod_selector,
             container=self.settings.claude_pod_container,
             kubectl=self.settings.kubectl_command,
+            run_manifest_path=str(run_manifest),
+            workspace_path=str(workspace),
+            agentis_url=self.settings.public_base_url,
         )
 
     def _kubernetes_runtime(self) -> KubernetesRuntime:
@@ -112,8 +122,20 @@ class CliAdapterService(GitAdapterService):
     # ------------------------------------------------------------------
 
     def deploy(self) -> dict[str, Any]:
+        # The agent no longer runs in a long-running Deployment — it runs as a
+        # one-shot Job started by the CLI client. In kubernetes mode we only make
+        # sure the namespace exists so that Job can be applied into it.
         if self.is_kubernetes_mode:
-            return self._kubernetes_runtime().deploy()
+            runtime = self._kubernetes_runtime()
+            namespace = KubernetesRuntime.namespace_for_context(self.context, self.settings)
+            runtime.ensure_namespace(namespace)
+            return {
+                "action": "deploy",
+                "task_id": self.context.task_id,
+                "namespace": namespace,
+                "status": "skipped",
+                "reason": "agent_runs_as_job",
+            }
         log_json(
             "INFO",
             f"Skipping Kubernetes deploy for {self.runtime_label} adapter",
@@ -127,12 +149,12 @@ class CliAdapterService(GitAdapterService):
         }
 
     def wait_ready(self, timeout: float = 300.0, interval: float = 2.0) -> dict[str, Any]:
-        if self.is_kubernetes_mode:
-            return self._kubernetes_runtime().wait_ready(timeout=timeout, interval=interval)
+        # Nothing long-running to wait for; the agent Job is created and streamed
+        # by `start_session`. Return a non-empty URL so the start flow proceeds.
         return {
             "action": "wait_ready",
             "task_id": self.context.task_id,
-            "url": f"local://{self.runtime_label}",
+            "url": f"kubernetes://{self.runtime_label}" if self.is_kubernetes_mode else f"local://{self.runtime_label}",
             "status": "skipped",
         }
 

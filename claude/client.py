@@ -25,7 +25,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shlex
 import shutil
 import signal
 from dataclasses import dataclass, field
@@ -33,7 +32,14 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
 
 import asyncio
 
-from common.cli_session import KubectlExecTarget, unbounded_line_reader as _unbounded_line_reader
+from common.cli_session import (
+    KubectlExecTarget,
+    agent_job_runner,
+    build_agent_command_script,
+    unbounded_line_reader as _unbounded_line_reader,
+    write_agent_prompt_file,
+)
+from common.kubernetes.agent_job import AgentJobRunner
 from common.local_setup import build_local_setup_shell_command
 
 
@@ -146,6 +152,9 @@ class ClaudeCodeClient:
         self.last_result: Optional[Dict[str, Any]] = None
         self.last_usage: Optional[Dict[str, Any]] = None
         self.last_cost_usd: Optional[float] = None
+        # Set in `stream()` when the agent runs as a Kubernetes Job.
+        self._job_runner: Optional[AgentJobRunner] = None
+        self._prompt_path: Optional[str] = None
 
     @staticmethod
     def _failure_stderr_summary(stderr_lines: list[str], returncode: int) -> str:
@@ -161,15 +170,19 @@ class ClaudeCodeClient:
 
     async def _terminate_proc(self, proc: asyncio.subprocess.Process) -> None:
         """Tvrdě ukončí běžící claude proces (a jeho potomky)."""
-        if proc.returncode is not None:
-            return
         cfg = self.config
         if cfg.kubectl_target is not None:
-            # `proc` je jen lokální `kubectl exec` klient — jeho zabití přeruší
-            # stream, ale claude uvnitř podu poběží dál. Zabijeme ho zvlášť.
-            await self._remote_pkill_claude(cfg.kubectl_target)
-            with contextlib.suppress(Exception):
-                proc.kill()
+            # `proc` je jen lokální `kubectl logs -f` klient — jeho zabití přeruší
+            # stream, ale claude Job uvnitř clusteru poběží dál. Smažeme tedy
+            # rovnou celý Job (cascade smaže i pod).
+            if self._job_runner is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(self._job_runner.delete)
+            if proc.returncode is None:
+                with contextlib.suppress(Exception):
+                    proc.kill()
+            return
+        if proc.returncode is not None:
             return
         # Lokální mód — proces má vlastní session/process group (start_new_session),
         # killneme celou skupinu, ať jdou dolů i potomci claude CLI.
@@ -181,28 +194,14 @@ class ClaudeCodeClient:
         with contextlib.suppress(Exception):
             proc.kill()
 
-    @staticmethod
-    async def _remote_pkill_claude(target: KubectlExecTarget) -> None:
-        """Zabije viset zůstavší claude proces uvnitř k8s podu přes `kubectl exec`."""
-        kubectl_path = target.kubectl
-        if shutil.which(kubectl_path) is None and not os.path.isabs(kubectl_path):
-            return
-        args = [kubectl_path, "-n", target.namespace, "exec", target.selector]
-        if target.container:
-            args += ["-c", target.container]
-        args += ["--", "pkill", "-KILL", "-f", "claude --print"]
-        proc: Optional[asyncio.subprocess.Process] = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(proc.wait(), timeout=15.0)
-        except Exception:
-            if proc is not None:
-                with contextlib.suppress(Exception):
-                    proc.kill()
+    def _cleanup_job(self) -> None:
+        """Best-effort smazání agent Jobu a promptového souboru po doběhnutí."""
+        if self._job_runner is not None:
+            with contextlib.suppress(Exception):
+                self._job_runner.delete()
+        if self._prompt_path is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(self._prompt_path)
 
     # -- veřejné API -------------------------------------------------------
 
@@ -233,6 +232,9 @@ class ClaudeCodeClient:
         cfg = self.config
         env = {**os.environ, **cfg.env}
         args = cfg.build_args()
+        # In Job mode the prompt is delivered via a file on the shared workspace
+        # and redirected into `claude --print -`; locally it is piped on stdin.
+        prompt_stdin: Optional[bytes] = prompt.encode("utf-8")
 
         if cfg.kubectl_target is not None:
             target = cfg.kubectl_target
@@ -240,24 +242,28 @@ class ClaudeCodeClient:
                 yield ClaudeEvent("error", {"message": f"kubectl nenalezeno v PATH: {target.kubectl}"})
                 return
 
-            inner_argv = [cfg.command, *args]
-            if cfg.env:
-                env_argv = [f"{key}={value}" for key, value in cfg.env.items()]
-                inner_argv = ["env", *env_argv, *inner_argv]
-            inner = " ".join(shlex.quote(a) for a in inner_argv)
-            if cfg.cwd:
-                inner = f"cd {shlex.quote(cfg.cwd)} && exec {inner}"
+            cwd = cfg.cwd or target.workspace_path or "."
+            self._prompt_path = write_agent_prompt_file(cwd, target.namespace, prompt)
+            command_script = build_agent_command_script(
+                cwd=cwd,
+                argv=[cfg.command, *args],
+                env=cfg.env,
+                stdin_file=self._prompt_path,
+            )
+            runner = agent_job_runner(target)
+            self._job_runner = runner
+            try:
+                await asyncio.to_thread(runner.ensure_namespace)
+                await asyncio.to_thread(runner.apply, command_script)
+                pod = await asyncio.to_thread(runner.wait_for_pod)
+            except Exception as exc:  # noqa: BLE001
+                yield ClaudeEvent("error", {"message": f"Nepodařilo se spustit claude Job: {exc}"})
+                return
 
-            kubectl_argv: List[str] = [target.kubectl, "-n", target.namespace, "exec", "-i", target.selector]
-            if target.container:
-                kubectl_argv += ["-c", target.container]
-            kubectl_argv += ["--", "sh", "-c", inner]
-
+            prompt_stdin = None  # prompt delivered via file
             proc = await asyncio.create_subprocess_exec(
-                kubectl_argv[0],
-                *kubectl_argv[1:],
+                *runner.logs_argv(pod),
                 env=env,
-                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -285,16 +291,18 @@ class ClaudeCodeClient:
             except Exception:
                 pass
 
-        # Pošleme prompt na stdin a uzavřeme ho, aby CLI věděl, že je hotovo.
-        assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
-        try:
-            proc.stdin.write(prompt.encode("utf-8"))
-            await proc.stdin.drain()
-        finally:
+        # Lokální mód: prompt jde na stdin. Job mód: prompt už je v souboru.
+        assert proc.stdout is not None and proc.stderr is not None
+        if proc.stdin is not None:
             try:
-                proc.stdin.close()
-            except Exception:
-                pass
+                if prompt_stdin is not None:
+                    proc.stdin.write(prompt_stdin)
+                    await proc.stdin.drain()
+            finally:
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
 
         stderr_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
         stderr_lines: List[str] = []
@@ -407,6 +415,9 @@ class ClaudeCodeClient:
                         "stderr": "\n".join(stderr_lines[-20:]),
                     },
                 )
+
+            if cfg.kubectl_target is not None:
+                await asyncio.to_thread(self._cleanup_job)
 
     async def run_collect(self, prompt: str) -> Dict[str, Any]:
         """

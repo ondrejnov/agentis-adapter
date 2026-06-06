@@ -6,10 +6,13 @@ import pytest
 
 from common.config import Settings
 from common.kubernetes.ci_workflow import (
+    _FINISH_VOLUME_MOUNTS,
+    _FINISH_VOLUMES,
     CiStep,
     CiWorkflowError,
     build_step_job_manifest,
     load_ci_workflow,
+    load_finish_workflow,
     step_job_name,
 )
 from common.kubernetes.runtime import KubernetesRuntime
@@ -99,6 +102,73 @@ def test_build_step_job_manifest_substitutes_and_wraps_command():
     assert "python3.13 -m venv .venv" in script
     # workspace persists across step pods via the /var/www hostPath
     assert {"name": "www", "mountPath": "/var/www"} in container["volumeMounts"]
+
+
+FINISH_WORKFLOW_YAML = WORKFLOW_YAML + """
+finish:
+  image: registry.test/opencode:1.2
+  workdir: "[%WORKDIR%]"
+  env:
+    TASK_NUMBER: "[%TASK_NUMBER%]"
+    BRANCH: "[%BRANCH%]"
+  steps:
+    - name: Commit changes
+      run: git add -A
+    - name: Create pull request
+      run: gh pr create
+"""
+
+
+def test_load_finish_workflow_parses_finish_phase(tmp_path):
+    path = tmp_path / "ci.yaml"
+    path.write_text(FINISH_WORKFLOW_YAML, encoding="utf-8")
+
+    workflow = load_finish_workflow(path)
+
+    assert workflow is not None
+    assert workflow.env == {"TASK_NUMBER": "[%TASK_NUMBER%]", "BRANCH": "[%BRANCH%]"}
+    assert [step.name for step in workflow.steps] == ["Commit changes", "Create pull request"]
+
+
+def test_load_finish_workflow_absent_returns_none(tmp_path):
+    path = tmp_path / "ci.yaml"
+    path.write_text(WORKFLOW_YAML, encoding="utf-8")
+    assert load_finish_workflow(path) is None
+
+
+def test_build_finish_step_manifest_adds_git_volumes_and_replacements():
+    workflow = load_ci_workflow_from_text(FINISH_WORKFLOW_YAML)
+    finish = load_finish_workflow_from_text(FINISH_WORKFLOW_YAML)
+    step = finish.steps[0]
+
+    manifest = build_step_job_manifest(
+        workflow=finish,
+        step=step,
+        namespace="task-7-demo",
+        workspace_path="/var/www/worktrees/task-7",
+        extra_replacements={"[%TASK_NUMBER%]": "7", "[%BRANCH%]": "task-7"},
+        job_prefix="finish",
+        app_label="finish",
+        extra_volume_mounts=_FINISH_VOLUME_MOUNTS,
+        extra_volumes=_FINISH_VOLUMES,
+    )
+
+    assert manifest["metadata"]["name"] == "finish-1-commit-changes"
+    container = manifest["spec"]["template"]["spec"]["containers"][0]
+    assert {"name": "TASK_NUMBER", "value": "7"} in container["env"]
+    assert {"name": "BRANCH", "value": "task-7"} in container["env"]
+    mount_names = {mount["name"] for mount in container["volumeMounts"]}
+    assert {"gitconfig", "gh-config", "www"}.issubset(mount_names)
+    assert workflow.image == "registry.test/opencode:1.2"
+
+
+def load_finish_workflow_from_text(text):
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+        handle.write(text)
+        tmp = Path(handle.name)
+    return load_finish_workflow(tmp)
 
 
 def test_step_job_name_is_dns_safe_and_truncated():

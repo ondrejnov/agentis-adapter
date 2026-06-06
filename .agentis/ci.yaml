@@ -23,3 +23,45 @@ setup:
       run: poetry install --no-interaction --no-ansi
     - name: Build code-review graph
       run: code-review-graph build
+
+# Dokončovací kroky po doběhnutí agenta. Každý krok běží jako samostatný
+# Kubernetes Job nad sdíleným workspace, stejně jako setup. Navíc mají
+# namountovaný git/gh config, takže umí commitnout a založit pull request.
+# Dostupné placeholdery: [%WORKDIR%], [%MAIN_DIR%], [%NAMESPACE%],
+# [%TASK_NUMBER%], [%TASK_TITLE%], [%BRANCH%], [%BASE_BRANCH%], [%GITHUB_REPO%].
+finish:
+  image: rg.nl-ams.scw.cloud/reactis/opencode:1.2
+  workdir: "[%WORKDIR%]"
+  env:
+    HOME: /root
+    TASK_NUMBER: "[%TASK_NUMBER%]"
+    TASK_TITLE: "[%TASK_TITLE%]"
+    BRANCH: "[%BRANCH%]"
+    BASE_BRANCH: "[%BASE_BRANCH%]"
+    GITHUB_REPO: "[%GITHUB_REPO%]"
+    PATH: "[%WORKDIR%]/.venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  steps:
+    - name: Commit changes
+      run: |
+        git add -A
+        if git diff --cached --quiet; then
+          echo "Žádné změny ke commitnutí."
+        else
+          git -c user.name=Agentis -c user.email=code@agentis.cz \
+            commit -m "TASK: #${TASK_NUMBER} - ${TASK_TITLE}"
+        fi
+    - name: Create pull request
+      run: |
+        if [ -z "$GITHUB_REPO" ]; then
+          echo "Bez GitHub repozitáře, pull request se přeskakuje."
+          exit 0
+        fi
+        git push --set-upstream origin "${BRANCH}:refs/heads/${BRANCH}"
+        if gh pr view "$BRANCH" --json url --jq .url >/tmp/pr-url 2>/dev/null; then
+          echo "Pull request už existuje: $(cat /tmp/pr-url)"
+        else
+          gh pr create --base "$BASE_BRANCH" --head "$BRANCH" \
+            --repo "$GITHUB_REPO" \
+            --title "${TASK_TITLE:-$BRANCH}" \
+            --body "${TASK_TITLE:-$BRANCH}"
+        fi

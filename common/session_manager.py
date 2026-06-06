@@ -31,6 +31,7 @@ from common.config import Settings
 from common.models import AgentExecutionContextPayload, completion_task_status
 from common.git_adapter import GitAdapterService
 from common.kubernetes_runtime import KubernetesAdapterService
+from common.kubernetes.runtime import KubernetesRuntime
 from common.artifacts.expected import collect_expected_artifacts
 from common.artifacts.screenshots import collect_screenshot_images
 from common.artifacts.source_snapshot import (
@@ -182,10 +183,9 @@ class BaseSessionManager:
         kubectl_target = sess.kubectl_target
 
         if kubectl_target is not None:
-            # `proc` je lokální `kubectl exec` klient — jeho zabití pouze
-            # přeruší stream, ale agentí proces uvnitř podu běží dál.
-            # Zabijeme tedy agenta přímo v podu pomocí samostatného
-            # `kubectl exec ... -- pkill`.
+            # `proc` je lokální `kubectl logs -f` klient — jeho zabití pouze
+            # přeruší stream, ale agent Job v clusteru běží dál. Smažeme tedy
+            # rovnou celý Job (cascade smaže i pod).
             if proc is not None:
                 try:
                     proc.kill()
@@ -195,7 +195,7 @@ class BaseSessionManager:
                     sys.stderr.write(
                         f"[{self._AGENT_LABEL}-session] kill kubectl client failed for {session_id}: {exc}\n"
                     )
-            self._remote_pkill_agent(kubectl_target, session_id)
+            self._delete_agent_job(kubectl_target, session_id)
             return
 
         if proc is None:
@@ -228,25 +228,31 @@ class BaseSessionManager:
         except Exception as exc:  # noqa: BLE001
             sys.stderr.write(f"[{self._AGENT_LABEL}-session] kill failed for {session_id}: {exc}\n")
 
-    def _remote_pkill_agent(self, target: "KubectlExecTarget", session_id: str) -> None:
+    def _delete_agent_job(self, target: "KubectlExecTarget", session_id: str) -> None:
         kubectl_path = target.kubectl
         if shutil.which(kubectl_path) is None and not os.path.isabs(kubectl_path):
             sys.stderr.write(
-                f"[{self._AGENT_LABEL}-session] remote pkill skipped for {session_id}: "
+                f"[{self._AGENT_LABEL}-session] agent job delete skipped for {session_id}: "
                 f"kubectl not on PATH ({kubectl_path})\n"
             )
             return
 
-        args = [kubectl_path, "-n", target.namespace, "exec", target.selector]
-        if target.container:
-            args.extend(["-c", target.container])
-        args.extend(["--", "pkill", "-KILL", "-f", self._REMOTE_PKILL_PATTERN])
+        args = [
+            kubectl_path,
+            "-n",
+            target.namespace,
+            "delete",
+            "job",
+            target.job_name,
+            "--ignore-not-found=true",
+            "--wait=false",
+        ]
         try:
             subprocess.run(args, capture_output=True, text=True, timeout=15.0, check=False)
         except subprocess.TimeoutExpired:
-            sys.stderr.write(f"[{self._AGENT_LABEL}-session] remote pkill timed out for {session_id}\n")
+            sys.stderr.write(f"[{self._AGENT_LABEL}-session] agent job delete timed out for {session_id}\n")
         except Exception as exc:  # noqa: BLE001
-            sys.stderr.write(f"[{self._AGENT_LABEL}-session] remote pkill failed for {session_id}: {exc}\n")
+            sys.stderr.write(f"[{self._AGENT_LABEL}-session] agent job delete failed for {session_id}: {exc}\n")
 
     def remove(self, session_id: str) -> None:
         with self._lock:
@@ -596,7 +602,66 @@ class BaseSessionManager:
             result["output"] = output
         return result
 
+    def _finish_session_actions_kubernetes(self, sess: _AgentSession, session_ref: str) -> list[dict[str, Any]]:
+        """Run the declarative ``finish`` steps (commit / PR) as Kubernetes Jobs.
+
+        In kubernetes mode the post-agent logic lives in ``.agentis/ci.yaml``
+        under ``finish:``; each step runs as its own Job and is reported to
+        Agentis as an adapter event. Returns no extra comment attachments.
+        """
+        context = sess.context
+        if GitAdapterService.is_project_scope(context):
+            return []
+
+        runtime = KubernetesRuntime(context, self.settings, Path(sess.worktree))
+        steps = runtime.finish_steps()
+        if not steps:
+            return []
+
+        extra_replacements = {
+            "[%TASK_NUMBER%]": "" if context.task_number is None else str(context.task_number),
+            "[%TASK_TITLE%]": context.title or "",
+            "[%BRANCH%]": GitAdapterService._branch_name_for_context(context),
+            "[%BASE_BRANCH%]": context.base_branch or "",
+            "[%GITHUB_REPO%]": context.project_github_repo or "",
+        }
+
+        for step in steps:
+            event_id = f"finish:{session_ref}:{uuid4().hex}"
+            self._emit_adapter_event(
+                context,
+                kind="finish",
+                status="started",
+                event_id=event_id,
+                message=f"Dokončovací krok: {step.name}",
+            )
+            try:
+                result = runtime.run_finish_step(step, extra_replacements=extra_replacements)
+            except Exception as exc:  # noqa: BLE001
+                self._emit_adapter_event(
+                    context,
+                    kind="finish",
+                    status="failed",
+                    event_id=event_id,
+                    message=f"Dokončovací krok selhal: {step.name}",
+                    data={"error": str(exc)},
+                )
+                break
+            self._emit_adapter_event(
+                context,
+                kind="finish",
+                status="success",
+                event_id=event_id,
+                message=f"Dokončovací krok hotový: {step.name}",
+                data=result,
+            )
+
+        return []
+
     def _finish_session_actions(self, sess: _AgentSession, session_ref: str) -> list[dict[str, Any]]:
+        if sess.kubectl_target is not None:
+            return self._finish_session_actions_kubernetes(sess, session_ref)
+
         context = sess.context
         if GitAdapterService.is_project_scope(context) or not context.project_github_repo:
             return []

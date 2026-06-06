@@ -28,11 +28,14 @@ from common.config import Settings
 from common.models import AgentExecutionContextPayload
 from common.adapter_base import log_json
 from common.kubernetes.ci_workflow import (
+    _FINISH_VOLUME_MOUNTS,
+    _FINISH_VOLUMES,
     CI_WORKFLOW_PATH,
     CiStep,
     CiWorkflow,
     build_step_job_manifest,
     load_ci_workflow,
+    load_finish_workflow,
     namespace_manifest,
     step_job_name,
 )
@@ -233,6 +236,10 @@ class KubernetesRuntime:
     def _ensure_namespace(self, namespace: str) -> None:
         self._kubectl_apply(namespace_manifest(namespace))
 
+    def ensure_namespace(self, namespace: str) -> None:
+        """Public wrapper used by CLI adapters before applying the agent Job."""
+        self._ensure_namespace(namespace)
+
     def run_ci_step(self, step: CiStep, timeout: float = 900.0, interval: float = 3.0) -> dict[str, Any]:
         workflow = self.load_ci_workflow()
         if workflow is None:
@@ -277,6 +284,73 @@ class KubernetesRuntime:
 
         return {
             "action": "ci_setup",
+            "task_id": self.context.task_id,
+            "namespace": namespace,
+            "step": step.id,
+            "name": step.name,
+            "job": job_name,
+            "logs": logs,
+        }
+
+    # ------------------------------------------------------------------
+    # Finish workflow (.agentis/ci.yaml ``finish:`` — commit / pull request)
+    # ------------------------------------------------------------------
+
+    def load_finish_workflow(self) -> CiWorkflow | None:
+        return load_finish_workflow(self._ci_workflow_path())
+
+    def finish_steps(self) -> list[CiStep]:
+        if self.is_project_scope(self.context):
+            return []
+        workflow = self.load_finish_workflow()
+        return list(workflow.steps) if workflow else []
+
+    def run_finish_step(
+        self,
+        step: CiStep,
+        *,
+        extra_replacements: dict[str, str] | None = None,
+        timeout: float = 600.0,
+        interval: float = 3.0,
+    ) -> dict[str, Any]:
+        workflow = self.load_finish_workflow()
+        if workflow is None:
+            raise RuntimeError(f"Finish workflow not found at {self._ci_workflow_path()}")
+
+        namespace = self.namespace_for_context(self.context, self.settings)
+        self._ensure_namespace(namespace)
+
+        job_name = step_job_name(step, prefix="finish")
+        manifest = build_step_job_manifest(
+            workflow=workflow,
+            step=step,
+            namespace=namespace,
+            workspace_path=str(self.workspace_path),
+            main_dir=self.context.working_dir,
+            agentis_url=self.settings.public_base_url,
+            extra_replacements=extra_replacements,
+            job_prefix="finish",
+            app_label="finish",
+            extra_volume_mounts=_FINISH_VOLUME_MOUNTS,
+            extra_volumes=_FINISH_VOLUMES,
+        )
+
+        log_json(
+            "INFO",
+            "Running finish step",
+            task_id=self.context.task_id,
+            namespace=namespace,
+            step=step.id,
+            step_name=step.name,
+            job=job_name,
+        )
+
+        self._kubectl("delete", "job", job_name, "-n", namespace, "--ignore-not-found=true", "--wait=true")
+        self._kubectl_apply(manifest)
+        logs = self._wait_for_job(namespace, job_name, timeout=timeout, interval=interval)
+
+        return {
+            "action": "finish",
             "task_id": self.context.task_id,
             "namespace": namespace,
             "step": step.id,

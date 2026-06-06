@@ -366,14 +366,16 @@ def test_add_message_passes_kubectl_target_in_kubernetes_mode():
     assert target.namespace == "task-7-demo"
 
 
-def test_deploy_runs_kubernetes_flow_when_mode_is_kubernetes(monkeypatch):
+def test_deploy_only_ensures_namespace_in_kubernetes_mode(monkeypatch):
+    # The agent runs as a one-shot Job; deploy no longer applies a Deployment,
+    # it just makes sure the namespace exists.
     invoked: list[str] = []
 
-    def fake_super_deploy(self):  # noqa: ANN001
-        invoked.append("deploy")
-        return {"action": "deploy", "task_id": self.context.task_id, "status": "applied"}
+    def fake_ensure_namespace(self, namespace):  # noqa: ANN001
+        invoked.append(namespace)
 
-    monkeypatch.setattr(KubernetesRuntime, "deploy", fake_super_deploy)
+    monkeypatch.setattr(KubernetesRuntime, "deploy", lambda self: (_ for _ in ()).throw(AssertionError("deploy")))
+    monkeypatch.setattr(KubernetesRuntime, "ensure_namespace", fake_ensure_namespace)
 
     adapter = ClaudeCodeAdapterService(
         context=make_context(namespace="task-7-demo"),
@@ -383,8 +385,10 @@ def test_deploy_runs_kubernetes_flow_when_mode_is_kubernetes(monkeypatch):
 
     result = adapter.deploy()
 
-    assert invoked == ["deploy"]
-    assert result["status"] == "applied"
+    assert invoked == ["task-7-demo"]
+    assert result["status"] == "skipped"
+    assert result["reason"] == "agent_runs_as_job"
+    assert result["namespace"] == "task-7-demo"
 
 
 def test_question_reply_is_not_implemented():
@@ -566,18 +570,18 @@ def test_session_manager_abort_kills_local_process_group(monkeypatch):
         "common.session_manager.os.killpg",
         lambda pgid, sig: killed.append((pgid, sig)),
     )
-    remote_pkill = MagicMock()
-    monkeypatch.setattr(manager, "_remote_pkill_agent", remote_pkill)
+    delete_job = MagicMock()
+    monkeypatch.setattr(manager, "_delete_agent_job", delete_job)
 
     manager.abort("ses_local")
 
     assert sess.abort_event.is_set()
     assert killed == [(999, signal.SIGKILL)]
     proc.kill.assert_not_called()
-    remote_pkill.assert_not_called()
+    delete_job.assert_not_called()
 
 
-def test_session_manager_abort_pkills_remote_claude_for_kubectl_session(monkeypatch):
+def test_session_manager_abort_deletes_agent_job_for_kubectl_session(monkeypatch):
     manager = ClaudeSessionManager(settings=make_settings(claude_run_mode="kubernetes"))
     target = KubectlExecTarget(namespace="task-9-demo", selector="deployment/opencode", container="opencode")
     sess = _ClaudeSession(
@@ -609,15 +613,11 @@ def test_session_manager_abort_pkills_remote_claude_for_kubectl_session(monkeypa
         "kubectl",
         "-n",
         "task-9-demo",
-        "exec",
-        "deployment/opencode",
-        "-c",
-        "opencode",
-        "--",
-        "pkill",
-        "-KILL",
-        "-f",
-        "claude --print",
+        "delete",
+        "job",
+        "agent-run",
+        "--ignore-not-found=true",
+        "--wait=false",
     ]
 
 

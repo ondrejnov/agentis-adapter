@@ -210,15 +210,12 @@ def test_agentiscode_runtime_claude_does_not_enable_kubernetes(monkeypatch) -> N
     assert "kubectl_target" not in manager.start.call_args.kwargs
 
 
-def test_agentiscode_kubernetes_runtime_runs_deploy_and_passes_kubectl_target(monkeypatch) -> None:
+def test_agentiscode_kubernetes_deploy_ensures_namespace_and_passes_kubectl_target(monkeypatch) -> None:
     manager = MagicMock(spec=AgentisCodeSessionManager)
     manager.start.return_value = "ses_k8s"
     monkeypatch.setattr(AgentisCodeAdapterService, "_persist_agentis_session_id", lambda self, session_id: None)
-    monkeypatch.setattr(
-        KubernetesRuntime,
-        "deploy",
-        lambda self: {"action": "deploy", "task_id": self.context.task_id, "status": "applied"},
-    )
+    monkeypatch.setattr(KubernetesRuntime, "deploy", lambda self: (_ for _ in ()).throw(AssertionError("deploy")))
+    monkeypatch.setattr(KubernetesRuntime, "ensure_namespace", lambda self, namespace: None)
     context = make_context(
         namespace="task-7-demo",
         adapter=AdapterOptionsPayload(runtime="kubernetes", agent="build"),
@@ -228,15 +225,15 @@ def test_agentiscode_kubernetes_runtime_runs_deploy_and_passes_kubectl_target(mo
     deploy_result = adapter.deploy()
     adapter.start_session()
 
-    assert deploy_result["status"] == "applied"
+    assert deploy_result["status"] == "skipped"
+    assert deploy_result["reason"] == "agent_runs_as_job"
     target = manager.start.call_args.kwargs["kubectl_target"]
     assert isinstance(target, KubectlExecTarget)
     assert target.namespace == "task-7-demo"
-    assert target.selector == "deployment/opencode"
-    assert target.container == "opencode"
+    assert target.run_manifest_path is not None
 
 
-def test_session_manager_abort_terminates_remote_agentiscode_for_kubectl_session(monkeypatch) -> None:
+def test_session_manager_abort_deletes_agent_job_for_kubectl_session(monkeypatch) -> None:
     manager = AgentisCodeSessionManager(settings=make_settings())
     target = KubectlExecTarget(namespace="task-9-demo", selector="deployment/opencode", container="opencode")
     sess = _AgentisCodeSession(
@@ -267,15 +264,11 @@ def test_session_manager_abort_terminates_remote_agentiscode_for_kubectl_session
         "kubectl",
         "-n",
         "task-9-demo",
-        "exec",
-        "deployment/opencode",
-        "-c",
-        "opencode",
-        "--",
-        "pkill",
-        "-TERM",
-        "-f",
-        "agentiscode",
+        "delete",
+        "job",
+        "agent-run",
+        "--ignore-not-found=true",
+        "--wait=false",
     ]
     assert captured["kwargs"] == {"capture_output": True, "text": True, "timeout": 15.0, "check": False}
 

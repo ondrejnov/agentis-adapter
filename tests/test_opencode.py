@@ -12,6 +12,7 @@ import pytest
 
 from common.config import Settings
 from common.cli_session import KubectlExecTarget
+from common.kubernetes.agent_job import AgentJobRunner
 from common.models import AdapterOptionsPayload, AgentExecutionContextPayload
 from opencode.api import create_app, _DISPATCH
 from tests.support import RpcTestClient
@@ -186,9 +187,17 @@ def test_stream_uses_temp_prompt_file_for_long_local_prompt(monkeypatch) -> None
     assert "x" * 11 not in captured["args"][2]
 
 
-def test_stream_passes_config_env_into_kubectl_exec_shell(monkeypatch) -> None:
+def test_stream_runs_agent_as_kubernetes_job(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
     process = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+
+    monkeypatch.setattr(AgentJobRunner, "ensure_namespace", lambda self: None)
+    monkeypatch.setattr(
+        AgentJobRunner, "apply", lambda self, command_script: captured.__setitem__("script", command_script)
+    )
+    monkeypatch.setattr(AgentJobRunner, "wait_for_pod", lambda self, **kwargs: "pod/agent-run-xyz")
+    # Keep the prompt file / job around so the assertions below can inspect them.
+    monkeypatch.setattr(OpenCodeRunner, "_cleanup_job", lambda self: None)
 
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
         captured["args"] = args
@@ -197,14 +206,20 @@ def test_stream_passes_config_env_into_kubectl_exec_shell(monkeypatch) -> None:
 
     monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
 
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+
     async def collect_events() -> list[dict[str, Any]]:
         client = OpenCodeRunner(
             config=OpenCodeRunConfig(
                 command="opencode",
-                cwd="/work/project",
+                cwd=str(cwd),
                 env={"IS_SANDBOX": "1"},
                 kubectl_target=KubectlExecTarget(
-                    namespace="ns", selector="deployment/opencode", kubectl="/usr/bin/kubectl"
+                    namespace="ns",
+                    kubectl="/usr/bin/kubectl",
+                    run_manifest_path=str(tmp_path / "run.yaml"),
+                    workspace_path=str(cwd),
                 ),
             )
         )
@@ -214,54 +229,20 @@ def test_stream_passes_config_env_into_kubectl_exec_shell(monkeypatch) -> None:
 
     assert events == []
     assert captured["env"]["IS_SANDBOX"] == "1"
-    assert captured["args"][-2:] == (
-        "-c",
-        "cd /work/project && exec env IS_SANDBOX=1 opencode run Ahoj --format json --dangerously-skip-permissions",
-    )
-    assert process.stdin.data == bytearray()
-    assert process.stdin.closed is True
+    # The agent CLI is injected into the Job command and reads the prompt file.
+    script = captured["script"]
+    assert script.startswith(f"cd {cwd} && exec env IS_SANDBOX=1 opencode run")
+    assert "Read the attached prompt file and follow its instructions exactly." in script
+    assert "--file" in script
+    assert "--format json --dangerously-skip-permissions" in script
+    assert "Ahoj" not in script
+    # The streamed subprocess follows the Job pod logs (no stdin).
+    assert captured["args"] == ("/usr/bin/kubectl", "-n", "ns", "logs", "-f", "pod/agent-run-xyz")
 
-
-def test_stream_uses_pod_temp_prompt_file_for_long_kubectl_prompt(monkeypatch) -> None:
-    captured: dict[str, Any] = {}
-    process = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
-
-    monkeypatch.setattr(OpenCodeRunner, "_prompt_file_threshold_bytes", staticmethod(lambda: 10))
-
-    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
-        captured["args"] = args
-        captured["env"] = kwargs["env"]
-        return process
-
-    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
-
-    async def collect_events() -> list[dict[str, Any]]:
-        client = OpenCodeRunner(
-            config=OpenCodeRunConfig(
-                command="opencode",
-                cwd="/work/project",
-                env={"IS_SANDBOX": "1"},
-                kubectl_target=KubectlExecTarget(
-                    namespace="ns", selector="deployment/opencode", kubectl="/usr/bin/kubectl"
-                ),
-            )
-        )
-        return [{"type": event.type, **event.data} async for event in client.stream("x" * 11)]
-
-    events = asyncio.run(collect_events())
-
-    assert events == []
-    assert captured["env"]["IS_SANDBOX"] == "1"
-    assert captured["args"][-2] == "-c"
-    shell = captured["args"][-1]
-    assert shell.startswith("tmp=/tmp/opencode-prompt-")
-    assert 'trap \'rm -f "$tmp"\' EXIT; cat > "$tmp";' in shell
-    assert "cd /work/project && env IS_SANDBOX=1 opencode run" in shell
-    assert "--file /tmp/opencode-prompt-" in shell
-    assert "--format json --dangerously-skip-permissions" in shell
-    assert "x" * 11 not in shell
-    assert process.stdin.data.decode("utf-8") == "x" * 11
-    assert process.stdin.closed is True
+    # The prompt is materialised on the shared workspace next to the worktree.
+    prompts = list((cwd.parent / ".agentis-prompts").glob("ns-*.md"))
+    assert len(prompts) == 1
+    assert prompts[0].read_text(encoding="utf-8") == "Ahoj"
 
 
 def test_stream_includes_stderr_in_nonzero_exit_error(monkeypatch) -> None:

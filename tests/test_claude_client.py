@@ -255,8 +255,16 @@ def test_stream_stops_and_kills_when_process_hangs_after_result(monkeypatch) -> 
     assert proc.killed.is_set()
 
 
-def test_stream_passes_config_env_into_kubectl_exec_shell(monkeypatch) -> None:
+def test_stream_runs_agent_as_kubernetes_job(monkeypatch, tmp_path) -> None:
+    from common.kubernetes.agent_job import AgentJobRunner
+
     captured: dict[str, Any] = {}
+    monkeypatch.setattr(AgentJobRunner, "ensure_namespace", lambda self: None)
+    monkeypatch.setattr(
+        AgentJobRunner, "apply", lambda self, command_script: captured.__setitem__("script", command_script)
+    )
+    monkeypatch.setattr(AgentJobRunner, "wait_for_pod", lambda self, **kwargs: "pod/agent-run-xyz")
+    monkeypatch.setattr(ClaudeCodeClient, "_cleanup_job", lambda self: None)
 
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
         captured["args"] = args
@@ -265,13 +273,21 @@ def test_stream_passes_config_env_into_kubectl_exec_shell(monkeypatch) -> None:
 
     monkeypatch.setattr("claude.client.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
 
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+
     async def collect_events() -> list[dict[str, Any]]:
         client = ClaudeCodeClient(
             config=ClaudeRunConfig(
                 command="claude",
-                cwd="/work/project",
+                cwd=str(cwd),
                 env={"IS_SANDBOX": "1", "AGENTIS_URL": "http://adapter.internal:8002"},
-                kubectl_target=KubectlExecTarget(namespace="ns", selector="deployment/opencode", kubectl="/usr/bin/kubectl"),
+                kubectl_target=KubectlExecTarget(
+                    namespace="ns",
+                    kubectl="/usr/bin/kubectl",
+                    run_manifest_path=str(tmp_path / "run.yaml"),
+                    workspace_path=str(cwd),
+                ),
             )
         )
         return [{"type": event.type, **event.data} async for event in client.stream("Ahoj")]
@@ -280,7 +296,14 @@ def test_stream_passes_config_env_into_kubectl_exec_shell(monkeypatch) -> None:
 
     assert events == []
     assert captured["env"]["IS_SANDBOX"] == "1"
-    assert captured["args"][-2:] == (
-        "-c",
-        "cd /work/project && exec env IS_SANDBOX=1 AGENTIS_URL=http://adapter.internal:8002 claude --print - --output-format stream-json --verbose --dangerously-skip-permissions --disallowedTools AskUserQuestion",
+    # The agent CLI is injected into the Job command and reads the prompt file
+    # redirected on stdin.
+    script = captured["script"]
+    assert script.startswith(
+        f"cd {cwd} && exec env IS_SANDBOX=1 AGENTIS_URL=http://adapter.internal:8002 "
+        "claude --print - --output-format stream-json --verbose "
+        "--dangerously-skip-permissions --disallowedTools AskUserQuestion"
     )
+    assert script.rstrip().endswith(".md")  # prompt file redirected on stdin
+    # The streamed subprocess follows the Job pod logs.
+    assert captured["args"] == ("/usr/bin/kubectl", "-n", "ns", "logs", "-f", "pod/agent-run-xyz")
