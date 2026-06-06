@@ -198,12 +198,6 @@ class UndoParams(BaseModel):
     context: AgentExecutionContextPayload
 
 
-class ProviderSyncUsageParams(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    providers: list[Literal["codex", "claude"]] | None = None
-
-
 class RunEventPayload(BaseModel):
     kind: Literal["start", "message", "question", "approve", "proxy"]
     created_at: str = Field(default_factory=utc_now)

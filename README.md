@@ -4,7 +4,7 @@ Samostatny FastAPI JSON-RPC adapter pro agenta. Projekt nema zadnou databazi a d
 
 ## Co umi
 
-- pasivni WebSocket transport prijima JSON-RPC 2.0 metody `start`, `add_message`, `question`, `approve`, `git_merge`, `abort`, `close`, `provider.sync_usage` z Agentisu pres odchozi spojeni
+- pasivni WebSocket transport prijima JSON-RPC 2.0 metody `start`, `add_message`, `question`, `approve`, `git_merge`, `abort`, `close` z Agentisu pres odchozi spojeni
 - aktivitu agenta (komentare, dokoncovaci akce, adapter eventy) adapter cte primo z postupneho vystupu `opencode`/`claude` CLI a forwarduje do endpointu z `AGENTIS_ENDPOINT` — agent runtime uz nedela zadne callbacky zpet do adapteru
 - `GET /health` na ASGI aplikaci pro healthcheck (adapter ale neposlucha na zadnem inbound portu)
 - `start` vytvori git branch a worktree podle `task_id`, a pak aplikuje Kubernetes manifest pres `kubectl`
@@ -63,20 +63,9 @@ pipx install git+https://github.com/ondrejnov/agentis-kubernetes-adapter.git
 
 ## Rate limity provideru
 
-Jednorazove nacteni rate limitu a ulozeni snapshotu do Agentisu:
-
-```bash
-poetry run python ratelimits.py
-```
-
-Jen vybrany provider:
-
-```bash
-poetry run python ratelimits.py codex
-poetry run python ratelimits.py claude
-```
-
-Script pouziva stejnou konfiguraci jako adapter: `AGENTIS_ENDPOINT`, `AGENTIS_TOKEN`, `CODEX_USAGE_ACCOUNTS`/`CODEX_HOME` a `CLAUDE_USAGE_ACCOUNTS`/`CLAUDE_HOME`.
+Sber rate limitu a obnova OAuth tokenu byly vyclenene do samostatne aplikace
+`agentis-ratelimits` (`/var/www/agentis/ratelimits`). Tento adapter uz usage data
+nesynchronizuje.
 
 ## Docker
 
@@ -118,8 +107,6 @@ Script umi:
 - `ADAPTER_PUBLIC_URL` optional verejna nebo clusterova base URL adapteru; pokud chybi, adapter zkusi slozit cluster DNS z `K8S_SERVICE_NAME` a `K8S_NAMESPACE`
 - `AGENTIS_ENDPOINT` default `http://10.0.0.205:8891`
 - `AGENTIS_TOKEN` default `1234`
-- `CODEX_USAGE_ACCOUNTS` optional JSON konfigurace Codex účtů; fallback je `CODEX_HOME`/`~/.codex/auth*.json`
-- `CLAUDE_USAGE_ACCOUNTS` optional JSON konfigurace Claude Code JSONL usage zdrojů; fallback je OAuth usage nebo `CLAUDE_HOME`/`~/.claude/projects`
 - `ADAPTER_MANIFEST_PATH` default `kubernetes` v tomto repozitari; muze byt adresar i konkretni soubor
 - konkretni soubor manifestu v requestu posilej jako `context.adapter.manifest` (napr. `opencode.yaml`)
 - projektovy rezim zapnes pres `context.adapter.scope = "project"`; adapter pouzije `opencode-project.yaml`, namespace podle `project_slug`, aktualni git worktree z `context.working_dir` a nebude vytvaret task branch/worktree

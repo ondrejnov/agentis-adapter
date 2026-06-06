@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -18,9 +17,6 @@ from common.kubernetes_runtime import KubernetesAdapterService, KubernetesRuntim
 from common.artifacts.expected import collect_expected_artifacts
 from common.kubernetes.manifest_parser import OpenCodeManifestParser
 from common.rpc.jsonrpc import AgentJsonRpcService
-from common.usage.claude import ClaudeUsageUnavailable, get_claude_usage
-from common.usage import provider as provider_usage
-from common.usage.provider import ProviderUsageSyncService
 from tests.support import RpcTestClient
 
 
@@ -279,101 +275,6 @@ def test_project_scope_namespace_uses_project_slug():
 
     assert namespace == "project-agentis-core"
     assert dev_server_url == "http://app-project-agentis-core.dev.agentis.cz"
-
-
-def test_provider_sync_usage_jsonrpc_dispatch():
-    class FakeProviderUsageSyncService:
-        def sync_provider_usage(self, params):
-            assert params.providers == ["codex"]
-            return {"synced": [{"code": "codex"}], "failed": []}
-
-    client = make_client()
-    client.app.state.provider_usage_sync_service = FakeProviderUsageSyncService()
-
-    response = client.post(
-        "/api",
-        json={"jsonrpc": "2.0", "id": 1, "method": "provider.sync_usage", "params": {"providers": ["codex"]}},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["result"] == {"synced": [{"code": "codex"}], "failed": []}
-
-
-def test_provider_usage_sync_saves_loaded_usage(monkeypatch):
-    calls: list[dict[str, Any]] = []
-
-    class FakeAgentisClient:
-        def __init__(self, endpoint, token=None, session=None):
-            assert endpoint == "http://agentis.local"
-            assert token == "secret"
-
-        def call(self, method, params=None, *, request_id=None):
-            calls.append({"method": method, "params": params})
-            return {"form": {"id": "provider-1"}}
-
-    monkeypatch.setattr("common.usage.provider.AgentisJsonRpcClient", FakeAgentisClient)
-    monkeypatch.setitem(
-        provider_usage.PROVIDERS,
-        "codex",
-        {
-            "title": "Codex limits",
-            "vendor": "OpenAI",
-            "loader": lambda: {"available": True, "limits": {"primary": {"used_percent": 10}, "secondary": None}},
-            "error": RuntimeError,
-        },
-    )
-
-    result = ProviderUsageSyncService(
-        make_settings(agentis_endpoint="http://agentis.local", agentis_token="secret")
-    ).sync(["codex"])
-
-    assert result["failed"] == []
-    assert result["synced"][0]["code"] == "codex"
-    assert calls[0]["method"] == "provider.save_usage"
-    assert calls[0]["params"]["data"]["usage"]["available"] is True
-
-
-def test_claude_usage_requires_online_oauth_data(monkeypatch, tmp_path):
-    usage_file = tmp_path / "usage.jsonl"
-    usage_file.write_text('{"timestamp":"2026-05-13T00:00:00Z","usage":{"input_tokens":1}}\n', encoding="utf-8")
-
-    monkeypatch.setenv("CLAUDE_USAGE_ACCOUNTS", json.dumps([{"usage_path": str(usage_file)}]))
-    monkeypatch.setattr("common.usage.claude._fetch_oauth_usage_account", lambda: None)
-
-    with pytest.raises(ClaudeUsageUnavailable, match="online usage data is unavailable"):
-        get_claude_usage()
-
-
-def test_provider_usage_sync_skips_unavailable_claude_usage(monkeypatch):
-    calls: list[dict[str, Any]] = []
-
-    class FakeAgentisClient:
-        def __init__(self, endpoint, token=None, session=None):
-            pass
-
-        def call(self, method, params=None, *, request_id=None):
-            calls.append({"method": method, "params": params})
-            return {"form": {"id": "provider-1"}}
-
-    monkeypatch.setattr("common.usage.provider.AgentisJsonRpcClient", FakeAgentisClient)
-    monkeypatch.setitem(
-        provider_usage.PROVIDERS,
-        "claude",
-        {
-            "title": "Claude Code limits",
-            "vendor": "Anthropic",
-            "loader": lambda: (_ for _ in ()).throw(RuntimeError("online usage unavailable")),
-            "error": RuntimeError,
-            "skip_unavailable": True,
-        },
-    )
-
-    result = ProviderUsageSyncService(
-        make_settings(agentis_endpoint="http://agentis.local", agentis_token="secret")
-    ).sync(["claude"])
-
-    assert calls == []
-    assert result == {"synced": [], "failed": [{"code": "claude", "error": "online usage unavailable"}]}
 
 
 def expected_completion_actions() -> list[dict[str, Any]]:

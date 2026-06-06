@@ -10,7 +10,6 @@ from common.models import (
     ApproveParams,
     CloseParams,
     GitMergeParams,
-    ProviderSyncUsageParams,
     QuestionParams,
     StartParams,
     UndoParams,
@@ -19,7 +18,6 @@ from opencode.adapter import OpenCodeAdapterService
 from opencode.session_manager import OpenCodeSessionManager
 from common.rpc.jsonrpc import AgentJsonRpcService
 from common.rpc.session_registry import SessionContextRegistry
-from common.usage.provider import ProviderUsageSyncService
 
 
 _DISPATCH: dict[str, JsonRpcRoute] = {
@@ -31,11 +29,6 @@ _DISPATCH: dict[str, JsonRpcRoute] = {
     "abort": JsonRpcRoute(AbortParams, "abort"),
     "undo": JsonRpcRoute(UndoParams, "undo"),
     "close": JsonRpcRoute(CloseParams, "close"),
-    "provider.sync_usage": JsonRpcRoute(
-        ProviderSyncUsageParams,
-        "sync_provider_usage",
-        service_attr="provider_usage_sync_service",
-    ),
 }
 
 
@@ -51,7 +44,6 @@ def _configure_services(app: FastAPI, settings: Settings, session_registry: Sess
             session_manager=opencode_session_manager,
         ),
     )
-    app.state.provider_usage_sync_service = ProviderUsageSyncService(settings=settings)
 
 
 def create_app() -> FastAPI:

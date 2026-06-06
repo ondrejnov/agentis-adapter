@@ -69,7 +69,6 @@ Spolecne handlery jsou v `common/rpc/jsonrpc.py` ve tride `AgentJsonRpcService`.
 | `git_merge` | Rebase/merge task vetve do base branche, push a cleanup. |
 | `abort` | Zastavi bezici session/proces. |
 | `close` | Uklidi session, worktree, branch a pripadne Kubernetes prostredi. |
-| `provider.sync_usage` | Jen u OpenCode adapteru; synchronizace usage dat provideru. |
 
 Parametry se validuji Pydantic modely v `common/models.py`. Hlavni payload je `AgentExecutionContextPayload`.
 
