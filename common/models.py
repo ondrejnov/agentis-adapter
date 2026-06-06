@@ -40,7 +40,7 @@ class AdapterOptionsPayload(BaseModel):
     scope: Literal["task", "worktree", "project"] = "task"
     agent: str | None = None
     model: str | None = None
-    variant: str | None = None
+    effort: str | None = None
     runtime: str | None = None
     task_status: int | None = None
 

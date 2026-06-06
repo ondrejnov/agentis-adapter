@@ -227,7 +227,7 @@ class OpenCodeRunner:
             if target.container:
                 kubectl_argv += ["-c", target.container]
             kubectl_argv += ["--", "sh", "-c", inner]
-
+            print(" ".join(kubectl_argv))
             proc = await asyncio.create_subprocess_exec(
                 kubectl_argv[0],
                 *kubectl_argv[1:],
@@ -251,7 +251,7 @@ class OpenCodeRunner:
             else:
                 args = cfg.build_args(prompt)
             local_command = build_local_setup_shell_command([cfg.command, *args])
-            print(local_command)
+            print(" ".join(local_command))
             try:
                 proc = await asyncio.create_subprocess_exec(
                     "bash",

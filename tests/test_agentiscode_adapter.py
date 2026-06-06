@@ -43,7 +43,7 @@ def make_context(**overrides: Any) -> AgentExecutionContextPayload:
         "description": "Popis ukolu",
         "project_slug": "agentis",
         "working_dir": "/var/www/repo",
-        "adapter": AdapterOptionsPayload(agent="build", model="openai/gpt-5", variant="high"),
+        "adapter": AdapterOptionsPayload(agent="build", model="openai/gpt-5", effort="high"),
     }
     payload.update(overrides)
     return AgentExecutionContextPayload(**payload)

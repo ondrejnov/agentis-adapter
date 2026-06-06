@@ -341,8 +341,8 @@ class AgentisCodeSessionManager:
             args.extend(["--agentis-token", self.settings.agentis_token])
         if adapter_opts and adapter_opts.model:
             args.extend(["--model", adapter_opts.model])
-        if adapter_opts and adapter_opts.variant:
-            args.extend(["--effort", adapter_opts.variant])
+        if adapter_opts and adapter_opts.effort:
+            args.extend(["--effort", adapter_opts.effort])
         if adapter_opts and adapter_opts.agent:
             args.extend(["--agent", adapter_opts.agent])
         if resume_id:

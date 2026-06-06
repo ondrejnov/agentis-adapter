@@ -48,9 +48,9 @@ class KubernetesAdapterService(GitAdapterService):
         return KubernetesRuntime.dev_server_url_for_context(context, settings)
 
     def _prompt_variant(self) -> str | None:
-        if not self.context.adapter or not self.context.adapter.variant:
+        if not self.context.adapter or not self.context.adapter.effort:
             return None
-        return self.context.adapter.variant
+        return self.context.adapter.effort
 
     # ------------------------------------------------------------------
     # Deploy / readiness — delegated to the runtime helper
@@ -173,7 +173,9 @@ class KubernetesAdapterService(GitAdapterService):
             "result": result,
         }
 
-    def start_session(self, pod_url: str | None = None, fork_from_session_id: str | None = None) -> dict[str, str | None]:
+    def start_session(
+        self, pod_url: str | None = None, fork_from_session_id: str | None = None
+    ) -> dict[str, str | None]:
         """Create an OpenCode session and send the initial prompt asynchronously."""
         if not pod_url:
             raise RuntimeError("pod_url is required to start an OpenCode session")

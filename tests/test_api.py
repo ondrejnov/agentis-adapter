@@ -48,10 +48,6 @@ def make_settings(**overrides: Any) -> Settings:
     return Settings(**values)
 
 
-
-
-
-
 def test_collect_expected_artifacts_upload_payload(tmp_path):
     report = tmp_path / "dist" / "report.json"
     report.parent.mkdir()
@@ -84,8 +80,6 @@ def test_collect_expected_artifacts_ignores_paths_outside_root(tmp_path):
     )
 
     assert collect_expected_artifacts(context, tmp_path) == []
-
-
 
 
 def fake_agentis_client_factory(captured_calls: list[dict[str, Any]]):
@@ -279,7 +273,9 @@ def test_project_scope_namespace_uses_project_slug():
     )
 
     namespace = KubernetesAdapterService.namespace_for_context(context, make_settings(namespace_prefix="Task"))
-    dev_server_url = KubernetesAdapterService.dev_server_url_for_context(context, make_settings(namespace_prefix="Task"))
+    dev_server_url = KubernetesAdapterService.dev_server_url_for_context(
+        context, make_settings(namespace_prefix="Task")
+    )
 
     assert namespace == "project-agentis-core"
     assert dev_server_url == "http://app-project-agentis-core.dev.agentis.cz"
@@ -327,7 +323,9 @@ def test_provider_usage_sync_saves_loaded_usage(monkeypatch):
         },
     )
 
-    result = ProviderUsageSyncService(make_settings(agentis_endpoint="http://agentis.local", agentis_token="secret")).sync(["codex"])
+    result = ProviderUsageSyncService(
+        make_settings(agentis_endpoint="http://agentis.local", agentis_token="secret")
+    ).sync(["codex"])
 
     assert result["failed"] == []
     assert result["synced"][0]["code"] == "codex"
@@ -337,9 +335,7 @@ def test_provider_usage_sync_saves_loaded_usage(monkeypatch):
 
 def test_claude_usage_requires_online_oauth_data(monkeypatch, tmp_path):
     usage_file = tmp_path / "usage.jsonl"
-    usage_file.write_text(
-        '{"timestamp":"2026-05-13T00:00:00Z","usage":{"input_tokens":1}}\n', encoding="utf-8"
-    )
+    usage_file.write_text('{"timestamp":"2026-05-13T00:00:00Z","usage":{"input_tokens":1}}\n', encoding="utf-8")
 
     monkeypatch.setenv("CLAUDE_USAGE_ACCOUNTS", json.dumps([{"usage_path": str(usage_file)}]))
     monkeypatch.setattr("common.usage.claude._fetch_oauth_usage_account", lambda: None)
@@ -372,24 +368,12 @@ def test_provider_usage_sync_skips_unavailable_claude_usage(monkeypatch):
         },
     )
 
-    result = ProviderUsageSyncService(make_settings(agentis_endpoint="http://agentis.local", agentis_token="secret")).sync(
-        ["claude"]
-    )
+    result = ProviderUsageSyncService(
+        make_settings(agentis_endpoint="http://agentis.local", agentis_token="secret")
+    ).sync(["claude"])
 
     assert calls == []
     assert result == {"synced": [], "failed": [{"code": "claude", "error": "online usage unavailable"}]}
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def expected_completion_actions() -> list[dict[str, Any]]:
@@ -1097,8 +1081,6 @@ def test_jsonrpc_http_dispatch_preserves_invalid_params_shape():
     assert isinstance(payload["error"]["data"], list)
 
 
-
-
 def test_jsonrpc_internal_errors_are_logged_to_stderr(capsys):
     events: list[tuple[str, str, str | None]] = []
 
@@ -1803,6 +1785,7 @@ def test_git_merge_aborts_failed_rebase_when_conflict_resolver_fails(monkeypatch
     monkeypatch.setattr(KubernetesAdapterService, "_resolved_worktree_path", lambda self: worktree_path)
     monkeypatch.setattr(KubernetesAdapterService, "_git_succeeds", staticmethod(fake_git_succeeds))
     monkeypatch.setattr(KubernetesAdapterService, "_run_git", staticmethod(fake_run_git))
+
     class FakeRunLogger:
         def __init__(self, run_id: str) -> None:
             self.run_id = run_id
@@ -2203,7 +2186,7 @@ def test_start_session_persists_session_id_in_agentis(monkeypatch):
             description="Popis ukolu",
             project_slug="agentis",
             working_dir="/var/www/repo",
-            adapter=AdapterOptionsPayload(agent="build", model="gpt-5.4", variant="high", runtime="kubernetes"),
+            adapter=AdapterOptionsPayload(agent="build", model="gpt-5.4", effort="high", runtime="kubernetes"),
         ),
         make_settings(
             worktree_root=Path("/srv/worktrees"),
@@ -2454,17 +2437,3 @@ def test_opencode_add_message_snapshots_before_prompt(monkeypatch):
     assert captured["client_base_url"] == "http://pod"
     assert captured["client_directory"] == "/srv/worktrees/task-1"
     assert captured["prompt_payload"]["parts"] == [{"type": "text", "text": "Feedback"}]
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -61,7 +61,7 @@ class ClaudeSessionManager(BaseSessionManager):
             cwd=sess.worktree,
             model=(adapter_opts.model if adapter_opts and adapter_opts.model else None),
             agent=(adapter_opts.agent if adapter_opts and adapter_opts.agent else None),
-            effort=(adapter_opts.variant if adapter_opts and adapter_opts.variant else None),
+            effort=(adapter_opts.effort if adapter_opts and adapter_opts.effort else None),
             resume_session_id=resume_id,
             dangerously_skip_permissions=True,
             env=env,
