@@ -153,7 +153,6 @@ lifecycle, ktery konkretni adaptery implementuji. O gitu ani Kubernetes nevi.
 
 - odvozeni namespace a ingress/URL,
 - resolveni a `apply`/`delete` manifestu,
-- volitelny lokalni `opencode web` runtime,
 - `deploy`, `wait_ready`, `teardown`.
 
 Adapter service musi implementovat tyto metody:
@@ -270,7 +269,6 @@ Zodpovednosti:
 - nahrazuje placeholdery pres `common/kubernetes/manifest_parser.py`,
 - vola `kubectl apply`,
 - ceka na URL OpenCode runtime,
-- umi lokalni `opencode web` fallback pro `adapter.runtime = "local"`, pokud neexistuje local deploy config,
 - vytvari `opencode.json` z template, pokud `requires_agentis_init = True`.
 
 CLI adaptery v defaultnim lokalnim modu Kubernetes nepouziji. Pri `context.adapter.runtime = "kubernetes"` deleguji `deploy`, `wait_ready` a teardown na `KubernetesRuntime` a samotne CLI spousti pres `kubectl exec` v podu.

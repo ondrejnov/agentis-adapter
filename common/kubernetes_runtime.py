@@ -20,7 +20,7 @@ from common.git_adapter import GitAdapterService
 from common.adapter_base import log_json
 from common.artifacts.source_snapshot import build_snapshot_key, snapshot_sources_best_effort
 from common.opencode_rest_client import OpenCodeApiError, OpenCodeRestClient
-from common.kubernetes.runtime import KubernetesRuntime, LocalOpenCodeRuntime
+from common.kubernetes.runtime import KubernetesRuntime
 from opencode.utils import OpenCodeUtils
 
 
@@ -305,42 +305,6 @@ class KubernetesAdapterService(GitAdapterService):
         """Tear down the Kubernetes namespace and remove the git branch/worktree."""
         runtime = self._runtime()
         namespace = self.namespace_for_context(self.context, self.settings)
-        if runtime._should_use_local_opencode():
-            local_process_stopped = runtime._stop_local_opencode()
-            if self.is_project_scope(self.context):
-                return {
-                    "action": "close",
-                    "task_id": self.context.task_id,
-                    "namespace": namespace,
-                    "manifest_path": None,
-                    "status": "skipped",
-                    "reason": "project_scope",
-                    "local_process_stopped": local_process_stopped,
-                    "worktree_removed": False,
-                    "branch_deleted": False,
-                }
-
-            repository_root = self._repository_root()
-            branch_name = self._branch_name_for_context(self.context)
-            worktree_path = self._resolved_worktree_path()
-            worktree_removed, branch_deleted = self._cleanup_worktree_branch(
-                repository_root,
-                branch_name,
-                worktree_path,
-            )
-            return {
-                "action": "close",
-                "task_id": self.context.task_id,
-                "branch": branch_name,
-                "base_branch": self.context.base_branch,
-                "namespace": namespace,
-                "manifest_path": None,
-                "worktree_path": str(worktree_path),
-                "local_process_stopped": local_process_stopped,
-                "worktree_removed": worktree_removed,
-                "branch_deleted": branch_deleted,
-            }
-
         manifest_path = str(runtime._resolve_manifest_source())
         if self.is_project_scope(self.context):
             return {
@@ -389,4 +353,4 @@ class KubernetesAdapterService(GitAdapterService):
         }
 
 
-__all__ = ["KubernetesAdapterService", "KubernetesRuntime", "LocalOpenCodeRuntime"]
+__all__ = ["KubernetesAdapterService", "KubernetesRuntime"]

@@ -2,10 +2,10 @@
 
 ``KubernetesRuntime`` is a plain collaborator (NOT an adapter): it owns the
 Kubernetes-specific concerns — namespace/ingress naming, manifest resolution and
-``apply``/``delete``, the optional local ``opencode web`` runtime and the
-readiness probe. Both the local CLI adapter (in ``kubernetes`` mode) and the
-``KubernetesAdapterService`` compose it; neither borrows it from the other, so
-the adapter inheritance tree stays free of Kubernetes wiring.
+``apply``/``delete`` and the readiness probe. Both the local CLI adapter (in
+``kubernetes`` mode) and the ``KubernetesAdapterService`` compose it; neither
+borrows it from the other, so the adapter inheritance tree stays free of
+Kubernetes wiring.
 
 The git/worktree layer resolves the workspace path and passes it in; this helper
 never runs git itself.
@@ -13,33 +13,20 @@ never runs git itself.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-import os
-import queue
 import re
 import shutil
 import subprocess
-import sys
-import threading
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any
 
 from common.config import Settings
 from common.models import AgentExecutionContextPayload
 from common.adapter_base import log_json
 from common.kubernetes.deploy_config import load_deploy_config
 from common.kubernetes.manifest_parser import OpenCodeManifestParser
-from common.local_setup import build_local_setup_shell_command
-
-
-@dataclass
-class LocalOpenCodeRuntime:
-    process: subprocess.Popen[str]
-    url: str
-    workspace_path: str
 
 
 class KubernetesRuntime:
@@ -49,8 +36,6 @@ class KubernetesRuntime:
     PROJECT_MANIFEST_NAME = "opencode-project.yaml"
     AGENTIS_CONFIG_NAME = "opencode.json"
     AGENTIS_CONFIG_TEMPLATE = Path(__file__).resolve().parents[2] / "opencode.json.tpl"
-    LOCAL_RUNTIME = "local"
-    _local_runtimes: dict[str, LocalOpenCodeRuntime] = {}
 
     def __init__(
         self,
@@ -135,13 +120,6 @@ class KubernetesRuntime:
             return path.is_dir()
         return path.suffix == ""
 
-    @staticmethod
-    def _runtime_key(context: AgentExecutionContextPayload) -> str:
-        return context.run_id or context.task_id
-
-    def _is_local_runtime(self) -> bool:
-        return bool(self.context.adapter and self.context.adapter.runtime == self.LOCAL_RUNTIME)
-
     def _deploy_config_roots(self) -> list[Path]:
         roots = [self.workspace_path]
         if not self.is_project_scope(self.context):
@@ -157,15 +135,7 @@ class KubernetesRuntime:
                 return deploy_config
         return None
 
-    def _should_use_local_opencode(self) -> bool:
-        return self._is_local_runtime() and self._load_deploy_config_for_scope(self.LOCAL_RUNTIME) is None
-
     def _resolve_manifest_source(self) -> Path:
-        if self._is_local_runtime():
-            deploy_config = self._load_deploy_config_for_scope(self.LOCAL_RUNTIME)
-            if deploy_config is not None:
-                return deploy_config.manifest_path
-
         deploy_scope = "project" if self.is_project_scope(self.context) else "worktree"
         deploy_config = self._load_deploy_config_for_scope(deploy_scope)
         if deploy_config is not None:
@@ -187,99 +157,11 @@ class KubernetesRuntime:
         return base_directory / manifest_name
 
     # ------------------------------------------------------------------
-    # Local `opencode web` runtime
+    # OpenCode URL
     # ------------------------------------------------------------------
 
     def _opencode_url(self) -> str:
-        if self._is_local_runtime():
-            runtime = self._local_runtimes.get(self._runtime_key(self.context))
-            if runtime is not None and runtime.process.poll() is None:
-                return runtime.url
         return self.opencode_url_for_context(self.context, self.settings)
-
-    @staticmethod
-    def _extract_local_opencode_url(line: str) -> str | None:
-        match = re.search(r"https?://(?:0\.0\.0\.0|127\.0\.0\.1|localhost):(?P<port>\d+)", line)
-        if not match:
-            match = re.search(r"(?:^|\s)(?:0\.0\.0\.0|127\.0\.0\.1|localhost):(?P<port>\d+)", line)
-        if not match:
-            return None
-        return f"http://127.0.0.1:{match.group('port')}"
-
-    @staticmethod
-    def _read_local_opencode_output(stream: TextIO | None, output_queue: queue.Queue[str]) -> None:
-        if stream is None:
-            return
-        for line in stream:
-            sys.stderr.write(f"[opencode-local] {line}")
-            sys.stderr.flush()
-            output_queue.put(line)
-
-    def _spawn_local_opencode(self, workspace_path: Path, timeout: float = 30.0) -> LocalOpenCodeRuntime:
-        runtime_key = self._runtime_key(self.context)
-        existing = self._local_runtimes.get(runtime_key)
-        if existing is not None and existing.process.poll() is None:
-            return existing
-
-        env = os.environ.copy()
-        if self.settings.public_base_url:
-            env["AGENTIS_URL"] = self.settings.public_base_url
-
-        process = subprocess.Popen(
-            ["bash", "-c", build_local_setup_shell_command(["opencode", "web", "--hostname", "0.0.0.0"])],
-            cwd=str(workspace_path),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=env,
-        )
-        assert process.stdout is not None
-        output_queue: queue.Queue[str] = queue.Queue()
-        threading.Thread(
-            target=self._read_local_opencode_output,
-            args=(process.stdout, output_queue),
-            daemon=True,
-        ).start()
-
-        deadline = time.monotonic() + timeout
-        url: str | None = None
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise RuntimeError(f"opencode web exited before reporting URL with code {process.returncode}")
-
-            try:
-                line = output_queue.get(timeout=0.1)
-            except queue.Empty:
-                time.sleep(0.1)
-                continue
-
-            url = self._extract_local_opencode_url(line)
-            if url is not None:
-                break
-
-        if url is None:
-            process.terminate()
-            raise TimeoutError("opencode web did not report a listening port")
-
-        runtime = LocalOpenCodeRuntime(process=process, url=url, workspace_path=str(workspace_path))
-        self._local_runtimes[runtime_key] = runtime
-        return runtime
-
-    def _stop_local_opencode(self) -> bool:
-        runtime = self._local_runtimes.pop(self._runtime_key(self.context), None)
-        if runtime is None:
-            return False
-        if runtime.process.poll() is not None:
-            return False
-
-        runtime.process.terminate()
-        try:
-            runtime.process.wait(timeout=10.0)
-        except subprocess.TimeoutExpired:
-            runtime.process.kill()
-            runtime.process.wait(timeout=10.0)
-        return True
 
     # ------------------------------------------------------------------
     # kubectl helpers
@@ -348,22 +230,8 @@ class KubernetesRuntime:
             base_branch=self.context.base_branch,
         )
         namespace = self.namespace_for_context(self.context, self.settings)
-        workspace = self.workspace_path
-        workspace_path = str(workspace)
+        workspace_path = str(self.workspace_path)
         main_dir = workspace_path if self.is_project_scope(self.context) else self.context.working_dir
-
-        if self._should_use_local_opencode():
-            runtime = self._spawn_local_opencode(workspace)
-            return {
-                "action": "deploy",
-                "task_id": self.context.task_id,
-                "base_branch": self.context.base_branch,
-                "namespace": namespace,
-                "manifest_path": None,
-                "working_dir": workspace_path,
-                "status": "local",
-                "url": runtime.url,
-            }
 
         manifest_path = str(self._resolve_manifest_source())
 
@@ -428,17 +296,13 @@ class KubernetesRuntime:
         raise TimeoutError(f"OpenCode is not ready within {timeout}s at {url}.{error_suffix}")
 
     def teardown(self) -> dict[str, Any]:
-        """Tear down only the Kubernetes side (namespace/manifest/local process).
+        """Tear down only the Kubernetes side (namespace/manifest).
 
         Git worktree cleanup is the caller's responsibility (it lives in the git
         adapter layer). Returns the Kubernetes-specific fields to merge into the
         caller's ``close`` result.
         """
         namespace = self.namespace_for_context(self.context, self.settings)
-        if self._should_use_local_opencode():
-            stopped = self._stop_local_opencode()
-            return {"namespace": namespace, "manifest_path": None, "local_process_stopped": stopped}
-
         manifest_path = str(self._resolve_manifest_source())
         if not self.is_project_scope(self.context):
             self.delete_manifest(manifest_path)
@@ -453,4 +317,4 @@ class KubernetesRuntime:
         ).delete(manifest_path, ignore_not_found=True)
 
 
-__all__ = ["KubernetesRuntime", "LocalOpenCodeRuntime"]
+__all__ = ["KubernetesRuntime"]

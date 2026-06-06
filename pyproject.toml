@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "agentis-adapter"
-version = "0.1.0"
+version = "0.2.0"
 description = "Standalone FastAPI JSON-RPC API for the Agentis adapter"
 authors = ["GitHub Copilot <copilot@github.com>"]
 packages = [
