@@ -2,6 +2,31 @@
 # Každý krok běží jako samostatný Kubernetes Job nad sdíleným workspace;
 # adaptér reportuje začátek (started) a konec (success) každého kroku.
 version: 1
+volumes:
+  - name: www
+    hostPath:
+      path: /var/www
+  - name: npm-cache
+    hostPath:
+      path: /root/.npm
+      type: DirectoryOrCreate
+  - name: poetry-cache
+    hostPath:
+      path: /root/.cache/pypoetry
+      type: DirectoryOrCreate
+  - name: gitnexus
+    hostPath:
+      path: /root/.gitnexus
+      type: DirectoryOrCreate
+  - name: gitconfig
+    hostPath:
+      path: /root/.gitconfig
+      type: FileOrCreate
+  - name: gh-config
+    hostPath:
+      path: /root/.config/gh
+      type: DirectoryOrCreate
+
 setup:
   image: rg.nl-ams.scw.cloud/reactis/opencode:1.2
   workdir: "[%WORKDIR%]"
@@ -9,6 +34,15 @@ setup:
     HOME: /root
     MAIN_DIR: "[%MAIN_DIR%]"
     PATH: "[%WORKDIR%]/.venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  volumeMounts:
+    - name: www
+      mountPath: /var/www
+    - name: npm-cache
+      mountPath: /root/.npm
+    - name: poetry-cache
+      mountPath: /root/.cache/pypoetry
+    - name: gitnexus
+      mountPath: /root/.gitnexus
   steps:
     - name: Copy environment file
       run: |
@@ -40,6 +74,21 @@ finish:
     BASE_BRANCH: "[%BASE_BRANCH%]"
     GITHUB_REPO: "[%GITHUB_REPO%]"
     PATH: "[%WORKDIR%]/.venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  volumeMounts:
+    - name: www
+      mountPath: /var/www
+    - name: npm-cache
+      mountPath: /root/.npm
+    - name: poetry-cache
+      mountPath: /root/.cache/pypoetry
+    - name: gitnexus
+      mountPath: /root/.gitnexus
+    - name: gitconfig
+      mountPath: /root/.gitconfig
+      readOnly: true
+    - name: gh-config
+      mountPath: /root/.config/gh
+      readOnly: true
   steps:
     - name: Commit changes
       run: |
@@ -50,18 +99,34 @@ finish:
           git -c user.name=Agentis -c user.email=code@agentis.cz \
             commit -m "TASK: #${TASK_NUMBER} - ${TASK_TITLE}"
         fi
+      attachments:
+        - label: Commit
+          type: text
+          valueFrom: .agentis/label-code-tasks-state.json
+
     - name: Create pull request
       run: |
+        mkdir -p .agentis/outputs
+        rm -f .agentis/outputs/pull-request-url
         if [ -z "$GITHUB_REPO" ]; then
           echo "Bez GitHub repozitáře, pull request se přeskakuje."
           exit 0
         fi
         git push --set-upstream origin "${BRANCH}:refs/heads/${BRANCH}"
-        if gh pr view "$BRANCH" --json url --jq .url >/tmp/pr-url 2>/dev/null; then
-          echo "Pull request už existuje: $(cat /tmp/pr-url)"
+        if gh pr view "$BRANCH" --json url --jq .url >.agentis/outputs/pull-request-url 2>/dev/null; then
+          echo "Pull request už existuje: $(cat .agentis/outputs/pull-request-url)"
         else
           gh pr create --base "$BASE_BRANCH" --head "$BRANCH" \
             --repo "$GITHUB_REPO" \
             --title "${TASK_TITLE:-$BRANCH}" \
-            --body "${TASK_TITLE:-$BRANCH}"
+            --body "${TASK_TITLE:-$BRANCH}" \
+            >.agentis/outputs/pull-request-url
         fi
+        if [ -s .agentis/outputs/pull-request-url ]; then
+          pr_url="$(cat .agentis/outputs/pull-request-url)"
+          printf '%s/changes\n' "${pr_url%/}" >.agentis/outputs/pull-request-url
+        fi
+      attachments:
+        - label: Pull Request
+          type: url
+          valueFrom: .agentis/outputs/pull-request-url

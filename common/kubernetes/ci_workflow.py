@@ -21,38 +21,16 @@ import yaml
 
 CI_WORKFLOW_PATH = ".agentis/ci.yaml"
 
-# hostPath mounts shared by every setup step. The workspace lives under
-# ``/var/www`` (a hostPath), so artefacts written by one step — most importantly
-# ``.venv`` — persist into the next step's pod and into the running server.
-_STEP_VOLUME_MOUNTS: tuple[dict[str, str], ...] = (
-    {"name": "www", "mountPath": "/var/www"},
-    {"name": "npm-cache", "mountPath": "/root/.npm"},
-    {"name": "poetry-cache", "mountPath": "/root/.cache/pypoetry"},
-    {"name": "gitnexus", "mountPath": "/root/.gitnexus"},
-)
-
-_STEP_VOLUMES: tuple[dict[str, Any], ...] = (
-    {"name": "www", "hostPath": {"path": "/var/www"}},
-    {"name": "npm-cache", "hostPath": {"path": "/root/.npm", "type": "DirectoryOrCreate"}},
-    {"name": "poetry-cache", "hostPath": {"path": "/root/.cache/pypoetry", "type": "DirectoryOrCreate"}},
-    {"name": "gitnexus", "hostPath": {"path": "/root/.gitnexus", "type": "DirectoryOrCreate"}},
-)
-
-# Extra mounts for the ``finish`` phase (commit / pull request): the steps need
-# git identity and the GitHub CLI credentials to push and open PRs.
-_FINISH_VOLUME_MOUNTS: tuple[dict[str, Any], ...] = (
-    {"name": "gitconfig", "mountPath": "/root/.gitconfig", "readOnly": True},
-    {"name": "gh-config", "mountPath": "/root/.config/gh", "readOnly": True},
-)
-
-_FINISH_VOLUMES: tuple[dict[str, Any], ...] = (
-    {"name": "gitconfig", "hostPath": {"path": "/root/.gitconfig", "type": "FileOrCreate"}},
-    {"name": "gh-config", "hostPath": {"path": "/root/.config/gh", "type": "DirectoryOrCreate"}},
-)
-
 
 class CiWorkflowError(ValueError):
     """Raised when the CI workflow file is missing required structure."""
+
+
+@dataclass(frozen=True)
+class CiAttachment:
+    label: str
+    type: str
+    value_from: str
 
 
 @dataclass(frozen=True)
@@ -60,6 +38,7 @@ class CiStep:
     id: str
     name: str
     run: str
+    attachments: tuple[CiAttachment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -67,6 +46,8 @@ class CiWorkflow:
     image: str
     workdir: str | None
     env: dict[str, str]
+    volume_mounts: tuple[dict[str, Any], ...]
+    volumes: tuple[dict[str, Any], ...]
     steps: tuple[CiStep, ...]
 
 
@@ -87,7 +68,62 @@ def _read_document(path: Path) -> dict[str, Any] | None:
     return document
 
 
-def _parse_phase(document: dict[str, Any], path: Path, phase: str, *, required: bool) -> CiWorkflow | None:
+def _parse_manifest_list(section: dict[str, Any], path: Path, location: str, key: str) -> tuple[dict[str, Any], ...]:
+    raw = section.get(key) or []
+    if not isinstance(raw, list):
+        raise CiWorkflowError(f"CI workflow {path}: {location}.{key} must be a list")
+    items: list[dict[str, Any]] = []
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            raise CiWorkflowError(f"CI workflow {path}: {location}.{key}[{index}] must be a mapping")
+        items.append(dict(item))
+    return tuple(items)
+
+
+def _parse_step_attachments(item: dict[str, Any], path: Path, phase: str, step_index: int) -> tuple[CiAttachment, ...]:
+    raw = item.get("attachments") or []
+    if not isinstance(raw, list):
+        raise CiWorkflowError(f"CI workflow {path}: {phase} step {step_index}.attachments must be a list")
+
+    attachments: list[CiAttachment] = []
+    for index, attachment in enumerate(raw, start=1):
+        if not isinstance(attachment, dict):
+            raise CiWorkflowError(
+                f"CI workflow {path}: {phase} step {step_index}.attachments[{index}] must be a mapping"
+            )
+        label = attachment.get("label")
+        attachment_type = attachment.get("type")
+        value_from = attachment.get("valueFrom")
+        if not isinstance(label, str) or not label.strip():
+            raise CiWorkflowError(
+                f"CI workflow {path}: {phase} step {step_index}.attachments[{index}].label must be a non-empty string"
+            )
+        if not isinstance(attachment_type, str) or not attachment_type.strip():
+            raise CiWorkflowError(
+                f"CI workflow {path}: {phase} step {step_index}.attachments[{index}].type must be a non-empty string"
+            )
+        if not isinstance(value_from, str) or not value_from.strip():
+            raise CiWorkflowError(
+                f"CI workflow {path}: {phase} step {step_index}.attachments[{index}].valueFrom must be a non-empty string"
+            )
+        if Path(value_from).is_absolute():
+            raise CiWorkflowError(
+                f"CI workflow {path}: {phase} step {step_index}.attachments[{index}].valueFrom must be relative"
+            )
+        attachments.append(
+            CiAttachment(label=label.strip(), type=attachment_type.strip(), value_from=value_from.strip())
+        )
+    return tuple(attachments)
+
+
+def _parse_phase(
+    document: dict[str, Any],
+    path: Path,
+    phase: str,
+    *,
+    required: bool,
+    volumes: tuple[dict[str, Any], ...],
+) -> CiWorkflow | None:
     """Parse a workflow phase (``setup`` / ``finish``) into a :class:`CiWorkflow`."""
     section = document.get(phase)
     if section is None:
@@ -96,6 +132,8 @@ def _parse_phase(document: dict[str, Any], path: Path, phase: str, *, required: 
         return None
     if not isinstance(section, dict):
         raise CiWorkflowError(f"CI workflow {path}: '{phase}' must be a mapping")
+    if "volumes" in section:
+        raise CiWorkflowError(f"CI workflow {path}: {phase}.volumes is not supported; define top-level volumes")
 
     image = section.get("image")
     if not isinstance(image, str) or not image.strip():
@@ -109,6 +147,8 @@ def _parse_phase(document: dict[str, Any], path: Path, phase: str, *, required: 
     if not isinstance(env_raw, dict):
         raise CiWorkflowError(f"CI workflow {path}: {phase}.env must be a mapping")
     env = {str(key): "" if value is None else str(value) for key, value in env_raw.items()}
+
+    volume_mounts = _parse_manifest_list(section, path, phase, "volumeMounts")
 
     steps_raw = section.get("steps")
     if not isinstance(steps_raw, list) or not steps_raw:
@@ -129,12 +169,15 @@ def _parse_phase(document: dict[str, Any], path: Path, phase: str, *, required: 
         while step_id in used_ids:
             step_id = f"{step_id}-x"
         used_ids.add(step_id)
-        steps.append(CiStep(id=step_id, name=name, run=run))
+        attachments = _parse_step_attachments(item, path, phase, index)
+        steps.append(CiStep(id=step_id, name=name, run=run, attachments=attachments))
 
     return CiWorkflow(
         image=image.strip(),
         workdir=workdir.strip() if workdir else None,
         env=env,
+        volume_mounts=volume_mounts,
+        volumes=volumes,
         steps=tuple(steps),
     )
 
@@ -144,7 +187,8 @@ def load_ci_workflow(path: Path) -> CiWorkflow | None:
     document = _read_document(path)
     if document is None:
         return None
-    return _parse_phase(document, path, "setup", required=True)
+    volumes = _parse_manifest_list(document, path, "top-level", "volumes")
+    return _parse_phase(document, path, "setup", required=True, volumes=volumes)
 
 
 def load_finish_workflow(path: Path) -> CiWorkflow | None:
@@ -155,12 +199,23 @@ def load_finish_workflow(path: Path) -> CiWorkflow | None:
     document = _read_document(path)
     if document is None:
         return None
-    return _parse_phase(document, path, "finish", required=False)
+    volumes = _parse_manifest_list(document, path, "top-level", "volumes")
+    return _parse_phase(document, path, "finish", required=False, volumes=volumes)
 
 
 def _substitute(value: str, replacements: dict[str, str]) -> str:
     for placeholder, replacement in replacements.items():
         value = value.replace(placeholder, replacement)
+    return value
+
+
+def _substitute_manifest_value(value: Any, replacements: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        return _substitute(value, replacements)
+    if isinstance(value, list):
+        return [_substitute_manifest_value(item, replacements) for item in value]
+    if isinstance(value, dict):
+        return {key: _substitute_manifest_value(item, replacements) for key, item in value.items()}
     return value
 
 
@@ -179,8 +234,6 @@ def build_step_job_manifest(
     extra_replacements: dict[str, str] | None = None,
     job_prefix: str = "ci",
     app_label: str = "ci-setup",
-    extra_volume_mounts: tuple[dict[str, Any], ...] = (),
-    extra_volumes: tuple[dict[str, Any], ...] = (),
 ) -> dict[str, Any]:
     """Render the Kubernetes ``Job`` manifest for a single workflow step."""
     replacements = {
@@ -195,8 +248,8 @@ def build_step_job_manifest(
 
     script = f'echo "=== step: {step.name} ==="\n{step.run}'
 
-    volume_mounts = [dict(mount) for mount in (*_STEP_VOLUME_MOUNTS, *extra_volume_mounts)]
-    volumes = [dict(volume) for volume in (*_STEP_VOLUMES, *extra_volumes)]
+    volume_mounts = [_substitute_manifest_value(mount, replacements) for mount in workflow.volume_mounts]
+    volumes = [_substitute_manifest_value(volume, replacements) for volume in workflow.volumes]
 
     return {
         "apiVersion": "batch/v1",
@@ -238,6 +291,7 @@ def namespace_manifest(namespace: str) -> dict[str, Any]:
 
 __all__ = [
     "CI_WORKFLOW_PATH",
+    "CiAttachment",
     "CiStep",
     "CiWorkflow",
     "CiWorkflowError",
@@ -246,6 +300,4 @@ __all__ = [
     "load_finish_workflow",
     "namespace_manifest",
     "step_job_name",
-    "_FINISH_VOLUME_MOUNTS",
-    "_FINISH_VOLUMES",
 ]

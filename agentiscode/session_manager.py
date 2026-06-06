@@ -184,8 +184,7 @@ class AgentisCodeSessionManager:
             sess.prompt_path = write_agent_prompt_file(sess.worktree, target.namespace, prompt)
             args = self._build_args(sess.context, sess.worktree, prompt, resume_id, include_prompt=False)
             command_script = (
-                f"cd {shlex.quote(sess.worktree)} && exec {shlex.join(args)} "
-                f'"$(cat {shlex.quote(sess.prompt_path)})"'
+                f'cd {shlex.quote(sess.worktree)} && exec {shlex.join(args)} "$(cat {shlex.quote(sess.prompt_path)})"'
             )
             runner = agent_job_runner(target)
             sess.job_runner = runner
@@ -227,6 +226,8 @@ class AgentisCodeSessionManager:
         returncode = proc.wait()
         if returncode != 0:
             sess.is_error = True
+            print(proc.stderr)
+            print(proc.stdout)
         if not sess.ready_event.is_set():
             sess.start_error = f"agentiscode exited before session_id (exit_code={returncode})"
             sess.ready_event.set()
@@ -322,7 +323,9 @@ class AgentisCodeSessionManager:
     @staticmethod
     def _delete_agent_job(target: KubectlExecTarget) -> None:
         if shutil.which(target.kubectl) is None and not os.path.isabs(target.kubectl):
-            sys.stderr.write(f"[agentiscode-session] agent job delete skipped: kubectl not on PATH ({target.kubectl})\n")
+            sys.stderr.write(
+                f"[agentiscode-session] agent job delete skipped: kubectl not on PATH ({target.kubectl})\n"
+            )
             return
         args = [
             target.kubectl,

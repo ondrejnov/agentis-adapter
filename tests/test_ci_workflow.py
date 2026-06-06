@@ -6,9 +6,9 @@ import pytest
 
 from common.config import Settings
 from common.kubernetes.ci_workflow import (
-    _FINISH_VOLUME_MOUNTS,
-    _FINISH_VOLUMES,
+    CiAttachment,
     CiStep,
+    CiWorkflow,
     CiWorkflowError,
     build_step_job_manifest,
     load_ci_workflow,
@@ -20,12 +20,33 @@ from common.models import AdapterOptionsPayload, AgentExecutionContextPayload
 
 WORKFLOW_YAML = """
 version: 1
+volumes:
+  - name: www
+    hostPath:
+      path: /var/www
+  - name: npm-cache
+    hostPath:
+      path: /root/.npm
+      type: DirectoryOrCreate
+  - name: gitconfig
+    hostPath:
+      path: /root/.gitconfig
+      type: FileOrCreate
+  - name: gh-config
+    hostPath:
+      path: /root/.config/gh
+      type: DirectoryOrCreate
 setup:
   image: registry.test/opencode:1.2
   workdir: "[%WORKDIR%]"
   env:
     HOME: /root
     MAIN_DIR: "[%MAIN_DIR%]"
+  volumeMounts:
+    - name: www
+      mountPath: /var/www
+    - name: npm-cache
+      mountPath: /root/.npm
   steps:
     - name: Create virtualenv
       run: python3.13 -m venv .venv
@@ -46,6 +67,16 @@ def test_load_ci_workflow_parses_steps(tmp_path):
     assert workflow.image == "registry.test/opencode:1.2"
     assert workflow.workdir == "[%WORKDIR%]"
     assert workflow.env == {"HOME": "/root", "MAIN_DIR": "[%MAIN_DIR%]"}
+    assert workflow.volume_mounts == (
+        {"name": "www", "mountPath": "/var/www"},
+        {"name": "npm-cache", "mountPath": "/root/.npm"},
+    )
+    assert workflow.volumes == (
+        {"name": "www", "hostPath": {"path": "/var/www"}},
+        {"name": "npm-cache", "hostPath": {"path": "/root/.npm", "type": "DirectoryOrCreate"}},
+        {"name": "gitconfig", "hostPath": {"path": "/root/.gitconfig", "type": "FileOrCreate"}},
+        {"name": "gh-config", "hostPath": {"path": "/root/.config/gh", "type": "DirectoryOrCreate"}},
+    )
     assert [(step.id, step.name) for step in workflow.steps] == [
         ("1-create-virtualenv", "Create virtualenv"),
         ("2-install-dependencies", "Install dependencies"),
@@ -64,6 +95,9 @@ def test_load_ci_workflow_missing_file_returns_none(tmp_path):
         "setup:\n  image: x\n",  # no steps
         "setup:\n  steps:\n    - name: x\n      run: echo hi\n",  # no image
         "setup:\n  image: x\n  steps:\n    - name: x\n",  # step without run
+        "volumes: nope\nsetup:\n  image: x\n  steps:\n    - run: echo hi\n",
+        "setup:\n  image: x\n  volumeMounts: nope\n  steps:\n    - run: echo hi\n",
+        "setup:\n  image: x\n  volumes:\n    - nope\n  steps:\n    - run: echo hi\n",
     ],
 )
 def test_load_ci_workflow_invalid_raises(tmp_path, body):
@@ -104,19 +138,35 @@ def test_build_step_job_manifest_substitutes_and_wraps_command():
     assert {"name": "www", "mountPath": "/var/www"} in container["volumeMounts"]
 
 
-FINISH_WORKFLOW_YAML = WORKFLOW_YAML + """
+FINISH_WORKFLOW_YAML = (
+    WORKFLOW_YAML
+    + """
 finish:
   image: registry.test/opencode:1.2
   workdir: "[%WORKDIR%]"
   env:
     TASK_NUMBER: "[%TASK_NUMBER%]"
     BRANCH: "[%BRANCH%]"
+  volumeMounts:
+    - name: www
+      mountPath: /var/www
+    - name: gitconfig
+      mountPath: /root/.gitconfig
+      readOnly: true
+    - name: gh-config
+      mountPath: /root/.config/gh
+      readOnly: true
   steps:
     - name: Commit changes
       run: git add -A
     - name: Create pull request
       run: gh pr create
+      attachments:
+        - label: Pull Request
+          type: url
+          valueFrom: .agentis/outputs/pull-request-url
 """
+)
 
 
 def test_load_finish_workflow_parses_finish_phase(tmp_path):
@@ -127,7 +177,11 @@ def test_load_finish_workflow_parses_finish_phase(tmp_path):
 
     assert workflow is not None
     assert workflow.env == {"TASK_NUMBER": "[%TASK_NUMBER%]", "BRANCH": "[%BRANCH%]"}
+    assert {volume["name"] for volume in workflow.volumes} == {"www", "npm-cache", "gitconfig", "gh-config"}
     assert [step.name for step in workflow.steps] == ["Commit changes", "Create pull request"]
+    assert workflow.steps[1].attachments == (
+        CiAttachment(label="Pull Request", type="url", value_from=".agentis/outputs/pull-request-url"),
+    )
 
 
 def test_load_finish_workflow_absent_returns_none(tmp_path):
@@ -149,8 +203,6 @@ def test_build_finish_step_manifest_adds_git_volumes_and_replacements():
         extra_replacements={"[%TASK_NUMBER%]": "7", "[%BRANCH%]": "task-7"},
         job_prefix="finish",
         app_label="finish",
-        extra_volume_mounts=_FINISH_VOLUME_MOUNTS,
-        extra_volumes=_FINISH_VOLUMES,
     )
 
     assert manifest["metadata"]["name"] == "finish-1-commit-changes"
@@ -162,13 +214,15 @@ def test_build_finish_step_manifest_adds_git_volumes_and_replacements():
     assert workflow.image == "registry.test/opencode:1.2"
 
 
-def load_finish_workflow_from_text(text):
+def load_finish_workflow_from_text(text: str) -> CiWorkflow:
     import tempfile
 
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
         handle.write(text)
         tmp = Path(handle.name)
-    return load_finish_workflow(tmp)
+    workflow = load_finish_workflow(tmp)
+    assert workflow is not None
+    return workflow
 
 
 def test_step_job_name_is_dns_safe_and_truncated():
@@ -178,13 +232,15 @@ def test_step_job_name_is_dns_safe_and_truncated():
     assert not name.endswith("-")
 
 
-def load_ci_workflow_from_text(text):
+def load_ci_workflow_from_text(text: str) -> CiWorkflow:
     import tempfile
 
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
         handle.write(text)
         tmp = Path(handle.name)
-    return load_ci_workflow(tmp)
+    workflow = load_ci_workflow(tmp)
+    assert workflow is not None
+    return workflow
 
 
 def _make_runtime(workspace: Path) -> KubernetesRuntime:
@@ -274,3 +330,35 @@ def test_run_ci_step_raises_on_failed_job(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="boom"):
         runtime.run_ci_step(step, timeout=5.0, interval=0.0)
+
+
+def test_run_finish_step_reads_attachment_outputs(tmp_path, monkeypatch):
+    (tmp_path / ".agentis" / "outputs").mkdir(parents=True)
+    (tmp_path / ".agentis" / "ci.yaml").write_text(FINISH_WORKFLOW_YAML, encoding="utf-8")
+    (tmp_path / ".agentis" / "outputs" / "pull-request-url").write_text(
+        "https://github.com/example/repo/pull/42/changes\n",
+        encoding="utf-8",
+    )
+    runtime = _make_runtime(tmp_path)
+    step = runtime.finish_steps()[1]
+
+    def fake_run(args, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        joined = " ".join(args)
+        stdout = ""
+        if "jsonpath={.status.succeeded}" in joined:
+            stdout = "1"
+        elif "logs" in args:
+            stdout = "step log output"
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = runtime.run_finish_step(step, timeout=5.0, interval=0.0)
+
+    assert result["attachments"] == [
+        {
+            "label": "Pull Request",
+            "value": "https://github.com/example/repo/pull/42/changes",
+            "type": "url",
+        }
+    ]

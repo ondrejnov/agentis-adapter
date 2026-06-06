@@ -607,7 +607,8 @@ class BaseSessionManager:
 
         In kubernetes mode the post-agent logic lives in ``.agentis/ci.yaml``
         under ``finish:``; each step runs as its own Job and is reported to
-        Agentis as an adapter event. Returns no extra comment attachments.
+        Agentis as an adapter event. Steps may expose final comment attachments
+        by writing configured output files in the shared worktree.
         """
         context = sess.context
         if GitAdapterService.is_project_scope(context):
@@ -625,6 +626,7 @@ class BaseSessionManager:
             "[%BASE_BRANCH%]": context.base_branch or "",
             "[%GITHUB_REPO%]": context.project_github_repo or "",
         }
+        attachments: list[dict[str, Any]] = []
 
         for step in steps:
             event_id = f"finish:{session_ref}:{uuid4().hex}"
@@ -655,8 +657,9 @@ class BaseSessionManager:
                 message=f"Dokončovací krok hotový: {step.name}",
                 data=result,
             )
+            attachments.extend(result.get("attachments") or [])
 
-        return []
+        return attachments
 
     def _finish_session_actions(self, sess: _AgentSession, session_ref: str) -> list[dict[str, Any]]:
         if sess.kubectl_target is not None:

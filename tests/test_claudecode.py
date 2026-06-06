@@ -20,6 +20,7 @@ from common.models import (
 )
 from claude.adapter import ClaudeCodeAdapterService
 from common.kubernetes_runtime import KubernetesRuntime
+from common.kubernetes.ci_workflow import CiStep
 from claude.activity_mapper import ClaudeActivityMapper
 from claude.session_manager import ClaudeSessionManager, _ClaudeSession
 from common.integrations.github_pr import GithubPrResult
@@ -802,6 +803,71 @@ def test_session_manager_finish_actions_commit_pr_and_start_dev_server(monkeypat
         ("commit", "success", "Žádné změny ke commitnutí."),
         ("dev_server", "started", "Spouštím dev server."),
         ("dev_server", "success", "Dev server byl spuštěn."),
+    ]
+
+
+def test_session_manager_kubernetes_finish_actions_returns_step_attachments(monkeypatch, tmp_path: Path):
+    captured_calls: list[dict[str, Any]] = []
+    captured_replacements: dict[str, str] = {}
+    manager = ClaudeSessionManager(settings=make_settings(claude_run_mode="kubernetes"))
+    context = make_context(
+        project_github_repo="example/repo",
+        namespace="task-9-demo",
+    )
+    target = KubectlExecTarget(namespace="task-9-demo", selector="deployment/opencode", container="opencode")
+    sess = _ClaudeSession(
+        session_id="sess-1",
+        pending_key="pending",
+        context=context,
+        worktree=str(tmp_path),
+        kubectl_target=target,
+    )
+    step = CiStep(id="1-create-pull-request", name="Create pull request", run="gh pr create")
+
+    class FakeRuntime:
+        def __init__(self, context, settings, workspace_path):
+            self.context = context
+            self.settings = settings
+            self.workspace_path = workspace_path
+
+        def finish_steps(self):
+            return [step]
+
+        def run_finish_step(self, step, *, extra_replacements):
+            captured_replacements.update(extra_replacements)
+            return {
+                "action": "finish",
+                "step": step.id,
+                "attachments": [
+                    {
+                        "label": "Pull Request",
+                        "value": "https://github.com/example/repo/pull/42/changes",
+                        "type": "url",
+                    }
+                ],
+            }
+
+    monkeypatch.setattr("common.session_manager.KubernetesRuntime", FakeRuntime)
+    monkeypatch.setattr(
+        manager,
+        "_agentis_call",
+        lambda method, params: captured_calls.append({"method": method, "params": params}),
+    )
+
+    attachments = manager._finish_session_actions(sess, "sess-1")
+
+    assert captured_replacements["[%GITHUB_REPO%]"] == "example/repo"
+    assert attachments == [
+        {
+            "label": "Pull Request",
+            "value": "https://github.com/example/repo/pull/42/changes",
+            "type": "url",
+        }
+    ]
+    adapter_events = [call["params"] for call in captured_calls if call["method"] == "run.adapter_event"]
+    assert [(event["kind"], event["status"], event["message"]) for event in adapter_events] == [
+        ("finish", "started", "Dokončovací krok: Create pull request"),
+        ("finish", "success", "Dokončovací krok hotový: Create pull request"),
     ]
 
 

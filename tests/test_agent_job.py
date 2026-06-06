@@ -1,3 +1,4 @@
+import json
 import subprocess
 from typing import Any
 
@@ -29,6 +30,22 @@ spec:
             - name: AGENTIS_URL
               value: "[%AGENTIS_URL%]"
 """
+
+
+def _pod_list(state: dict[str, Any]) -> str:
+    return json.dumps(
+        {
+            "items": [
+                {
+                    "metadata": {"name": "agent-run-abc"},
+                    "status": {
+                        "phase": "Running",
+                        "containerStatuses": [{"name": "agent", "state": state}],
+                    },
+                }
+            ]
+        }
+    )
 
 
 def test_build_agent_job_manifest_injects_command_and_substitutes():
@@ -92,7 +109,7 @@ def test_agent_job_runner_apply_and_logs(monkeypatch, tmp_path):
         calls.append(list(args))
         stdout = ""
         if "get" in args and "pods" in args:
-            stdout = "pod/agent-run-abc\n"
+            stdout = _pod_list({"running": {"startedAt": "2026-06-06T12:00:00Z"}})
         return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -108,3 +125,33 @@ def test_agent_job_runner_apply_and_logs(monkeypatch, tmp_path):
     assert apply_call[:2] == ["kubectl", "-n"]
     # delete of the stale job happens before apply
     assert any("delete" in call and "job" in call for call in calls)
+
+
+def test_agent_job_runner_waits_until_pod_is_loggable(monkeypatch, tmp_path):
+    manifest_path = tmp_path / "run.yaml"
+    manifest_path.write_text(RUN_YAML, encoding="utf-8")
+    runner = AgentJobRunner(
+        kubectl="kubectl",
+        namespace="task-7-demo",
+        run_manifest_path=str(manifest_path),
+        workspace_path="/var/www/worktrees/task-7",
+        agentis_url=None,
+    )
+
+    pod_responses = [
+        _pod_list({"waiting": {"reason": "ContainerCreating"}}),
+        _pod_list({"running": {"startedAt": "2026-06-06T12:00:01Z"}}),
+    ]
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(list(args))
+        stdout = pod_responses.pop(0)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    pod = runner.wait_for_pod(timeout=1.0, interval=0.0)
+
+    assert pod == "pod/agent-run-abc"
+    assert len(calls) == 2

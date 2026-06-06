@@ -28,8 +28,6 @@ from common.config import Settings
 from common.models import AgentExecutionContextPayload
 from common.adapter_base import log_json
 from common.kubernetes.ci_workflow import (
-    _FINISH_VOLUME_MOUNTS,
-    _FINISH_VOLUMES,
     CI_WORKFLOW_PATH,
     CiStep,
     CiWorkflow,
@@ -331,8 +329,6 @@ class KubernetesRuntime:
             extra_replacements=extra_replacements,
             job_prefix="finish",
             app_label="finish",
-            extra_volume_mounts=_FINISH_VOLUME_MOUNTS,
-            extra_volumes=_FINISH_VOLUMES,
         )
 
         log_json(
@@ -348,6 +344,7 @@ class KubernetesRuntime:
         self._kubectl("delete", "job", job_name, "-n", namespace, "--ignore-not-found=true", "--wait=true")
         self._kubectl_apply(manifest)
         logs = self._wait_for_job(namespace, job_name, timeout=timeout, interval=interval)
+        attachments = self._finish_step_attachments(step)
 
         return {
             "action": "finish",
@@ -357,7 +354,23 @@ class KubernetesRuntime:
             "name": step.name,
             "job": job_name,
             "logs": logs,
+            "attachments": attachments,
         }
+
+    def _finish_step_attachments(self, step: CiStep) -> list[dict[str, str]]:
+        workspace_root = self.workspace_path.resolve()
+        attachments: list[dict[str, str]] = []
+
+        for attachment in step.attachments:
+            path = (self.workspace_path / attachment.value_from).resolve()
+            if not path.is_relative_to(workspace_root) or not path.is_file():
+                continue
+            value = path.read_text(encoding="utf-8").strip()
+            if not value:
+                continue
+            attachments.append({"label": attachment.label, "value": value, "type": attachment.type})
+
+        return attachments
 
     def _job_logs(self, namespace: str, job_name: str) -> str:
         result = self._kubectl("logs", f"job/{job_name}", "-n", namespace, "--tail=200")
