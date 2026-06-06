@@ -222,9 +222,24 @@ async def _run(
     renderer: Any = JsonRenderer() if json_mode else TextRenderer()
 
     proc_holder: Dict[str, Any] = {}
+    terminating_signal: Dict[str, int] = {}
+    task = asyncio.current_task()
 
     def _on_proc(proc: asyncio.subprocess.Process) -> None:
         proc_holder["proc"] = proc
+
+    def _terminate(signum: int) -> None:
+        terminating_signal["signum"] = signum
+        _kill(proc_holder.get("proc"))
+        if task is not None:
+            task.cancel()
+
+    loop = asyncio.get_running_loop()
+    installed_handlers: list[int] = []
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError, RuntimeError):
+            loop.add_signal_handler(signum, _terminate, signum)
+            installed_handlers.append(signum)
 
     if telemetry is not None:
         telemetry.start()
@@ -241,8 +256,13 @@ async def _run(
                 telemetry.handle(event)
     except asyncio.CancelledError:
         _kill(proc_holder.get("proc"))
+        if terminating_signal:
+            return 130 if terminating_signal["signum"] == signal.SIGINT else 143
         raise
     finally:
+        for signum in installed_handlers:
+            with contextlib.suppress(Exception):
+                loop.remove_signal_handler(signum)
         renderer.finish()
         if telemetry is not None:
             telemetry.finish()

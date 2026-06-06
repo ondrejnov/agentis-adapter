@@ -300,7 +300,7 @@ class AgentisCodeSessionManager:
         args = [target.kubectl, "-n", target.namespace, "exec", target.selector]
         if target.container:
             args.extend(["-c", target.container])
-        args.extend(["--", "pkill", "-KILL", "-f", "agentiscode"])
+        args.extend(["--", "pkill", "-TERM", "-f", "agentiscode"])
         try:
             subprocess.run(args, capture_output=True, text=True, timeout=15.0, check=False)
         except subprocess.TimeoutExpired:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -233,6 +234,50 @@ def test_agentiscode_kubernetes_runtime_runs_deploy_and_passes_kubectl_target(mo
     assert target.namespace == "task-7-demo"
     assert target.selector == "deployment/opencode"
     assert target.container == "opencode"
+
+
+def test_session_manager_abort_terminates_remote_agentiscode_for_kubectl_session(monkeypatch) -> None:
+    manager = AgentisCodeSessionManager(settings=make_settings())
+    target = KubectlExecTarget(namespace="task-9-demo", selector="deployment/opencode", container="opencode")
+    sess = _AgentisCodeSession(
+        session_id="ses_k8s",
+        context=make_context(namespace="task-9-demo"),
+        worktree="/var/www/worktrees/task-1",
+        kubectl_target=target,
+    )
+    proc: Any = SimpleNamespace(poll=lambda: None, kill=MagicMock())
+    sess.proc = proc
+    manager._sessions["ses_k8s"] = sess
+
+    monkeypatch.setattr("agentiscode.session_manager.shutil.which", lambda cmd: f"/usr/bin/{cmd}")
+    captured: dict[str, Any] = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("agentiscode.session_manager.subprocess.run", fake_run)
+
+    manager.abort("ses_k8s")
+
+    assert sess.abort_event.is_set()
+    proc.kill.assert_called_once()
+    assert captured["args"] == [
+        "kubectl",
+        "-n",
+        "task-9-demo",
+        "exec",
+        "deployment/opencode",
+        "-c",
+        "opencode",
+        "--",
+        "pkill",
+        "-TERM",
+        "-f",
+        "agentiscode",
+    ]
+    assert captured["kwargs"] == {"capture_output": True, "text": True, "timeout": 15.0, "check": False}
 
 
 @pytest.fixture()
