@@ -26,6 +26,7 @@ from common.models import AgentExecutionContextPayload
 from common.cli_session import KubectlExecTarget
 from common.adapter_base import log_json
 from common.git_adapter import GitAdapterService
+from common.kubernetes.ci_workflow import CiStep
 from common.kubernetes.runtime import KubernetesRuntime
 
 if TYPE_CHECKING:
@@ -93,6 +94,18 @@ class CliAdapterService(GitAdapterService):
 
     def _kubernetes_runtime(self) -> KubernetesRuntime:
         return KubernetesRuntime(self.context, self.settings, self._workspace_path())
+
+    # ------------------------------------------------------------------
+    # CI setup workflow — runs in kubernetes mode only (local needs no setup).
+    # ------------------------------------------------------------------
+
+    def ci_setup_steps(self) -> list[CiStep]:
+        if self.is_kubernetes_mode:
+            return self._kubernetes_runtime().ci_setup_steps()
+        return []
+
+    def run_ci_step(self, step: CiStep) -> dict[str, Any]:
+        return self._kubernetes_runtime().run_ci_step(step)
 
     # ------------------------------------------------------------------
     # Deploy / wait_ready — no-op locally, reuse the k8s flow in kubernetes mode.

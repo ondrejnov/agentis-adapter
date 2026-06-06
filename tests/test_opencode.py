@@ -597,6 +597,33 @@ def test_context_runtime_kubernetes_enables_kubernetes_mode() -> None:
     assert adapter.is_kubernetes_mode is True
 
 
+def test_ci_setup_steps_skipped_in_local_mode() -> None:
+    adapter = OpenCodeAdapterService(
+        context=make_context(),
+        settings=make_settings(),
+        session_manager=MagicMock(spec=OpenCodeSessionManager),
+    )
+    assert adapter.is_kubernetes_mode is False
+    assert adapter.ci_setup_steps() == []
+
+
+def test_ci_setup_steps_delegates_to_runtime_in_kubernetes_mode(monkeypatch) -> None:
+    from common.kubernetes.ci_workflow import CiStep
+
+    adapter = OpenCodeAdapterService(
+        context=make_context(adapter=AdapterOptionsPayload(runtime="kubernetes", agent="build")),
+        settings=make_settings(),
+        session_manager=MagicMock(spec=OpenCodeSessionManager),
+    )
+    steps = [CiStep(id="1-venv", name="Create venv", run="python -m venv .venv")]
+    monkeypatch.setattr(
+        "common.kubernetes.runtime.KubernetesRuntime.ci_setup_steps",
+        lambda self: steps,
+    )
+
+    assert adapter.ci_setup_steps() == steps
+
+
 def test_start_session_starts_session_manager(monkeypatch) -> None:
     manager = MagicMock(spec=OpenCodeSessionManager)
     manager.start.return_value = "ses_abc"
