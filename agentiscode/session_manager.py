@@ -175,6 +175,7 @@ class AgentisCodeSessionManager:
         if sess.kubectl_target is not None:
             args = self._build_kubectl_args(sess.kubectl_target, sess.worktree, args)
             cwd = None
+        print(args)
         proc = subprocess.Popen(
             args,
             cwd=cwd,
