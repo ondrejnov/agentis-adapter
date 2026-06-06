@@ -20,34 +20,11 @@ spec:
       labels:
         app: opencode
     spec:
-      initContainers:
-        - name: setup
-          image: rg.nl-ams.scw.cloud/reactis/opencode:1.2
-          imagePullPolicy: IfNotPresent
-          workingDir: "[%WORKDIR%]"
-          command: ["/bin/bash"]
-          args: ["[%WORKDIR%]/setup.sh"]
-          env:
-            - name: HOME
-              value: /root
-            - name: MAIN_DIR
-              value: "[%MAIN_DIR%]"
-            - name: PATH
-              value: "[%WORKDIR%]/.venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-          volumeMounts:
-            - name: npm-cache
-              mountPath: /root/.npm
-            - name: poetry-cache
-              mountPath: /root/.cache/pypoetry
-            - name: www
-              mountPath: /var/www
-            - name: gitnexus
-              mountPath: /root/.gitnexus
-            - name: venv
-              mountPath: "[%WORKDIR%]/.venv"
-            - name: node-modules
-              mountPath: "[%WORKDIR%]/frontend/node_modules"
-
+      # Inicializaci prostředí (venv, závislosti, code-review graph) zajišťuje
+      # CI workflow .agentis/ci.yaml — každý krok běží jako samostatný
+      # Kubernetes Job ještě před nasazením tohoto Deploymentu. Artefakty
+      # (zejména .venv) jsou na sdíleném /var/www hostPath, takže je tento
+      # kontejner vidí.
       containers:
         - name: opencode
           image: rg.nl-ams.scw.cloud/reactis/opencode:1.2
@@ -100,23 +77,12 @@ spec:
             - name: www
               mountPath: /var/www/
 
-            - name: venv
-              mountPath: "[%WORKDIR%]/.venv"
-
-            - name: node-modules
-              mountPath: "[%WORKDIR%]/frontend/node_modules"
-
           # Bezpečnostní kontext pro hostPath přístup
           securityContext:
             allowPrivilegeEscalation: true
 
       # Volumes - odpovídají docker -v bindům
       volumes:
-        - name: venv
-          emptyDir: {}
-        - name: node-modules
-          emptyDir: {}
-
         - name: gitnexus
           hostPath:
             path: /root/.gitnexus

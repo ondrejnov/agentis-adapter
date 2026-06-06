@@ -84,6 +84,7 @@ class AgentJsonRpcService:
                         callback=init_agentis_callback,
                     )
                 )
+            adapter_steps.extend(self._run_ci_setup_steps(adapter))
             adapter_steps.append(
                 self._run_adapter_step(
                     adapter,
@@ -173,6 +174,31 @@ class AgentJsonRpcService:
             data=result if isinstance(result, dict) else None,
         )
         return result
+
+    def _run_ci_setup_steps(self, adapter: BaseAdapterService) -> list[dict[str, Any]]:
+        """Run each CI setup step (``.agentis/ci.yaml``) as its own adapter step.
+
+        Each step emits a ``started`` event when it begins and a ``success``
+        event when it completes, so the setup shows up in Agentis like CI stages.
+        Adapters without a CI workflow (CLI adapters, missing file) report no
+        steps and this is a no-op.
+        """
+        list_steps = getattr(adapter, "ci_setup_steps", None)
+        if not callable(list_steps):
+            return []
+
+        results: list[dict[str, Any]] = []
+        for step in list_steps():
+            results.append(
+                self._run_adapter_step(
+                    adapter,
+                    kind="ci_setup",
+                    started_message=f"CI krok: {step.name}",
+                    success_message=f"CI krok hotový: {step.name}",
+                    callback=lambda step=step: adapter.run_ci_step(step),
+                )
+            )
+        return results
 
     @staticmethod
     def _emit_adapter_event(

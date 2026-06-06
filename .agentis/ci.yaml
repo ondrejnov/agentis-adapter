@@ -1,0 +1,25 @@
+# Inicializace prostředí worktree ve stylu CI.
+# Každý krok běží jako samostatný Kubernetes Job nad sdíleným workspace;
+# adaptér reportuje začátek (started) a konec (success) každého kroku.
+version: 1
+setup:
+  image: rg.nl-ams.scw.cloud/reactis/opencode:1.2
+  workdir: "[%WORKDIR%]"
+  env:
+    HOME: /root
+    MAIN_DIR: "[%MAIN_DIR%]"
+    PATH: "[%WORKDIR%]/.venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  steps:
+    - name: Copy environment file
+      run: |
+        if [ -f "$MAIN_DIR/.env" ]; then
+          cp "$MAIN_DIR/.env" .env
+        fi
+    - name: Create virtualenv
+      run: python3.13 -m venv .venv
+    - name: Lock dependencies
+      run: poetry lock --no-update --no-interaction --no-ansi
+    - name: Install dependencies
+      run: poetry install --no-interaction --no-ansi
+    - name: Build code-review graph
+      run: code-review-graph build

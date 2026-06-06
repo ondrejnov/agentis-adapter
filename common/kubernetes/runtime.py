@@ -22,9 +22,20 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from common.config import Settings
 from common.models import AgentExecutionContextPayload
 from common.adapter_base import log_json
+from common.kubernetes.ci_workflow import (
+    CI_WORKFLOW_PATH,
+    CiStep,
+    CiWorkflow,
+    build_step_job_manifest,
+    load_ci_workflow,
+    namespace_manifest,
+    step_job_name,
+)
 from common.kubernetes.deploy_config import load_deploy_config
 from common.kubernetes.manifest_parser import OpenCodeManifestParser
 
@@ -187,6 +198,118 @@ class KubernetesRuntime:
             "-n",
             namespace,
         )
+
+    def _kubectl(self, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [self.settings.kubectl_command, *args],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def _kubectl_apply(self, manifest: dict[str, Any]) -> None:
+        document = yaml.safe_dump(manifest, sort_keys=False)
+        result = self._kubectl("apply", "-f", "-", stdin=document)
+        if result.returncode != 0:
+            raise RuntimeError(f"kubectl apply failed: {result.stderr.strip()}")
+
+    # ------------------------------------------------------------------
+    # CI setup workflow (.agentis/ci.yaml)
+    # ------------------------------------------------------------------
+
+    def _ci_workflow_path(self) -> Path:
+        return self.workspace_path / CI_WORKFLOW_PATH
+
+    def load_ci_workflow(self) -> CiWorkflow | None:
+        return load_ci_workflow(self._ci_workflow_path())
+
+    def ci_setup_steps(self) -> list[CiStep]:
+        if self.is_project_scope(self.context):
+            return []
+        workflow = self.load_ci_workflow()
+        return list(workflow.steps) if workflow else []
+
+    def _ensure_namespace(self, namespace: str) -> None:
+        self._kubectl_apply(namespace_manifest(namespace))
+
+    def run_ci_step(self, step: CiStep, timeout: float = 900.0, interval: float = 3.0) -> dict[str, Any]:
+        workflow = self.load_ci_workflow()
+        if workflow is None:
+            raise RuntimeError(f"CI workflow not found at {self._ci_workflow_path()}")
+
+        namespace = self.namespace_for_context(self.context, self.settings)
+        self._ensure_namespace(namespace)
+
+        job_name = step_job_name(step)
+        manifest = build_step_job_manifest(
+            workflow=workflow,
+            step=step,
+            namespace=namespace,
+            workspace_path=str(self.workspace_path),
+            main_dir=self.context.working_dir,
+            agentis_url=self.settings.public_base_url,
+        )
+
+        log_json(
+            "INFO",
+            "Running CI setup step",
+            task_id=self.context.task_id,
+            namespace=namespace,
+            step=step.id,
+            step_name=step.name,
+            job=job_name,
+        )
+
+        # Drop any stale job from a previous run so the manifest applies cleanly.
+        self._kubectl("delete", "job", job_name, "-n", namespace, "--ignore-not-found=true", "--wait=true")
+        self._kubectl_apply(manifest)
+        logs = self._wait_for_job(namespace, job_name, timeout=timeout, interval=interval)
+
+        log_json(
+            "INFO",
+            "CI setup step finished",
+            task_id=self.context.task_id,
+            namespace=namespace,
+            step=step.id,
+            job=job_name,
+        )
+
+        return {
+            "action": "ci_setup",
+            "task_id": self.context.task_id,
+            "namespace": namespace,
+            "step": step.id,
+            "name": step.name,
+            "job": job_name,
+            "logs": logs,
+        }
+
+    def _job_logs(self, namespace: str, job_name: str) -> str:
+        result = self._kubectl("logs", f"job/{job_name}", "-n", namespace, "--tail=200")
+        return result.stdout if result.returncode == 0 else result.stderr
+
+    def _wait_for_job(self, namespace: str, job_name: str, *, timeout: float, interval: float) -> str:
+        deadline = time.monotonic() + timeout
+        while True:
+            succeeded = self._kubectl(
+                "get", "job", job_name, "-n", namespace, "-o", "jsonpath={.status.succeeded}"
+            ).stdout.strip()
+            if succeeded and succeeded != "0":
+                return self._job_logs(namespace, job_name)
+
+            failed = self._kubectl(
+                "get", "job", job_name, "-n", namespace, "-o", "jsonpath={.status.failed}"
+            ).stdout.strip()
+            if failed and failed != "0":
+                logs = self._job_logs(namespace, job_name)
+                raise RuntimeError(f"CI step job {job_name} failed.\n{logs}")
+
+            if time.monotonic() >= deadline:
+                logs = self._job_logs(namespace, job_name)
+                raise TimeoutError(f"CI step job {job_name} did not complete within {timeout}s.\n{logs}")
+
+            time.sleep(interval)
 
     # ------------------------------------------------------------------
     # Lifecycle

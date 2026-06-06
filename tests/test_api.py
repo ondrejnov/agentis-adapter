@@ -503,6 +503,83 @@ def test_jsonrpc_start_runs_agentis_init_when_adapter_requires_it():
     ]
 
 
+def test_jsonrpc_start_runs_ci_setup_steps_between_init_and_deploy():
+    from common.kubernetes.ci_workflow import CiStep
+
+    events: list[tuple[str, str, str | None]] = []
+
+    class FakeAdapter:
+        requires_agentis_init = True
+
+        def post_agentis_event(
+            self,
+            *,
+            kind: str,
+            status: str,
+            event_id: str | None = None,
+            message: str | None = None,
+            data: dict | None = None,
+        ) -> None:
+            events.append((kind, status, message))
+
+        def create_worktree(self) -> dict[str, str]:
+            return {"action": "create_worktree", "status": "created"}
+
+        def init_agentis(self) -> dict[str, str]:
+            return {"action": "init_agentis", "status": "copied"}
+
+        def ci_setup_steps(self) -> list[CiStep]:
+            return [
+                CiStep(id="1-create-venv", name="Create virtualenv", run="python -m venv .venv"),
+                CiStep(id="2-install", name="Install dependencies", run="poetry install"),
+            ]
+
+        def run_ci_step(self, step: CiStep) -> dict[str, str]:
+            return {"action": "ci_setup", "step": step.id, "name": step.name}
+
+        def deploy(self) -> dict[str, str]:
+            return {"action": "deploy", "status": "applied"}
+
+        def wait_ready(self) -> dict[str, str]:
+            return {"action": "wait_ready", "status": "ready", "url": "http://pod"}
+
+        def start_session(self, pod_url: str, fork_from_session_id: str | None = None) -> dict[str, str | None]:
+            return {"action": "start_session", "session_id": "sess-1", "pod_url": pod_url}
+
+    service = AgentJsonRpcService(
+        settings=make_settings(),
+        adapter_factory=cast(Any, lambda context: FakeAdapter()),
+    )
+    response = make_client(service).post(
+        "/api",
+        json={"jsonrpc": "2.0", "id": 1, "method": "start", "params": make_start_params()},
+    )
+
+    assert response.status_code == 200
+    steps = response.json()["result"]["adapter"]["steps"]
+    assert [step["action"] for step in steps] == [
+        "create_worktree",
+        "init_agentis",
+        "ci_setup",
+        "ci_setup",
+        "deploy",
+        "wait_ready",
+        "start_session",
+    ]
+    assert [(step.get("step"), step.get("name")) for step in steps if step["action"] == "ci_setup"] == [
+        ("1-create-venv", "Create virtualenv"),
+        ("2-install", "Install dependencies"),
+    ]
+    # each CI step reports a started event then a success event, in order
+    ci_events = [(kind, status, message) for kind, status, message in events if kind == "ci_setup"]
+    assert ci_events == [
+        ("ci_setup", "started", "CI krok: Create virtualenv"),
+        ("ci_setup", "success", "CI krok hotový: Create virtualenv"),
+        ("ci_setup", "started", "CI krok: Install dependencies"),
+        ("ci_setup", "success", "CI krok hotový: Install dependencies"),
+    ]
+
+
 def test_start_accepts_extended_agent_execution_context_schema():
     class FakeAdapter:
         def create_worktree(self) -> dict[str, str]:

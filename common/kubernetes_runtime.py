@@ -20,6 +20,7 @@ from common.git_adapter import GitAdapterService
 from common.adapter_base import log_json
 from common.artifacts.source_snapshot import build_snapshot_key, snapshot_sources_best_effort
 from common.opencode_rest_client import OpenCodeApiError, OpenCodeRestClient
+from common.kubernetes.ci_workflow import CiStep
 from common.kubernetes.runtime import KubernetesRuntime
 from opencode.utils import OpenCodeUtils
 
@@ -58,6 +59,16 @@ class KubernetesAdapterService(GitAdapterService):
 
     def init_agentis(self) -> dict[str, str | None]:
         return self._runtime().init_agentis()
+
+    # ------------------------------------------------------------------
+    # CI setup workflow — one Kubernetes Job per step (worktree scope only)
+    # ------------------------------------------------------------------
+
+    def ci_setup_steps(self) -> list[CiStep]:
+        return self._runtime().ci_setup_steps()
+
+    def run_ci_step(self, step: CiStep) -> dict[str, Any]:
+        return self._runtime().run_ci_step(step)
 
     def deploy(self) -> dict[str, str | None]:
         return self._runtime().deploy()
