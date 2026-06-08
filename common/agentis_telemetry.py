@@ -128,7 +128,6 @@ class AgentisTelemetry:
         self._dirty = False
         self._is_error = False
         self._step_seen = False
-        self._kind = f"{adapter}_run"
         self._final_text_chunks: list[str] = []
         self._final_text_open = False
 
@@ -161,7 +160,8 @@ class AgentisTelemetry:
         if self.run_id is None:
             self._on_error("Agentis task.start_run nevrátil run id; telemetrie je vypnutá.")
             return None
-        self._emit_adapter_event("started", message="agentiscode běh spuštěn.")
+        self._emit_adapter_event("started", kind="agentiscode", message="běh spuštěn.")
+        # self._emit_adapter_event("success", kind="agentiscode", message="běh spuštěn.")
         return self.run_id
 
     def handle(self, event: AgentEvent) -> None:
@@ -170,6 +170,7 @@ class AgentisTelemetry:
             return
 
         if event.type == "error" or (event.type == "result" and event.data.get("is_error")):
+            print(str(event))
             self._is_error = True
 
         if event.type == "text":
@@ -228,8 +229,6 @@ class AgentisTelemetry:
 
         if self.last_message_to_comment:
             self._post_final_comment()
-        # Stejný event_id jako u startu → krok se přepne ze „started“ na výsledek.
-        self._emit_adapter_event(status, message=message)
         # Koncový stav adapteru + run.finished (kind musí být přesně "idle").
         self._emit_adapter_event(status, kind="idle", message=message)
 
@@ -273,7 +272,7 @@ class AgentisTelemetry:
         message: Optional[str] = None,
         data: Optional[dict[str, Any]] = None,
     ) -> None:
-        event_kind = kind or self._kind
+        event_kind = kind
         # Stabilní event_id (bez statusu) → started a success/failed se trefí do
         # stejného kroku, takže se spinner přepne na hotovo místo dvou karet.
         self._call(
