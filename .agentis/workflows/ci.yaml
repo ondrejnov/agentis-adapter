@@ -34,6 +34,10 @@ workflow:
     - name: agentis-config
       mountPath: /root/.config/agentis
       readOnly: true
+    - name: opencode-config
+      mountPath: /root/.config/opencode
+    - name: opencode-share
+      mountPath: /root/.local/share/opencode
   steps:
     - name: Copy environment file
       run: |
@@ -131,4 +135,15 @@ volumes:
   - name: agentis-config
     hostPath:
       path: /root/.config/agentis/
-
+  - name: opencode-config
+    hostPath:
+      path: /root/.config/opencode
+      type: DirectoryOrCreate
+  - name: opencode-share
+    hostPath:
+      path: /root/.local/share/opencode
+      type: DirectoryOrCreate
+  - name: claudecode
+    hostPath:
+      path: /root/.claude
+      type: DirectoryOrCreate
