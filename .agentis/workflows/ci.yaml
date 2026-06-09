@@ -82,32 +82,6 @@ workflow:
           type: text
           valueFrom: .agentis/label-code-tasks-state.json
 
-    - name: Create pull request
-      run: |
-        mkdir -p .agentis/outputs
-        rm -f .agentis/outputs/pull-request-url
-        if [ -z "$GITHUB_REPO" ]; then
-          echo "Bez GitHub repozitáře, pull request se přeskakuje."
-          exit 0
-        fi
-        git push --set-upstream origin "${BRANCH}:refs/heads/${BRANCH}"
-        if gh pr view "$BRANCH" --json url --jq .url >.agentis/outputs/pull-request-url 2>/dev/null; then
-          echo "Pull request už existuje: $(cat .agentis/outputs/pull-request-url)"
-        else
-          gh pr create --base "$BASE_BRANCH" --head "$BRANCH" \
-            --repo "$GITHUB_REPO" \
-            --title "${TASK_TITLE:-$BRANCH}" \
-            --body "${TASK_TITLE:-$BRANCH}" \
-            >.agentis/outputs/pull-request-url
-        fi
-        if [ -s .agentis/outputs/pull-request-url ]; then
-          pr_url="$(cat .agentis/outputs/pull-request-url)"
-          printf '%s/changes\n' "${pr_url%/}" >.agentis/outputs/pull-request-url
-        fi
-      outputs:
-        - label: Pull Request
-          type: url
-          valueFrom: .agentis/outputs/pull-request-url
 volumes:
   - name: www
     hostPath:
