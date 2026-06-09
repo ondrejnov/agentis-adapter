@@ -1,0 +1,127 @@
+version: 1
+workflow:
+  image: rg.nl-ams.scw.cloud/reactis/opencode:1.2
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 14400
+  ttlSecondsAfterFinished: 3600
+  envFiles:
+    - /root/.config/agentis/agentis.env
+  env:
+    HOME: /root
+    TASK_NUMBER: "[%TASK_NUMBER%]"
+    TASK_TITLE: "[%TASK_TITLE%]"
+    BRANCH: "[%BRANCH%]"
+    BASE_BRANCH: "[%BASE_BRANCH%]"
+    GITHUB_REPO: "[%GITHUB_REPO%]"
+    MAIN_DIR: "[%MAIN_DIR%]"
+    AGENT_BROWSER_SCREENSHOT_DIR: "[%WORKDIR%]/.screenshots"
+    IS_SANDBOX: 1
+    PYTHONPATH: "[%WORKDIR%]/backend"
+    PATH: "[%WORKDIR%]/.venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  volumeMounts:
+    - name: www
+      mountPath: /var/www
+    - name: npm-cache
+      mountPath: /root/.npm
+    - name: poetry-cache
+      mountPath: /root/.cache/pypoetry
+    - name: gitconfig
+      mountPath: /root/.gitconfig
+      readOnly: true
+    - name: gh-config
+      mountPath: /root/.config/gh
+      readOnly: true
+  steps:
+    - name: Copy environment file
+      run: |
+        if [ -f "$MAIN_DIR/.env" ]; then
+          cp "$MAIN_DIR/.env" .env
+        fi
+    - name: Create virtualenv
+      run: python3.13 -m venv .venv
+    - name: Lock dependencies
+      run: poetry lock --no-update --no-interaction --no-ansi
+    - name: Install dependencies
+      run: poetry install --no-interaction --no-ansi
+    - name: Build code-review graph
+      run: code-review-graph build
+    - name: Run agent
+      run: |
+        mkdir -p .agentis/outputs
+        agentiscode --adapter opencode \
+          --model "${AGENTIS_MODEL:-openai/gpt-5.4-mini}" \
+          --run-id "$AGENTIS_RUN_ID" \
+          --task-id "$AGENTIS_TASK_ID" \
+          --final-output .agentis/outputs/final-comment.md \
+          --session-output .agentis/outputs/session-id \
+          < "$AGENTIS_PROMPT_FILE"
+      outputs:
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/final-comment.md
+          status: 4
+        - type: session_id
+          valueFrom: .agentis/outputs/session-id
+    - name: Commit changes
+      run: |
+        git add -A
+        if git diff --cached --quiet; then
+          echo "Žádné změny ke commitnutí."
+        else
+          git -c user.name=Agentis -c user.email=code@agentis.cz \
+            commit -m "TASK: #${TASK_NUMBER} - ${TASK_TITLE}"
+        fi
+      outputs:
+        - label: Commit
+          type: text
+          valueFrom: .agentis/label-code-tasks-state.json
+
+    - name: Create pull request
+      run: |
+        mkdir -p .agentis/outputs
+        rm -f .agentis/outputs/pull-request-url
+        if [ -z "$GITHUB_REPO" ]; then
+          echo "Bez GitHub repozitáře, pull request se přeskakuje."
+          exit 0
+        fi
+        git push --set-upstream origin "${BRANCH}:refs/heads/${BRANCH}"
+        if gh pr view "$BRANCH" --json url --jq .url >.agentis/outputs/pull-request-url 2>/dev/null; then
+          echo "Pull request už existuje: $(cat .agentis/outputs/pull-request-url)"
+        else
+          gh pr create --base "$BASE_BRANCH" --head "$BRANCH" \
+            --repo "$GITHUB_REPO" \
+            --title "${TASK_TITLE:-$BRANCH}" \
+            --body "${TASK_TITLE:-$BRANCH}" \
+            >.agentis/outputs/pull-request-url
+        fi
+        if [ -s .agentis/outputs/pull-request-url ]; then
+          pr_url="$(cat .agentis/outputs/pull-request-url)"
+          printf '%s/changes\n' "${pr_url%/}" >.agentis/outputs/pull-request-url
+        fi
+      outputs:
+        - label: Pull Request
+          type: url
+          valueFrom: .agentis/outputs/pull-request-url
+volumes:
+  - name: www
+    hostPath:
+      path: /var/www
+  - name: npm-cache
+    hostPath:
+      path: /root/.npm
+      type: DirectoryOrCreate
+  - name: poetry-cache
+    hostPath:
+      path: /root/.cache/pypoetry
+      type: DirectoryOrCreate
+  - name: gitnexus
+    hostPath:
+      path: /root/.gitnexus
+      type: DirectoryOrCreate
+  - name: gitconfig
+    hostPath:
+      path: /root/.gitconfig
+      type: FileOrCreate
+  - name: gh-config
+    hostPath:
+      path: /root/.config/gh
+      type: DirectoryOrCreate

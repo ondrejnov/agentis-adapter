@@ -433,3 +433,48 @@ def test_cli_last_message_to_comment_enables_final_comment(monkeypatch) -> None:
 
     assert exit_code == 0
     assert events["kwargs"]["last_message_to_comment"] is True
+
+
+def test_cli_final_output_and_session_output_write_files(monkeypatch, tmp_path) -> None:
+    lines = [
+        json.dumps(
+            {
+                "type": "text",
+                "sessionID": "ses_7",
+                "part": {"id": "p1", "messageID": "m1", "type": "text", "text": "Finalni odpoved"},
+            }
+        )
+        + "\n",
+    ]
+    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
+
+    final_path = tmp_path / "outputs" / "final-comment.md"
+    session_path = tmp_path / "outputs" / "session-id"
+    exit_code = run(
+        [
+            "--adapter",
+            "opencode",
+            "--final-output",
+            str(final_path),
+            "--session-output",
+            str(session_path),
+            "udelej",
+            "X",
+        ]
+    )
+
+    assert exit_code == 0
+    assert final_path.read_text(encoding="utf-8").strip() == "Finalni odpoved"
+    assert session_path.read_text(encoding="utf-8").strip() == "ses_7"
+
+
+def test_output_recorder_keeps_last_text_block_after_tool_use() -> None:
+    from app.agentiscode import OutputRecorder
+
+    recorder = OutputRecorder()
+    recorder.handle(AgentEvent("text", {"text": "prvni"}))
+    recorder.handle(AgentEvent("tool", {"id": "c1", "status": "running", "name": "bash"}))
+    recorder.handle(AgentEvent("text", {"text": "druha "}))
+    recorder.handle(AgentEvent("text", {"text": "cast"}))
+
+    assert "".join(recorder._final_chunks) == "druha cast"

@@ -24,6 +24,10 @@ from common.adapter_base import BaseAdapterService
 from common.kubernetes_runtime import KubernetesAdapterService
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 from common.rpc.session_registry import SessionContextRegistry
+from common.workflow.manager import WorkflowBusyError, WorkflowManager
+
+
+WORKFLOW_RUNTIME = "workflow"
 
 
 class AgentJsonRpcException(Exception):
@@ -40,10 +44,77 @@ class AgentJsonRpcService:
         settings: Settings,
         adapter_factory: Callable[[AgentExecutionContextPayload], BaseAdapterService] | None = None,
         session_registry: SessionContextRegistry | None = None,
+        workflow_manager: WorkflowManager | None = None,
     ):
         self.settings = settings
         self._adapter_factory = adapter_factory or (lambda context: KubernetesAdapterService(context, settings))
         self.session_registry = session_registry or SessionContextRegistry()
+        self._workflow_manager = workflow_manager
+
+    @property
+    def workflow_manager(self) -> WorkflowManager:
+        if self._workflow_manager is None:
+            self._workflow_manager = WorkflowManager(self.settings)
+        return self._workflow_manager
+
+    @staticmethod
+    def _is_workflow_runtime(context: AgentExecutionContextPayload) -> bool:
+        runtime = context.adapter.runtime if context.adapter and context.adapter.runtime else None
+        return bool(runtime) and runtime.strip().lower() == WORKFLOW_RUNTIME
+
+    @staticmethod
+    def _workflow_prompt(context: AgentExecutionContextPayload) -> str:
+        chunks: list[str] = []
+        for text in (context.user_prompt, context.description):
+            if isinstance(text, str) and text.strip() and (not chunks or chunks[-1] != text.strip()):
+                chunks.append(text.strip())
+        return "\n\n".join(chunks) or context.title
+
+    def _start_workflow_run(
+        self,
+        run: RunStatePayload,
+        context: AgentExecutionContextPayload,
+        prompt: str,
+    ) -> dict[str, Any]:
+        """Spustí workflow na pozadí a rychle vrátí odpověď (bez session_id)."""
+        adapter_steps: list[dict[str, Any]] = []
+        try:
+            adapter = self._adapter_factory(context)
+            worktree: str | None = None
+            if not BaseAdapterService.is_project_scope(context):
+                worktree_step = self._run_adapter_step(
+                    adapter,
+                    kind="create_worktree",
+                    success_message="Git worktree je připravený.",
+                    callback=adapter.create_worktree,
+                )
+                adapter_steps.append(worktree_step)
+                working_dir = worktree_step.get("working_dir")
+                if isinstance(working_dir, str) and working_dir:
+                    worktree = working_dir
+            if worktree is None:
+                worktree = str(adapter._workspace_path())
+            workflow_step = self._run_adapter_step(
+                adapter,
+                kind="workflow_start",
+                started_message="Spouštím workflow.",
+                success_message="Workflow běží na pozadí.",
+                callback=lambda: self.workflow_manager.start_workflow(context, worktree, prompt),
+            )
+            adapter_steps.append(workflow_step)
+        except WorkflowBusyError as exc:
+            run.status = "failed"
+            raise AgentJsonRpcException(409, str(exc)) from exc
+        except Exception as exc:
+            run.status = "failed"
+            raise AgentJsonRpcException(500, f"Adapter error: {exc}") from exc
+        return {
+            "run": run.safe_dump(),
+            "adapter": {
+                "executed": True,
+                "steps": adapter_steps,
+            },
+        }
 
     def start(self, params: StartParams) -> dict[str, Any]:
         context = params.context
@@ -59,6 +130,9 @@ class AgentJsonRpcService:
                 },
             )
         )
+
+        if self._is_workflow_runtime(context):
+            return self._start_workflow_run(run, context, self._workflow_prompt(context))
 
         adapter_steps: list[dict[str, Any]] = []
         try:
@@ -198,6 +272,21 @@ class AgentJsonRpcService:
             return
 
     def add_message(self, params: AddMessageParams) -> dict[str, Any]:
+        if self._is_workflow_runtime(params.context):
+            context = params.context
+            run = RunStatePayload(run_id=context.run_id, context=context)
+            run.events.append(
+                RunEventPayload(
+                    kind="message",
+                    payload={
+                        "task_id": context.task_id,
+                        "title": context.title,
+                        "project_slug": context.project_slug,
+                    },
+                )
+            )
+            return self._start_workflow_run(run, context, params.message)
+
         if params.context.session_id:
             self.session_registry.register(params.context.session_id, params.context)
             session_id = params.context.session_id
@@ -273,6 +362,9 @@ class AgentJsonRpcService:
         }
 
     def question(self, params: QuestionParams) -> dict[str, Any]:
+        if self._is_workflow_runtime(params.context):
+            raise AgentJsonRpcException(400, "Workflow runtime nepodporuje question/approve IPC do Jobu")
+
         if params.context.session_id:
             self.session_registry.register(params.context.session_id, params.context)
             session_id = params.context.session_id
@@ -350,6 +442,21 @@ class AgentJsonRpcService:
 
     def abort(self, params: AbortParams) -> dict[str, Any]:
         context = params.context
+        if self._is_workflow_runtime(context):
+            run = RunStatePayload(run_id=context.run_id, context=context)
+            try:
+                step = self.workflow_manager.abort(context)
+            except Exception as exc:
+                run.status = "failed"
+                raise AgentJsonRpcException(500, f"Adapter error: {exc}") from exc
+            return {
+                "run": run.safe_dump(),
+                "adapter": {
+                    "executed": True,
+                    "steps": [step],
+                },
+            }
+
         session_id = context.session_id
         if not session_id:
             raise AgentJsonRpcException(400, "Context must include session_id to abort session")

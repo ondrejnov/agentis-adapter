@@ -23,6 +23,7 @@ run: Any = _impl.run
 main: Any = _impl.main
 JsonRenderer: Any = _impl.JsonRenderer
 TextRenderer: Any = _impl.TextRenderer
+OutputRecorder: Any = _impl.OutputRecorder
 
 
-__all__ = ["run", "main", "JsonRenderer", "TextRenderer"]
+__all__ = ["run", "main", "JsonRenderer", "TextRenderer", "OutputRecorder"]
