@@ -99,7 +99,7 @@ COPY clarp /opt/clarp
 RUN cd /opt/clarp && npm install && npm run build && npm install -g .
 
 RUN npm install prettier -g
-RUN npm install -g @anthropic-ai/claude-code@2.1.167
+RUN npm install -g @anthropic-ai/claude-code@2.1.170
 RUN npm install -g opencode-ai@1.16.2 opencode-linux-x64-baseline@1.16.2
 
 CMD ["opencode", "web", "--hostname", "0.0.0.0"]
