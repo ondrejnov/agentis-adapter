@@ -14,13 +14,17 @@ jednotný proud :class:`AgentEvent`.
 Jednotný event slovník (``AgentEvent.type``):
 
   - ``session``   {adapter, session_id, model?, provider?, cwd?}
-  - ``text``      {text}                 (assistant text — vždy *delta*, append-only)
-  - ``reasoning`` {text}                 (reasoning/thinking — vždy delta)
-  - ``tool``      {id, name?, status, input?, title?, output?, error?}
-  - ``step``      {usage?, cost_usd?}     (jeden dokončený turn/message — per-turn usage)
+  - ``text``      {text, message_id?}    (assistant text — vždy *delta*, append-only)
+  - ``reasoning`` {text, message_id?}    (reasoning/thinking — vždy delta)
+  - ``tool``      {id, name?, status, input?, title?, output?, error?, message_id?}
+  - ``step``      {usage?, cost_usd?, message_id?}  (jeden dokončený turn/message — per-turn usage)
   - ``result``    {session_id?, usage?, cost_usd?, is_error}
   - ``error``     {message}
   - ``stderr``    {line}
+
+``message_id`` (u Claude adaptéru) označuje assistant zprávu, do které dílčí
+event patří — díky němu lze ``text``/``reasoning``/``tool`` složit do jedné
+zprávy a ``step`` (usage) započítat jen jednou per zpráva.
 
 ``step`` se vydává po každém dokončeném assistant turnu a nese usage *jen toho
 turnu* (ne kumulativní). Díky tomu lze tokeny sčítat napříč turny — finální
@@ -113,6 +117,13 @@ class AgentConfig:
 # ---------------------------------------------------------------------------
 
 
+def _with_msg_id(data: Dict[str, Any], msg_id: Optional[str]) -> Dict[str, Any]:
+    """Přilepí ``message_id`` do payloadu, je-li k dispozici (jinak beze změny)."""
+    if msg_id:
+        data["message_id"] = msg_id
+    return data
+
+
 def _truncate(value: str, max_len: int = 80) -> str:
     value = (value or "").strip()
     if len(value) <= max_len:
@@ -161,11 +172,22 @@ def tool_title(name: Optional[str], raw_input: Any) -> str:
 
 
 class _ClaudeTranslator:
-    """Claude Code stream-json eventy → jednotné :class:`AgentEvent`."""
+    """Claude Code stream-json eventy → jednotné :class:`AgentEvent`.
+
+    Claude rozkládá jednu assistant zprávu (stejné ``message.id``) do více
+    stream-json řádků a na každém opakuje identický ``usage``. ``client.py``
+    proto protahuje ``message_id`` do dílčích eventů; tady ho přilepíme k
+    ``text``/``reasoning``/``tool`` (ať konzument pozná, do které zprávy patří)
+    a per-message ``usage`` vydáme jako ``step`` jen jednou (``_steps_seen``).
+    """
+
+    def __init__(self) -> None:
+        self._steps_seen: set[str] = set()
 
     def __call__(self, event: ClaudeEvent) -> List[AgentEvent]:
         t = event.type
         d = event.data
+        msg_id = d.get("message_id")
         if t == "session_start":
             return [
                 AgentEvent(
@@ -181,21 +203,24 @@ class _ClaudeTranslator:
             ]
         if t == "text":
             text = d.get("text") or ""
-            return [AgentEvent("text", {"text": text})] if text else []
+            return [AgentEvent("text", _with_msg_id({"text": text}, msg_id))] if text else []
         if t == "thinking":
             text = d.get("text") or ""
-            return [AgentEvent("reasoning", {"text": text})] if text else []
+            return [AgentEvent("reasoning", _with_msg_id({"text": text}, msg_id))] if text else []
         if t == "tool_use":
             return [
                 AgentEvent(
                     "tool",
-                    {
-                        "id": d.get("id"),
-                        "name": d.get("name"),
-                        "status": "running",
-                        "input": d.get("input"),
-                        "title": tool_title(d.get("name"), d.get("input")),
-                    },
+                    _with_msg_id(
+                        {
+                            "id": d.get("id"),
+                            "name": d.get("name"),
+                            "status": "running",
+                            "input": d.get("input"),
+                            "title": tool_title(d.get("name"), d.get("input")),
+                        },
+                        msg_id,
+                    ),
                 )
             ]
         if t == "tool_result":
@@ -224,11 +249,17 @@ class _ClaudeTranslator:
         if t == "assistant_message":
             # Každá assistant zpráva nese vlastní `usage` toho turnu → vydáme
             # per-turn `step`, ať jde sčítat napříč turny (text/tool bloky už
-            # máme z dílčích eventů, tady bereme jen usage).
+            # máme z dílčích eventů, tady bereme jen usage). Tutéž zprávu (stejné
+            # `message_id`) ale Claude posílá ve více chuncích s identickým usage,
+            # takže `step` vydáme jen jednou per message_id.
             usage = (d.get("message") or {}).get("usage")
-            if isinstance(usage, dict) and usage:
-                return [AgentEvent("step", {"usage": dict(usage), "cost_usd": None})]
-            return []
+            if not isinstance(usage, dict) or not usage:
+                return []
+            if msg_id is not None:
+                if msg_id in self._steps_seen:
+                    return []
+                self._steps_seen.add(msg_id)
+            return [AgentEvent("step", _with_msg_id({"usage": dict(usage), "cost_usd": None}, msg_id))]
         if t == "error":
             return [AgentEvent("error", {"message": d.get("message")})]
         if t == "stderr":

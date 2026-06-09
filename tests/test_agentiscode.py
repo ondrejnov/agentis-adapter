@@ -176,6 +176,38 @@ def test_claude_translator_maps_tool_use_and_result() -> None:
     assert events[4].data["usage"] == {"input_tokens": 3}
 
 
+def test_claude_translator_carries_message_id_and_dedups_step_per_message() -> None:
+    translate = _ClaudeTranslator()
+    events: list[AgentEvent] = []
+    usage = {"input_tokens": 10, "output_tokens": 1}
+    mid = "msg_001"
+    for native in [
+        # Jedna assistant zpráva rozložená do dvou chunků se stejným message_id
+        # a identickým usage (reasoning + tool_use).
+        ClaudeEvent("thinking", {"text": "Let me run it.", "message_id": mid}),
+        ClaudeEvent("assistant_message", {"message_id": mid, "message": {"id": mid, "usage": usage}}),
+        ClaudeEvent("tool_use", {"id": "t1", "name": "Bash", "input": {"command": "ls"}, "message_id": mid}),
+        ClaudeEvent("assistant_message", {"message_id": mid, "message": {"id": mid, "usage": usage}}),
+    ]:
+        events.extend(translate(native))
+
+    types = [e.type for e in events]
+    # reasoning, step (jednou!), tool — druhý assistant_message se stejným usage
+    # už `step` nevydá.
+    assert types == ["reasoning", "step", "tool"]
+    # message_id se protáhne do text/reasoning/tool/step.
+    assert events[0].data["message_id"] == mid
+    assert events[1].data["message_id"] == mid
+    assert events[2].data["message_id"] == mid
+
+    # Nová zpráva (jiné message_id) → nový `step`.
+    events2 = translate(
+        ClaudeEvent("assistant_message", {"message_id": "msg_002", "message": {"id": "msg_002", "usage": usage}})
+    )
+    assert [e.type for e in events2] == ["step"]
+    assert events2[0].data["message_id"] == "msg_002"
+
+
 # ---------------------------------------------------------------------------
 # Wrapper end-to-end (přes fake subprocess)
 # ---------------------------------------------------------------------------
