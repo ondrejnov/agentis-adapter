@@ -4,6 +4,8 @@ workflow:
   workingDir: "[%WORKDIR%]"
   timeoutSeconds: 14400
   ttlSecondsAfterFinished: 3600
+  envFiles:
+    - /root/.config/agentis/agentis.env
   env:
     HOME: /root
     TASK_NUMBER: "[%TASK_NUMBER%]"
@@ -28,6 +30,9 @@ workflow:
       readOnly: true
     - name: gh-config
       mountPath: /root/.config/gh
+      readOnly: true
+    - name: agentis-config
+      mountPath: /root/.config/agentis
       readOnly: true
   steps:
     - name: Copy environment file
@@ -123,3 +128,7 @@ volumes:
     hostPath:
       path: /root/.config/gh
       type: DirectoryOrCreate
+  - name: agentis-config
+    hostPath:
+      path: /root/.config/agentis/
+
