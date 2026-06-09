@@ -4,8 +4,6 @@ workflow:
   workingDir: "[%WORKDIR%]"
   timeoutSeconds: 14400
   ttlSecondsAfterFinished: 3600
-  envFiles:
-    - /root/.config/agentis/agentis.env
   env:
     HOME: /root
     TASK_NUMBER: "[%TASK_NUMBER%]"
