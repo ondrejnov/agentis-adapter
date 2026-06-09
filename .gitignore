@@ -9,6 +9,7 @@ __pycache__/
 dist
 opencode-container/registry-secret.yaml
 opencode-container/agdoc/
+opencode-container/clarp/
 opencode-container/agentis-adapter/
 
 .vscode/last-open-files.json

@@ -4,8 +4,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGDOC_SOURCE="/var/www/agdoc"
 AGDOC_CONTEXT="${SCRIPT_DIR}/agdoc"
+
 AGENTIS_ADAPTER_SOURCE="/var/www/agentis-adapter"
 AGENTIS_ADAPTER_CONTEXT="${SCRIPT_DIR}/agentis-adapter"
+
+CLARP_SOURCE="/var/www/clarp"
+CLARP_CONTEXT="${SCRIPT_DIR}/clarp"
 
 rm -rf "${AGDOC_CONTEXT}"
 mkdir -p "${AGDOC_CONTEXT}"
@@ -18,6 +22,7 @@ tar \
   -C "${AGDOC_SOURCE}" \
   -cf - . | tar -C "${AGDOC_CONTEXT}" -xf -
 
+
 rm -rf "${AGENTIS_ADAPTER_CONTEXT}"
 mkdir -p "${AGENTIS_ADAPTER_CONTEXT}"
 tar \
@@ -29,6 +34,14 @@ tar \
   --exclude='opencode-container' \
   -C "${AGENTIS_ADAPTER_SOURCE}" \
   -cf - . | tar -C "${AGENTIS_ADAPTER_CONTEXT}" -xf -
+
+rm -rf "${CLARP_CONTEXT}"
+mkdir -p "${CLARP_CONTEXT}"
+tar \
+  --exclude='.git' \
+  --exclude='node_modules' \
+  -C "${CLARP_SOURCE}" \
+  -cf - . | tar -C "${CLARP_CONTEXT}" -xf -
 
 docker build -t rg.nl-ams.scw.cloud/reactis/opencode:1.2 "${SCRIPT_DIR}"
 docker push rg.nl-ams.scw.cloud/reactis/opencode:1.2

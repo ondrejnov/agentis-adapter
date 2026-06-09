@@ -67,7 +67,7 @@ class ClaudeEvent:
 
 @dataclass
 class ClaudeRunConfig:
-    command: str = "clarp"
+    command: str = "claude"
     cwd: Optional[str] = None
     model: Optional[str] = None
     agent: Optional[str] = None
@@ -458,6 +458,17 @@ class ClaudeCodeClient:
             self.session_id = event.get("session_id") or self.session_id
             message = event.get("message") or {}
             content = message.get("content") or []
+            # Claude rozkládá jednu assistant zprávu (stejné `message.id`) do více
+            # stream-json řádků a na každém opakuje identický `usage`. Protáhneme
+            # id do všech dílčích eventů, ať je mapper umí složit do jedné zprávy
+            # a usage započítat jen jednou.
+            msg_id = message.get("id")
+
+            def _with_msg_id(data: Dict[str, Any]) -> Dict[str, Any]:
+                if msg_id:
+                    data["message_id"] = msg_id
+                return data
+
             for block in content:
                 if not isinstance(block, dict):
                     continue
@@ -465,25 +476,27 @@ class ClaudeCodeClient:
                 if btype == "text":
                     text = block.get("text") or ""
                     if text:
-                        out.append(ClaudeEvent("text", {"text": text}, raw=event))
+                        out.append(ClaudeEvent("text", _with_msg_id({"text": text}), raw=event))
                 elif btype == "tool_use":
                     out.append(
                         ClaudeEvent(
                             "tool_use",
-                            {
-                                "id": block.get("id"),
-                                "name": block.get("name"),
-                                "input": block.get("input"),
-                            },
+                            _with_msg_id(
+                                {
+                                    "id": block.get("id"),
+                                    "name": block.get("name"),
+                                    "input": block.get("input"),
+                                }
+                            ),
                             raw=event,
                         )
                     )
                 elif btype == "thinking":
-                    out.append(ClaudeEvent("thinking", {"text": block.get("thinking") or ""}, raw=event))
+                    out.append(ClaudeEvent("thinking", _with_msg_id({"text": block.get("thinking") or ""}), raw=event))
                 else:
-                    out.append(ClaudeEvent("assistant_block", {"block": block}, raw=event))
+                    out.append(ClaudeEvent("assistant_block", _with_msg_id({"block": block}), raw=event))
             # Doplníme i kompletní message pro klienty, co chtějí surovou zprávu.
-            out.append(ClaudeEvent("assistant_message", {"message": message}, raw=event))
+            out.append(ClaudeEvent("assistant_message", _with_msg_id({"message": message}), raw=event))
             return out
 
         if etype == "user":

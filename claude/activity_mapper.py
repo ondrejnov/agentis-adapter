@@ -194,6 +194,7 @@ class _AssistantState:
     text_part_idx: Optional[int] = None
     reasoning_part_idx: Optional[int] = None
     tool_part_idx: Dict[str, int] = field(default_factory=dict)  # callID → part idx
+    usage_recorded: bool = False  # usage už zapsané (per claude_msg_id) → nezdvojovat
     closed: bool = False
 
 
@@ -316,8 +317,8 @@ class ClaudeActivityMapper:
                 return self._assistant
             if self._assistant.claude_msg_id == claude_msg_id:
                 return self._assistant
-            # nové claude msg id → uzavři předchozí
-            self._assistant.closed = True
+            # nové claude msg id → uzavři předchozí (dopíše mu step-finish)
+            self._close_assistant(self._assistant)
 
         msg_id = _msg_id()
         info: Dict[str, Any] = {
@@ -371,7 +372,7 @@ class ClaudeActivityMapper:
         text = data.get("text") or ""
         if not text:
             return False
-        state = self._ensure_assistant()
+        state = self._ensure_assistant(data.get("message_id"))
         msg_id = self._assistant_message_id(state)
         parts = self._messages[state.msg_idx]["parts"]
         if state.text_part_idx is None:
@@ -395,7 +396,7 @@ class ClaudeActivityMapper:
         text = data.get("text") or ""
         if not text:
             return False
-        state = self._ensure_assistant()
+        state = self._ensure_assistant(data.get("message_id"))
         msg_id = self._assistant_message_id(state)
         parts = self._messages[state.msg_idx]["parts"]
         if state.reasoning_part_idx is None:
@@ -419,7 +420,7 @@ class ClaudeActivityMapper:
         call_id = data.get("id")
         if not call_id:
             return False
-        state = self._ensure_assistant()
+        state = self._ensure_assistant(data.get("message_id"))
         if call_id in state.tool_part_idx:
             return False
         msg_id = self._assistant_message_id(state)
@@ -496,17 +497,24 @@ class ClaudeActivityMapper:
             },
         }
 
-    def _finalize_assistant(self, usage: Optional[Dict[str, Any]], cost: Any, finish: str) -> bool:
-        """Uzavře aktuální assistant zprávu: zapíše její *vlastní* tokeny, cost
-        a přidá StepFinishPart. Sčítá se per-message, takže každý turn nese své
-        tokeny (viz `_on_step_finish` / `_on_result`)."""
-        state = self._ensure_assistant()
+    def _record_usage(self, state: _AssistantState, usage: Optional[Dict[str, Any]], cost: Any, finish: str) -> None:
+        """Zapíše do assistant zprávy její *vlastní* tokeny a cost. Idempotentní —
+        opakované volání jen přepíše stejné hodnoty (Claude posílá identický usage
+        na každém chunku téže zprávy)."""
         info = self._messages[state.msg_idx]["info"]
         info["time"]["completed"] = _now()
         info["tokens"] = self._tokens_from_usage(usage)
         if isinstance(cost, (int, float)):
             info["cost"] = float(cost)
         info["finish"] = finish
+        state.usage_recorded = True
+
+    def _close_assistant(self, state: _AssistantState) -> bool:
+        """Uzavře assistant zprávu a přidá jí StepFinishPart (jeden na zprávu).
+        Voláno při přechodu na nové claude msg id nebo na finálním `result`."""
+        if state.closed:
+            return False
+        info = self._messages[state.msg_idx]["info"]
         # StepFinishPart — užitečné pro UI v Agentisu
         self._messages[state.msg_idx]["parts"].append(
             {
@@ -514,23 +522,43 @@ class ClaudeActivityMapper:
                 "sessionID": self.session_id,
                 "messageID": info["id"],
                 "type": "step-finish",
-                "reason": finish,
+                "reason": info.get("finish") or "stop",
                 "cost": info.get("cost") or 0,
-                "tokens": info["tokens"],
+                "tokens": info.get("tokens") or self._tokens_from_usage(None),
             }
         )
         state.closed = True
         return True
 
+    def _finalize_assistant(self, usage: Optional[Dict[str, Any]], cost: Any, finish: str) -> bool:
+        """Zapíše tokeny a rovnou zprávu uzavře (jeden turn = jedna zpráva).
+        Používá se tam, kde nemáme claude msg id pro seskupení (legacy assistant
+        zprávy bez id, `step_finish`, fallback z `result`)."""
+        state = self._ensure_assistant()
+        self._record_usage(state, usage, cost, finish)
+        self._close_assistant(state)
+        return True
+
     def _on_assistant_message(self, data: Dict[str, Any]) -> bool:
-        # Claude posílá `usage` na každé assistant zprávě (per-turn). Uzavřeme jí
-        # aktuální zprávu s jejími vlastními tokeny, ať jdou sčítat napříč turny.
+        # Claude posílá `usage` na každé assistant zprávě a tutéž zprávu (stejné
+        # `message.id`) rozkládá do více chunků s IDENTICKÝM usage. Bez id je každá
+        # zpráva hranicí turnu; s id ji seskupíme a usage zapíšeme jen jednou, ať
+        # se tokeny nepočítají dvakrát.
         message = data.get("message")
         usage = message.get("usage") if isinstance(message, dict) else None
         if not isinstance(usage, dict) or not usage:
             return False
         self._tokens_from_steps = True
-        return self._finalize_assistant(usage, None, "stop")
+        claude_msg_id = data.get("message_id") or (message.get("id") if isinstance(message, dict) else None)
+        if not claude_msg_id:
+            # Legacy: bez id bereme každou assistant zprávu jako samostatný turn.
+            return self._finalize_assistant(usage, None, "stop")
+        state = self._ensure_assistant(claude_msg_id)
+        if state.usage_recorded:
+            # Tutéž zprávu už máme spočítanou; další chunky neopakuj.
+            return False
+        self._record_usage(state, usage, None, "stop")
+        return True
 
     def _on_step_finish(self, data: Dict[str, Any]) -> bool:
         self._tokens_from_steps = True
@@ -539,7 +567,10 @@ class ClaudeActivityMapper:
     def _on_result(self, data: Dict[str, Any]) -> bool:
         if self._tokens_from_steps:
             # Per-turn tokeny už máme; finální `result` je kumulativní a jen by je
-            # zopakoval → do transcriptu ho nepřidáváme (run-end řeší adapter event).
+            # zopakoval → tokeny nepřidáváme. Jen dovřeme poslední otevřenou zprávu,
+            # ať dostane svůj step-finish (run-end řeší adapter event).
+            if self._assistant is not None and not self._assistant.closed:
+                return self._close_assistant(self._assistant)
             return False
         finish = "stop" if not data.get("is_error") else (data.get("subtype") or "error")
         return self._finalize_assistant(data.get("usage"), data.get("cost_usd"), finish)

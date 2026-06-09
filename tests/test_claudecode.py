@@ -990,6 +990,49 @@ def test_mapper_records_per_turn_tokens_from_assistant_messages():
     assert sum(m["info"]["tokens"]["input"] for m in assistant) == 30
 
 
+def test_mapper_dedupes_repeated_assistant_message_id_into_single_message():
+    # Claude rozkládá jednu zprávu (stejné `message.id`) do více stream chunků
+    # (thinking → tool_use) a na každém opakuje IDENTICKÝ usage. Nesmí se počítat
+    # dvakrát: výsledkem je jedna zpráva s více parts a usage zapsaný jen jednou.
+    mapper = ClaudeActivityMapper(prompt="x")
+    mapper.consume(_event("session_start", {"session_id": "sid"}))
+
+    mid = "msg_aaa"
+    usage1 = {"input_tokens": 10, "output_tokens": 3, "cache_read_input_tokens": 22040, "cache_creation_input_tokens": 9133}
+    mapper.consume(_event("thinking", {"text": "", "message_id": mid}))
+    mapper.consume(_event("assistant_message", {"message_id": mid, "message": {"id": mid, "usage": usage1}}))
+    mapper.consume(_event("tool_use", {"id": "toolu_1", "name": "Bash", "input": {"command": "pwd"}, "message_id": mid}))
+    mapper.consume(_event("assistant_message", {"message_id": mid, "message": {"id": mid, "usage": usage1}}))
+    mapper.consume(_event("tool_result", {"tool_use_id": "toolu_1", "content": "/var/www/clarp", "is_error": False}))
+
+    mid2 = "msg_bbb"
+    usage2 = {"input_tokens": 8, "output_tokens": 2, "cache_read_input_tokens": 31173, "cache_creation_input_tokens": 172}
+    mapper.consume(_event("text", {"text": "Hotovo", "message_id": mid2}))
+    mapper.consume(_event("assistant_message", {"message_id": mid2, "message": {"id": mid2, "usage": usage2}}))
+    # Finální (kumulativní) result tokeny už nesmí přidat — jen dovře poslední zprávu.
+    mapper.consume(_event("result", {"usage": {"input_tokens": 18, "output_tokens": 5}, "cost_usd": 0.01}))
+
+    assistants = [m for m in mapper.snapshot() if m["info"]["role"] == "assistant"]
+    assert len(assistants) == 2
+
+    a0 = assistants[0]
+    # tool part patří do téže (první) zprávy, ne do nově založené
+    assert any(p.get("type") == "tool" for p in a0["parts"])
+    # právě jeden step-finish na zprávu
+    assert sum(1 for p in a0["parts"] if p.get("type") == "step-finish") == 1
+    assert a0["info"]["tokens"]["input"] == 10
+    assert a0["info"]["tokens"]["output"] == 3
+    assert a0["info"]["tokens"]["cache"] == {"read": 22040, "write": 9133}
+
+    a1 = assistants[1]
+    assert a1["info"]["tokens"]["input"] == 8
+    assert sum(1 for p in a1["parts"] if p.get("type") == "step-finish") == 1
+
+    # Součet per-message tokenů sedí na kumulativní result (18 = 10 + 8, 5 = 3 + 2).
+    assert sum(m["info"]["tokens"]["input"] for m in assistants) == 18
+    assert sum(m["info"]["tokens"]["output"] for m in assistants) == 5
+
+
 def test_mapper_falls_back_to_result_tokens_without_per_turn_usage():
     # Bez assistant usage zůstává chování zpětně kompatibilní: tokeny z resultu.
     mapper = ClaudeActivityMapper(prompt="x")
