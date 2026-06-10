@@ -77,9 +77,14 @@ workflow:
     - name: Run agent
       run: |
         mkdir -p .agentis/outputs
-        agentiscode --adapter opencode \
+        MODEL="${AGENTIS_MODEL:-openai/gpt-5.4-mini}"
+        case "$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')" in
+          *claude*) ADAPTER=claude ;;
+          *) ADAPTER=opencode ;;
+        esac
+        agentiscode --adapter "$ADAPTER" \
           ${AGENTIS_SESSION_ID:+--resume "$AGENTIS_SESSION_ID"} \
-          --model "${AGENTIS_MODEL:-openai/gpt-5.4-mini}" \
+          --model "$MODEL" \
           --run-id "$AGENTIS_RUN_ID" \
           --task-id "$AGENTIS_TASK_ID" \
           --final-output .agentis/outputs/final-comment.md \
