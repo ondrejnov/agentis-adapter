@@ -33,6 +33,10 @@ workflow:
       mountPath: /root/.config/opencode
     - name: opencode-share
       mountPath: /root/.local/share/opencode
+    - name: claudecodejson
+      mountPath: /root/.claude.json
+    - name: claudecode
+      mountPath: /root/.claude
   steps:
     - name: Run agent
       run: |
@@ -78,3 +82,10 @@ volumes:
     hostPath:
       path: /root/.local/share/opencode
       type: DirectoryOrCreate
+  - name: claudecode
+    hostPath:
+      path: /root/.claude
+      type: DirectoryOrCreate
+  - name: claudecodejson
+    hostPath:
+      path: /root/.claude.json
