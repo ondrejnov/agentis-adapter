@@ -1,1 +1,1 @@
-What do you want to work on?
+Tell me the task and I’ll handle it.
