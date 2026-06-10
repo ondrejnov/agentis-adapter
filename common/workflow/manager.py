@@ -297,7 +297,7 @@ class WorkflowManager:
                 kind="workflow_step",
                 status="started",
                 event_id=step_event_id,
-                message=f"Spouštím krok: {step.name}",
+                message=step.name,
                 data={"step": step.name, "job": name},
             )
 
@@ -338,7 +338,7 @@ class WorkflowManager:
                 kind="workflow_step",
                 status="success",
                 event_id=step_event_id,
-                message=f"Krok doběhl: {step.name}",
+                message=step.name,
                 data={"step": step.name, "job": name},
             )
 
