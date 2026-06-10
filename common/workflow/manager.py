@@ -289,7 +289,7 @@ class WorkflowManager:
                 self._emit_adapter_event(
                     run.context,
                     kind="workflow_step",
-                    status="success",
+                    status="skipped",
                     event_id=step_event_id,
                     message=f"Krok přeskočen (if: {step.if_}): {step.name}",
                     data={"step": step.name, "skipped": True, "condition": step.if_, "vars": dict(run.vars)},

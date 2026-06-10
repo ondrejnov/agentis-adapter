@@ -444,14 +444,14 @@ def test_conditional_step_is_skipped_and_vars_flow_into_env(tmp_path: Path) -> N
     env = {item["name"]: item["value"] for item in runner.applied[1]["spec"]["template"]["spec"]["containers"][0]["env"]}
     assert env["ENV_READY"] == "true"
 
-    # přeskočení se reportuje jako úspěšný workflow_step se skipped flagem
+    # přeskočení se reportuje jako workflow_step se statusem skipped
     skip_events = [
         params
         for method, params in calls
         if method == "run.adapter_event" and params["kind"] == "workflow_step" and params["data"].get("skipped")
     ]
     assert len(skip_events) == 1
-    assert skip_events[0]["status"] == "success"
+    assert skip_events[0]["status"] == "skipped"
     assert skip_events[0]["data"]["step"] == "Install dependencies"
     assert skip_events[0]["data"]["condition"] == "ENV_READY != 'true'"
 
