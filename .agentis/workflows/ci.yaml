@@ -1,6 +1,6 @@
 version: 1
 workflow:
-  image: rg.nl-ams.scw.cloud/reactis/opencode:1.2
+  image: rg.nl-ams.scw.cloud/reactis/opencode:1.3
   imagePullSecrets:
     - name: registry
   workingDir: "[%WORKDIR%]"
