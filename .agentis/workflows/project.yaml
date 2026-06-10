@@ -1,6 +1,8 @@
 version: 1
 workflow:
   image: rg.nl-ams.scw.cloud/reactis/opencode:1.2
+  imagePullSecrets:
+    - name: registry
   workingDir: "[%WORKDIR%]"
   timeoutSeconds: 14400
   ttlSecondsAfterFinished: 3600
