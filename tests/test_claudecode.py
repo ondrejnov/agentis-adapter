@@ -11,7 +11,6 @@ import pytest
 
 from claude.api import create_app, _DISPATCH
 from common.config import Settings
-from common.git_adapter import GitAdapterService
 from common.models import (
     AdapterOptionsPayload,
     AgentAttachmentPayload,
@@ -330,45 +329,6 @@ def test_question_reply_is_silently_ignored():
 
     # Claude adapter předávání odpovědí nepodporuje; base implementace ho tiše skipne.
     assert adapter.question_reply("req-1", [["ano"]]) is None
-
-
-def test_close_aborts_session_and_cleans_worktree(monkeypatch):
-    manager = MagicMock(spec=ClaudeSessionManager)
-    git_calls: list[tuple[str, ...]] = []
-
-    monkeypatch.setattr(ClaudeCodeAdapterService, "_repository_root", lambda self: Path("/var/www/repo"))
-    monkeypatch.setattr(
-        ClaudeCodeAdapterService,
-        "_resolved_worktree_path",
-        lambda self: Path("/srv/worktrees/task-1"),
-    )
-
-    def fake_succeeds(cwd: Path, *args: str) -> bool:
-        # show-ref must succeed so branch is deleted
-        return args[:1] == ("show-ref",) or args[:1] == ("worktree",)
-
-    def fake_run_git(cwd: Path, *args: str) -> str:
-        git_calls.append(args)
-        return ""
-
-    monkeypatch.setattr(GitAdapterService, "_git_succeeds", staticmethod(fake_succeeds))
-    monkeypatch.setattr(GitAdapterService, "_run_git", staticmethod(fake_run_git))
-
-    context = make_context(session_id="ses_abc")
-    adapter = ClaudeCodeAdapterService(
-        context=context,
-        settings=make_settings(),
-        session_manager=manager,
-    )
-
-    result = adapter.close()
-
-    manager.abort.assert_called_once_with("ses_abc")
-    manager.remove.assert_called_once_with("ses_abc")
-    assert result["action"] == "close"
-    assert result["branch"] == "task-1"
-    assert result["worktree_removed"] is True
-    assert result["branch_deleted"] is True
 
 
 # ---------------------------------------------------------------------------

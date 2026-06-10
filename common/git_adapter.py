@@ -3,8 +3,10 @@
 ``GitAdapterService`` sits between the minimal :class:`BaseAdapterService` (which
 only knows how to talk to Agentis and run an agent) and the concrete adapters. It
 owns everything git: resolving the repository, creating/reusing a per-task
-worktree, naming branches, merging the task branch back into the base branch and
-tearing the worktree down again.
+worktree and naming branches. Followup actions (merging the task branch, tearing
+the worktree/branch down) are not adapter code anymore — they live in named
+workflows (`.agentis/workflows/<name>.yaml`) selected via
+``context.adapter.workflow``.
 
 Concrete adapters (the local CLI adapters) subclass this and add their own
 session lifecycle on top.
@@ -13,13 +15,11 @@ session lifecycle on top.
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 from common.models import AgentExecutionContextPayload
 from common.adapter_base import BaseAdapterService, log_json
-from common.agentis import AgentisRunLogger
 from common.artifacts.source_snapshot import restore_source_snapshot
 
 
@@ -118,20 +118,6 @@ class GitAdapterService(BaseAdapterService):
                 return candidate
 
         raise RuntimeError(f"Base branch {self.context.base_branch!r} was not found")
-
-    def _resolve_push_remote(self, repository_root: Path) -> str:
-        if self._git_succeeds(repository_root, "config", "--get", f"branch.{self.context.base_branch}.remote"):
-            remote = self._run_git(repository_root, "config", "--get", f"branch.{self.context.base_branch}.remote")
-            if remote:
-                return remote
-
-        remotes = [line.strip() for line in self._run_git(repository_root, "remote").splitlines() if line.strip()]
-        if "origin" in remotes:
-            return "origin"
-        if len(remotes) == 1:
-            return remotes[0]
-
-        raise RuntimeError("Could not determine git remote for base branch push")
 
     def _default_worktree_path(self, repository_root: Path) -> Path:
         base = self.settings.worktree_root or repository_root.parent / self.DEFAULT_WORKTREE_DIRNAME
@@ -260,235 +246,6 @@ class GitAdapterService(BaseAdapterService):
             "run_id": self.context.run_id,
             "snapshot_key": snapshot_key,
             "working_dir": str(worktree_path),
-        }
-
-    def git_merge(self, message: str | None = None) -> dict[str, str | None]:
-        """Rebase the task branch and fast-forward it into the project's base branch."""
-        del message
-        if self.is_project_scope(self.context):
-            workspace_path = self._project_workspace_path()
-            current_branch = self._current_branch_or_none(workspace_path)
-            return {
-                "action": "git_merge",
-                "task_id": self.context.task_id,
-                "branch": current_branch,
-                "base_branch": self.context.base_branch,
-                "status": "skipped",
-                "reason": "project_scope",
-                "repository_root": str(workspace_path),
-            }
-
-        repository_root = self._repository_root()
-
-        branch_name = self._branch_name_for_context(self.context)
-        base_branch = self.context.base_branch
-        worktree_path = self._resolved_worktree_path()
-
-        log_json(
-            "INFO",
-            "Rebasing task branch and fast-forwarding base branch",
-            task_id=self.context.task_id,
-            branch=branch_name,
-            base_branch=base_branch,
-            repository_root=str(repository_root),
-        )
-
-        if not self._git_succeeds(
-            repository_root,
-            "show-ref",
-            "--verify",
-            "--quiet",
-            f"refs/heads/{branch_name}",
-        ):
-            raise RuntimeError(f"Branch {branch_name!r} does not exist in {repository_root}")
-
-        if not self._git_succeeds(worktree_path, "rev-parse", "--is-inside-work-tree"):
-            raise RuntimeError(f"Task worktree {worktree_path} does not exist")
-
-        worktree_branch = self._run_git(worktree_path, "branch", "--show-current")
-        if worktree_branch != branch_name:
-            raise RuntimeError(f"Task worktree {worktree_path} is on branch {worktree_branch}, expected {branch_name}")
-
-        current_branch = self._run_git(repository_root, "branch", "--show-current")
-        previous_branch = current_branch or None
-
-        push_remote = self._resolve_push_remote(repository_root)
-        remote_base_ref = f"refs/remotes/{push_remote}/{base_branch}"
-        conflict_resolution_output: str | None = None
-        with AgentisRunLogger(run_id=self.context.run_id) as log:
-            try:
-                self._run_git(repository_root, "fetch", push_remote, base_branch)
-                try:
-                    self._run_git(worktree_path, "rebase", remote_base_ref)
-                except RuntimeError:
-                    log.started("git-merge-agent", message="Spouštím git merge AI agenta", event_id="1")
-                    opencode_output = subprocess.run(
-                        ["/usr/bin/opencode", "run", "--model", "openai/gpt-5.4", "fix git conflict"],
-                        cwd=worktree_path,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    ).stdout
-                    conflict_resolution_output = opencode_output
-                    print(opencode_output)
-                    log.success("git-merge-agent", message=opencode_output, event_id="1")
-                    try:
-                        self._run_git(worktree_path, "-c", "core.editor=true", "rebase", "--continue")
-                    except RuntimeError as error:
-                        log.failed("git merge retry", message=str(error), event_id="1")
-                        self._git_succeeds(worktree_path, "rebase", "--abort")
-                        raise
-
-                # self._run_git(repository_root, "checkout", base_branch)
-                try:
-                    self._run_git(repository_root, "rebase", branch_name)
-                except RuntimeError as error:
-                    if "You have unstaged changes" not in str(error):
-                        raise
-                    self._run_git(repository_root, "stash", "push")
-                    self._run_git(repository_root, "rebase", branch_name)
-                    self._run_git(repository_root, "stash", "pop")
-
-                commit = self._run_git(repository_root, "rev-parse", "HEAD")
-                self._run_git(
-                    repository_root,
-                    "push",
-                    push_remote,
-                    f"{base_branch}:refs/heads/{base_branch}",
-                )
-            finally:
-                if previous_branch and previous_branch != base_branch:
-                    self._git_succeeds(repository_root, "checkout", previous_branch)
-
-        result: dict[str, str | None] = {
-            "action": "git_merge",
-            "task_id": self.context.task_id,
-            "branch": branch_name,
-            "base_branch": base_branch,
-            "merge_commit": commit,
-            "commit": commit,
-            "push_remote": push_remote,
-            "repository_root": str(repository_root),
-        }
-        if conflict_resolution_output is not None:
-            result["conflict_resolution_output"] = conflict_resolution_output
-        return result
-
-    def _remove_worktree(
-        self,
-        repository_root: Path,
-        worktree_path: Path,
-        *,
-        missing_is_removed: bool = False,
-    ) -> bool:
-        if worktree_path.exists():
-            try:
-                self._run_git(
-                    repository_root,
-                    "worktree",
-                    "remove",
-                    "--force",
-                    str(worktree_path),
-                )
-                return True
-            except RuntimeError as error:
-                log_json(
-                    "WARN",
-                    "git worktree remove failed; removing worktree directory directly",
-                    task_id=self.context.task_id,
-                    worktree_path=str(worktree_path),
-                    error=str(error),
-                )
-                try:
-                    shutil.rmtree(worktree_path)
-                except FileNotFoundError:
-                    pass
-                except OSError as cleanup_error:
-                    log_json(
-                        "WARN",
-                        "Failed to remove worktree directory directly",
-                        task_id=self.context.task_id,
-                        worktree_path=str(worktree_path),
-                        error=str(cleanup_error),
-                    )
-                self._git_succeeds(repository_root, "worktree", "prune")
-                return not worktree_path.exists()
-
-        self._git_succeeds(repository_root, "worktree", "prune")
-        return missing_is_removed
-
-    def _delete_branch(self, repository_root: Path, branch_name: str) -> bool:
-        if not self._git_succeeds(
-            repository_root,
-            "show-ref",
-            "--verify",
-            "--quiet",
-            f"refs/heads/{branch_name}",
-        ):
-            return False
-        self._run_git(repository_root, "branch", "-D", branch_name)
-        return True
-
-    def _cleanup_worktree_branch(
-        self,
-        repository_root: Path,
-        branch_name: str,
-        worktree_path: Path,
-        *,
-        missing_worktree_is_removed: bool = False,
-    ) -> tuple[bool, bool]:
-        worktree_removed = self._remove_worktree(
-            repository_root,
-            worktree_path,
-            missing_is_removed=missing_worktree_is_removed,
-        )
-        branch_deleted = self._delete_branch(repository_root, branch_name)
-        return worktree_removed, branch_deleted
-
-    def close(self) -> dict[str, str | bool | None]:
-        if self.is_project_scope(self.context):
-            workspace_path = self._project_workspace_path()
-            current_branch = self._current_branch_or_none(workspace_path)
-            return {
-                "action": "close",
-                "task_id": self.context.task_id,
-                "branch": current_branch,
-                "base_branch": self.context.base_branch,
-                "status": "skipped",
-                "reason": "project_scope",
-                "repository_root": str(workspace_path),
-                "worktree_removed": False,
-                "branch_deleted": False,
-            }
-
-        repository_root = self._repository_root()
-
-        branch_name = self._branch_name_for_context(self.context)
-        worktree_path = self._resolved_worktree_path()
-
-        log_json(
-            "INFO",
-            "Closing task git environment",
-            task_id=self.context.task_id,
-            branch=branch_name,
-            worktree_path=str(worktree_path),
-        )
-
-        worktree_removed, branch_deleted = self._cleanup_worktree_branch(
-            repository_root,
-            branch_name,
-            worktree_path,
-            missing_worktree_is_removed=True,
-        )
-
-        return {
-            "action": "close",
-            "task_id": self.context.task_id,
-            "branch": branch_name,
-            "base_branch": self.context.base_branch,
-            "worktree_path": str(worktree_path),
-            "worktree_removed": worktree_removed,
-            "branch_deleted": branch_deleted,
         }
 
 

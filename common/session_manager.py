@@ -411,17 +411,21 @@ class BaseSessionManager:
     def _completion_actions(context: AgentExecutionContextPayload | None = None) -> list[dict[str, Any]]:
         if context is not None and GitAdapterService.is_project_scope(context):
             return []
+        # Followup akce nejsou samostatné RPC metody — `start` dostane v kontextu
+        # `adapter.workflow` a adapter spustí `.agentis/workflows/<workflow>.yaml`.
         return [
             {
                 "title": "Git merge",
                 "prompt": "Sloučit změny z task větve do hlavní větve.",
-                "adapter_method": "git_merge",
+                "adapter_method": "start",
+                "workflow": "merge",
                 "continue_previous_run": False,
             },
             {
                 "title": "Zavřít prostředí",
                 "prompt": "Uklidit prostředí, worktree a task větev.",
-                "adapter_method": "close",
+                "adapter_method": "start",
+                "workflow": "close",
                 "continue_previous_run": False,
             },
         ]

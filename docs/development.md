@@ -66,9 +66,10 @@ Spolecne handlery jsou v `common/rpc/jsonrpc.py` ve tride `AgentJsonRpcService`.
 | `add_message` | Navaze na existujici `session_id` a posle dalsi prompt. |
 | `question` | Rozhrani pro odpoved na otazku agenta; CLI adaptery ho aktualne neimplementuji. |
 | `approve` | Jednoduche potvrzeni rozhodnuti. |
-| `git_merge` | Rebase/merge task vetve do base branche, push a cleanup. |
 | `abort` | Zastavi bezici session/proces. |
-| `close` | Uklidi session, worktree a branch. |
+| `undo` | Vrati worktree do posledniho snapshotu. |
+
+Followup akce (git merge, uklid worktree/branche) nejsou samostatne metody. Agentis posle `start` s `context.adapter.workflow = "<name>"` a adapter spusti pojmenovane workflow `.agentis/workflows/<name>.yaml` (`merge.yaml`, `close.yaml`). Run soubory pojmenovaneho workflow se zapisuji mimo worktree do `<project_run_root>/<run_id>/<attempt>/`, protoze akce muze worktree sama smazat.
 
 Parametry se validuji Pydantic modely v `common/models.py`. Hlavni payload je `AgentExecutionContextPayload`.
 
@@ -139,8 +140,9 @@ lifecycle, ktery konkretni adaptery implementuji. O gitu nevi.
 
 - odvozeni nazvu branche z `task_id` nebo `context.adapter.branch`,
 - vytvoreni nebo znovupouziti git worktree (`create_worktree`),
-- `git_merge`,
-- `close` a cleanup worktree/branche.
+- obnoveni snapshotu (`restore_snapshot`).
+
+Merge a cleanup worktree/branche nejsou adapter kod — bezi jako pojmenovana workflow (`.agentis/workflows/merge.yaml`, `close.yaml`).
 
 Adapter service musi implementovat tyto metody:
 
@@ -227,7 +229,7 @@ Mapper musi z eventu postupne vytvaret seznam zprav ve formatu, ktery Agentis uk
 | --- | --- |
 | `task` | Default. Adapter vytvori worktree mimo hlavni repo a task branch `task-<task_id>`. |
 | `worktree` | V modelu povoleno, chova se prakticky jako task scope v `GitAdapterService`. |
-| `project` | Nepousti se task worktree. Bezi primo v aktualnim projektovem repozitari a `git_merge`/`close` cleanup se preskakuje. |
+| `project` | Nepousti se task worktree. Bezi primo v aktualnim projektovem repozitari, bez task branche a cleanupu. |
 
 Task scope:
 
@@ -361,7 +363,7 @@ from fastapi import FastAPI
 
 from common.adapter_app import JsonRpcRoute, create_adapter_app
 from common.config import Settings, get_settings
-from common.models import AbortParams, AddMessageParams, ApproveParams, CloseParams, GitMergeParams, QuestionParams, StartParams
+from common.models import AbortParams, AddMessageParams, ApproveParams, QuestionParams, StartParams
 from common.rpc.jsonrpc import AgentJsonRpcService
 from common.rpc.session_registry import SessionContextRegistry
 from myagent.adapter import MyAgentAdapterService
@@ -373,9 +375,7 @@ _DISPATCH = {
     "add_message": JsonRpcRoute(AddMessageParams, "add_message"),
     "question": JsonRpcRoute(QuestionParams, "question"),
     "approve": JsonRpcRoute(ApproveParams, "approve"),
-    "git_merge": JsonRpcRoute(GitMergeParams, "git_merge"),
     "abort": JsonRpcRoute(AbortParams, "abort"),
-    "close": JsonRpcRoute(CloseParams, "close"),
 }
 
 

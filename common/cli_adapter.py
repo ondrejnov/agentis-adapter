@@ -360,22 +360,5 @@ class CliAdapterService(GitAdapterService):
             "session_id": session_id,
         }
 
-    # ------------------------------------------------------------------
-    # Tear-down
-    # ------------------------------------------------------------------
-
-    def close(self) -> dict[str, Any]:
-        if self.context.session_id:
-            self._sessions.abort(self.context.session_id)
-            self._sessions.remove(self.context.session_id)
-
-        log_json(
-            "INFO",
-            f"Closing {self.runtime_label} task environment",
-            task_id=self.context.task_id,
-        )
-
-        return super().close()
-
 
 __all__ = ["CliAdapterService"]

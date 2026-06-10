@@ -5,7 +5,7 @@ protějšek :class:`~common.workflow.runtime.KubectlJobRunner` bez Kubernetes.
 Kubernetes-specifická pole workflow YAML (`image`, `volumes`, `volumeMounts`,
 `imagePullSecrets`, `resources`) se ignorují; kroky běží pod uživatelem
 adapter procesu bez izolace, se stejným bash wrapperem (`set -euo pipefail`,
-sourcing `envFiles`, `cd "$WORKDIR"`) jako v Kubernetes.
+sourcing `envFiles`, `cd` do workingDir kroku, jinak `"$WORKDIR"`) jako v Kubernetes.
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ class LocalProcessRunner:
         try:
             with log_path.open("wb") as log_file:
                 process = subprocess.Popen(
-                    ["/bin/bash", "-lc", build_bash_wrapper(spec.envFiles, step.run)],
+                    ["/bin/bash", "-lc", build_bash_wrapper(spec.envFiles, step.run, workdir=step.workingDir or spec.workingDir)],
                     cwd=working_dir,
                     env=merged_env,
                     stdout=log_file,

@@ -26,6 +26,7 @@ from common.workflow.schema import (
     evaluate_condition,
     interpolate_tokens,
     load_workflow_file,
+    workflow_file_relpath,
 )
 
 
@@ -555,6 +556,84 @@ def test_project_scope_without_project_yaml_fails_with_clear_error(tmp_path: Pat
     assert not (manager.settings.project_run_root / context.run_id).exists()
 
 
+ACTION_WORKFLOW_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%MAIN_DIR%]"
+  timeoutSeconds: 120
+  steps:
+    - name: Merge task branch
+      run: |
+        git rebase "refs/remotes/origin/${BASE_BRANCH}"
+      outputs:
+        - type: agent_comment
+          bodyFrom: outputs/final-comment.md
+          status: 5
+"""
+
+
+def _write_action_workflow(worktree: Path, name: str) -> Path:
+    path = worktree / workflow_file_relpath(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(ACTION_WORKFLOW_YAML, encoding="utf-8")
+    return path
+
+
+def test_named_workflow_runs_action_yaml_with_run_files_outside_worktree(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_action_workflow(worktree, "merge")
+
+    runner = FakeRunner()
+    runner.release.clear()
+    manager, calls = _manager(tmp_path, runner)
+    context = _context(adapter={"runtime": "workflow", "workflow": "merge"})
+
+    result = manager.start_workflow(context, str(worktree), "Sloučit změny z task větve do hlavní větve.")
+    assert result["workflow"] == "merge"
+    assert result["workflow_file"] == ".agentis/workflows/merge.yaml"
+    assert result["steps"] == ["Merge task branch"]
+
+    # run soubory jdou mimo worktree — akce může worktree sama smazat
+    run_dir = manager.settings.project_run_root / context.run_id / result["attempt"]
+    assert (run_dir / "prompt.md").is_file()
+    assert not (worktree / ".agentis" / "runs").exists()
+
+    outputs_dir = run_dir / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "final-comment.md").write_text("Zamergováno.", encoding="utf-8")
+
+    runner.release.set()
+    _wait_done(manager, context.task_id)
+
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert len(comment_calls) == 1
+    assert comment_calls[0]["body"] == "Zamergováno."
+    assert comment_calls[0]["status"] == 5
+    # followup akce už další completion akce nenabízí
+    assert comment_calls[0]["actions"] == []
+
+
+def test_named_workflow_without_file_fails_with_clear_error(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    worktree.mkdir(parents=True)
+    manager, _calls = _manager(tmp_path, FakeRunner())
+    context = _context(adapter={"runtime": "workflow", "workflow": "close"})
+
+    with pytest.raises(FileNotFoundError, match=r"close\.yaml"):
+        manager.start_workflow(context, str(worktree), "Uklidit prostředí.")
+    assert not (manager.settings.project_run_root / context.run_id).exists()
+
+
+def test_repo_action_workflows_parse(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    for name in ("merge", "close"):
+        workflow = load_workflow_file(repo_root / workflow_file_relpath(name), _values(tmp_path))
+        assert workflow.workflow.steps
+        statuses = [output.status for step in workflow.workflow.steps for output in step.outputs if output.type == "agent_comment"]
+        assert statuses, f"workflow {name} musí postnout agent_comment"
+
+
 def test_failed_step_stops_workflow_and_reports_log_tail(tmp_path: Path) -> None:
     worktree = tmp_path / "wt"
     _write_workflow(worktree)
@@ -832,6 +911,22 @@ def _service(tmp_path: Path, runner: FakeRunner) -> tuple[AgentJsonRpcService, W
         workflow_manager=manager,
     )
     return service, manager, calls
+
+
+def test_jsonrpc_start_with_named_workflow_implies_workflow_runtime(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_action_workflow(worktree, "close")
+    runner = FakeRunner()
+    service, manager, _calls = _service(tmp_path, runner)
+
+    # bez runtime=workflow — samotný název workflow v kontextu stačí
+    context = _context(adapter={"workflow": "close", "model": "openai/gpt-5"})
+    result = service.start(StartParams(context=context))
+
+    steps = result["adapter"]["steps"]
+    assert [step["action"] for step in steps] == ["create_worktree", "workflow_start"]
+    assert steps[-1]["workflow"] == "close"
+    _wait_done(manager, context.task_id)
 
 
 def test_jsonrpc_start_with_workflow_runtime_is_nonblocking(tmp_path: Path) -> None:

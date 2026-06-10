@@ -78,11 +78,13 @@ def job_name(run_id: str, attempt_id: str, step_index: int, step_name: str) -> s
     return name[:63].strip("-")
 
 
-def build_bash_wrapper(env_files: list[str], script: str, *, workdir_env: str = "WORKDIR") -> str:
+def build_bash_wrapper(env_files: list[str], script: str, *, workdir: str | None = None, workdir_env: str = "WORKDIR") -> str:
+    """Obalí krok do bashe; `workdir` (workingDir kroku/workflow) má přednost před `$WORKDIR`."""
+
     lines = ["set -euo pipefail"]
     for env_file in env_files:
         lines.extend(["set -a", f". {env_file}", "set +a"])
-    lines.append(f'cd "${workdir_env}"')
+    lines.append(f'cd "{workdir}"' if workdir else f'cd "${workdir_env}"')
     lines.append(script)
     return "\n".join(lines)
 
@@ -117,7 +119,7 @@ def build_job_manifest(
     container: dict[str, Any] = {
         "name": "step",
         "image": image,
-        "command": ["/bin/bash", "-lc", build_bash_wrapper(spec.envFiles, step.run)],
+        "command": ["/bin/bash", "-lc", build_bash_wrapper(spec.envFiles, step.run, workdir=working_dir)],
         "env": [{"name": key, "value": value} for key, value in merged_env.items()],
     }
     if working_dir:

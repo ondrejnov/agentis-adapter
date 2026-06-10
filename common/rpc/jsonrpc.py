@@ -11,13 +11,10 @@ from common.models import (
     AgentExecutionContextPayload,
     AbortParams,
     ApproveParams,
-    CloseParams,
-    GitMergeParams,
     QuestionParams,
     RunEventPayload,
     RunStatePayload,
     StartParams,
-    TaskStatus,
     UndoParams,
 )
 from common.adapter_base import BaseAdapterService
@@ -58,6 +55,9 @@ class AgentJsonRpcService:
 
     @staticmethod
     def _is_workflow_runtime(context: AgentExecutionContextPayload) -> bool:
+        # Pojmenované workflow (followup akce jako merge/close) běží vždy přes workflow runtime.
+        if context.adapter and context.adapter.workflow:
+            return True
         runtime = context.adapter.runtime if context.adapter and context.adapter.runtime else None
         return bool(runtime) and runtime.strip().lower() == WORKFLOW_RUNTIME
 
@@ -510,95 +510,6 @@ class AgentJsonRpcService:
         except Exception as exc:
             run.status = "failed"
             raise AgentJsonRpcException(500, f"Adapter error: {exc}") from exc
-
-        return {
-            "run": run.safe_dump(),
-            "adapter": {
-                "executed": True,
-                "steps": [step],
-            },
-        }
-
-    def git_merge(self, params: GitMergeParams) -> dict[str, Any]:
-        context = params.context
-        run = RunStatePayload(run_id=context.run_id, context=context)
-        adapter = self._adapter_factory(context)
-        try:
-            git_merge_step = self._run_adapter_step(
-                adapter,
-                kind="git_merge",
-                started_message="Mergeuji task větev do hlavní větve.",
-                success_message="Task větev byla zmergována.",
-                callback=lambda: adapter.git_merge(params.message),
-            )
-            step = self._run_adapter_step(
-                adapter,
-                kind="close",
-                started_message="Uklízím prostředí a git větev.",
-                success_message="Prostředí bylo uklizeno.",
-                callback=adapter.close,
-            )
-        except Exception as exc:
-            run.status = "failed"
-            raise AgentJsonRpcException(500, f"Adapter error: {exc}") from exc
-
-        if context.run_id:
-            body = "✔️ Zamergoval jsem task větev do hlavní větve a uklidil prostředí."
-            conflict_resolution_output = git_merge_step.get("conflict_resolution_output")
-            if "conflict_resolution_output" in git_merge_step:
-                body += "\n\nMerge narazil na git conflict, který jsem řešil přes AI resolver."
-                if isinstance(conflict_resolution_output, str) and conflict_resolution_output.strip():
-                    body += f"\n\nVýsledek AI resolveru:\n\n```\n{conflict_resolution_output.strip()}\n```"
-                else:
-                    body += "\n\nAI resolver nevrátil žádný textový výstup."
-            self.call_agentis(
-                method="task.add_agent_comment",
-                params={
-                    "run_id": context.run_id,
-                    "body": body,
-                    "status": TaskStatus.DONE,
-                },
-            )
-
-        if context.session_id:
-            self.session_registry.remove(context.session_id)
-
-        return {
-            "run": run.safe_dump(),
-            "adapter": {
-                "executed": True,
-                "steps": [step],
-            },
-        }
-
-    def close(self, params: CloseParams) -> dict[str, Any]:
-        context = params.context
-        run = RunStatePayload(run_id=context.run_id, context=context)
-        try:
-            adapter = self._adapter_factory(context)
-            step = self._run_adapter_step(
-                adapter,
-                kind="close",
-                started_message="Uklízím prostředí a git větev.",
-                success_message="Prostředí bylo uklizeno.",
-                callback=adapter.close,
-            )
-        except Exception as exc:
-            run.status = "failed"
-            raise AgentJsonRpcException(500, f"Adapter error: {exc}") from exc
-
-        if context.run_id:
-            self.call_agentis(
-                method="task.add_agent_comment",
-                params={
-                    "run_id": context.run_id,
-                    "body": "Prostředí a git větev byly uklizeny.",
-                    "status": TaskStatus.CANCELLED,
-                },
-            )
-
-        if context.session_id:
-            self.session_registry.remove(context.session_id)
 
         return {
             "run": run.safe_dump(),

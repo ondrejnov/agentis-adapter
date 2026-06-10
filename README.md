@@ -4,10 +4,11 @@ Samostatny FastAPI JSON-RPC adapter pro agenta. Projekt nema zadnou databazi a d
 
 ## Co umi
 
-- pasivni WebSocket transport prijima JSON-RPC 2.0 metody `start`, `add_message`, `question`, `approve`, `git_merge`, `abort`, `close` z Agentisu pres odchozi spojeni
+- pasivni WebSocket transport prijima JSON-RPC 2.0 metody `start`, `add_message`, `question`, `approve`, `abort`, `undo` z Agentisu pres odchozi spojeni
 - aktivitu agenta (komentare, dokoncovaci akce, adapter eventy) adapter cte primo z postupneho vystupu `opencode`/`claude` CLI a forwarduje do endpointu z `AGENTIS_ENDPOINT` — agent runtime uz nedela zadne callbacky zpet do adapteru
 - `GET /health` na ASGI aplikaci pro healthcheck (adapter ale neposlucha na zadnem inbound portu)
 - `start` vytvori git branch a worktree podle `task_id` a spusti agenta lokalne (environment `local`); s `context.adapter.runtime = "workflow"` se misto toho spusti deklarativni workflow (kroky podle executoru jako Kubernetes Joby pres `kubectl`, nebo jako lokalni bash procesy — viz `WORKFLOW_EXECUTOR`)
+- followup akce (git merge, uklid worktree a branche) nejsou samostatne RPC metody — `context.adapter.workflow` v `start` vybere pojmenovane workflow `.agentis/workflows/<name>.yaml` (`merge.yaml`, `close.yaml`) a adapter ho jen spusti
 
 ## Vyvojarska dokumentace
 

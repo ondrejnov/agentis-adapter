@@ -43,6 +43,8 @@ class AdapterOptionsPayload(BaseModel):
     effort: str | None = None
     runtime: str | None = None
     task_status: int | None = None
+    #: Název workflow souboru `.agentis/workflows/<workflow>.yaml`; vyplněný pro followup akce (merge, close, ...).
+    workflow: str | None = None
 
     @field_validator("manifest")
     @classmethod
@@ -67,6 +69,21 @@ class AdapterOptionsPayload(BaseModel):
 
         branch = value.strip()
         return branch or None
+
+    @field_validator("workflow")
+    @classmethod
+    def validate_workflow(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        workflow = value.strip()
+        if not workflow:
+            return None
+
+        if workflow in {".", ".."} or PurePath(workflow).name != workflow or "\\" in workflow:
+            raise ValueError("workflow must be a workflow name, not a path")
+
+        return workflow
 
 
 class AgentCommentPayload(BaseModel):
@@ -171,19 +188,6 @@ class ApproveParams(BaseModel):
     run_id: str
     approved: bool
     comment: str | None = None
-
-
-class GitMergeParams(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    context: AgentExecutionContextPayload
-    message: str | None = None
-
-
-class CloseParams(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    context: AgentExecutionContextPayload
 
 
 class AbortParams(BaseModel):

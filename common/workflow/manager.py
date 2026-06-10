@@ -37,6 +37,7 @@ from common.workflow.schema import (
     WorkflowStep,
     evaluate_condition,
     load_workflow_file,
+    workflow_file_relpath,
 )
 
 
@@ -104,9 +105,12 @@ class WorkflowManager:
     ) -> dict[str, Any]:
         """Připraví run, načte a zmrazí workflow YAML a spustí workflow na pozadí.
 
-        Pro scope=project se použije `project.yaml` místo `ci.yaml` a run soubory
-        (prompt, context, outputs) se zapisují mimo projekt do
-        `<project_run_root>/<run_id>/<attempt>/`, aby mohlo běžet víc runů zároveň.
+        Bez pojmenovaného workflow v kontextu se použije `ci.yaml`, pro
+        scope=project `project.yaml`. `context.adapter.workflow` (followup akce
+        jako merge/close) vybírá `.agentis/workflows/<name>.yaml`. Run soubory
+        (prompt, context, outputs) se pro scope=project a pojmenovaná workflow
+        zapisují mimo worktree do `<project_run_root>/<run_id>/<attempt>/` —
+        akce můžou worktree samy smazat.
         """
 
         namespace = namespace_for_context(context, self.settings)
@@ -120,15 +124,24 @@ class WorkflowManager:
         # Hex timestamp s pevnou šířkou: lexikografické řazení názvů jobů odpovídá pořadí spuštění.
         attempt_id = f"{time.time_ns() // 1_000_000:011x}"
         is_project_scope = GitAdapterService.is_project_scope(context)
-        workflow_relpath = PROJECT_WORKFLOW_FILE_RELPATH if is_project_scope else WORKFLOW_FILE_RELPATH
+        workflow_name = self._workflow_name(context)
+        if workflow_name:
+            workflow_relpath = workflow_file_relpath(workflow_name)
+        else:
+            workflow_relpath = PROJECT_WORKFLOW_FILE_RELPATH if is_project_scope else WORKFLOW_FILE_RELPATH
         workflow_path = worktree_path / workflow_relpath
+        if workflow_name and not workflow_path.is_file():
+            raise FileNotFoundError(
+                f"Workflow {workflow_name!r} vyžaduje soubor {workflow_relpath}, ale {workflow_path} neexistuje"
+            )
         if is_project_scope and not workflow_path.is_file():
             raise FileNotFoundError(
                 f"Project scope vyžaduje workflow soubor {PROJECT_WORKFLOW_FILE_RELPATH}, "
                 f"ale {workflow_path} neexistuje"
             )
 
-        if is_project_scope:
+        external_run_files = is_project_scope or workflow_name is not None
+        if external_run_files:
             run_dir = self.settings.project_run_root / context.run_id / attempt_id
         else:
             run_dir = worktree_path / ".agentis" / "runs" / attempt_id
@@ -156,7 +169,7 @@ class WorkflowManager:
             namespace=namespace,
             attempt_id=attempt_id,
             run_dir=run_dir,
-            output_root=run_dir if is_project_scope else worktree_path,
+            output_root=run_dir if external_run_files else worktree_path,
             prompt_file=prompt_file,
             context_file=context_file,
             executor=executor,
@@ -180,6 +193,7 @@ class WorkflowManager:
             "attempt": attempt_id,
             "namespace": namespace,
             "executor": executor,
+            "workflow": workflow_name,
             "workflow_file": workflow_relpath,
             "steps": [step.name for step in workflow.workflow.steps],
         }
@@ -230,6 +244,12 @@ class WorkflowManager:
                 f"Workflow executor 'kubernetes' vyžaduje 'image' v {workflow_relpath} "
                 f"(chybí pro kroky: {', '.join(missing)})"
             )
+
+    @staticmethod
+    def _workflow_name(context: AgentExecutionContextPayload) -> str | None:
+        if context.adapter and context.adapter.workflow:
+            return context.adapter.workflow
+        return None
 
     @staticmethod
     def _task_label(context: AgentExecutionContextPayload) -> str:
@@ -484,6 +504,8 @@ class WorkflowManager:
             )
 
         if comment_body:
+            # Followup akce (pojmenované workflow) už další completion akce nenabízí.
+            actions = [] if self._workflow_name(run.context) else BaseSessionManager._completion_actions(run.context)
             self._agentis_call(
                 method="task.add_agent_comment",
                 params={
@@ -493,7 +515,7 @@ class WorkflowManager:
                     "artifacts": artifacts,
                     "status": comment_status,
                     "comment_type": "primary",
-                    "actions": BaseSessionManager._completion_actions(run.context),
+                    "actions": actions,
                 },
             )
         elif attachments or artifacts:

@@ -187,11 +187,5 @@ class BaseAdapterService:
     def abort(self, session_id: str) -> dict[str, Any]:
         raise NotImplementedError
 
-    def git_merge(self, message: str | None = None) -> dict[str, Any]:
-        raise NotImplementedError
-
-    def close(self) -> dict[str, Any]:
-        raise NotImplementedError
-
 
 __all__ = ["BaseAdapterService", "log_json"]

@@ -8,8 +8,6 @@ from common.models import (
     AddMessageParams,
     AbortParams,
     ApproveParams,
-    CloseParams,
-    GitMergeParams,
     QuestionParams,
     StartParams,
     UndoParams,
@@ -25,10 +23,8 @@ _DISPATCH: dict[str, JsonRpcRoute] = {
     "add_message": JsonRpcRoute(AddMessageParams, "add_message"),
     "question": JsonRpcRoute(QuestionParams, "question"),
     "approve": JsonRpcRoute(ApproveParams, "approve"),
-    "git_merge": JsonRpcRoute(GitMergeParams, "git_merge"),
     "abort": JsonRpcRoute(AbortParams, "abort"),
     "undo": JsonRpcRoute(UndoParams, "undo"),
-    "close": JsonRpcRoute(CloseParams, "close"),
 }
 
 

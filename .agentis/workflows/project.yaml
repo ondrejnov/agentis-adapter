@@ -15,6 +15,9 @@ workflow:
     MAIN_DIR: "[%MAIN_DIR%]"
     AGENT_BROWSER_SCREENSHOT_DIR: "[%RUN_DIR%]/.screenshots"
     IS_SANDBOX: 1
+    CLARP_DEBUG_PTY: 1
+    CLARP_DEBUG: 1
+    CLARP_DEBUG_API: 1
     PYTHONPATH: "[%WORKDIR%]/backend"
     PATH: "[%WORKDIR%]/.venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   volumeMounts:
