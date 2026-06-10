@@ -66,6 +66,7 @@ class Settings:
     agentis_endpoint: str | None
     agentis_token: str | None
     namespace_prefix: str = "Task"
+    project_run_root: Path = Path("/tmp/agentis")
     claude_run_mode: str = "local"
     claude_pod_selector: str = "deployment/opencode"
     claude_pod_container: str = "opencode"
@@ -131,6 +132,9 @@ def _build_settings() -> Settings:
         agentis_endpoint=_get_env(env, "AGENTIS_ENDPOINT", "http://127.0.0.1:8891"),
         agentis_token=_get_env(env, "AGENTIS_TOKEN", "1234"),
         namespace_prefix=_get_env(env, "ADAPTER_NAMESPACE_PREFIX", "Task") or "Task",
+        project_run_root=Path(
+            _get_env(env, "ADAPTER_PROJECT_RUN_ROOT", "/tmp/agentis") or "/tmp/agentis"
+        ).resolve(),
         claude_run_mode=(_get_env(env, "CLAUDE_RUN_MODE", "kubernetes") or "kubernetes").strip().lower(),
         claude_pod_selector=_get_env(env, "CLAUDE_POD_SELECTOR", "deployment/opencode") or "deployment/opencode",
         claude_pod_container=_get_env(env, "CLAUDE_POD_CONTAINER", "opencode") or "opencode",

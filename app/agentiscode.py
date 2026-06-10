@@ -31,6 +31,7 @@ import json
 import os
 import signal
 import sys
+from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 from common.agentiscode import AgentConfig, AgentEvent, AgentWrapper, normalize_adapter
@@ -139,6 +140,53 @@ class TextRenderer:
         sys.stderr.flush()
 
 
+class OutputRecorder:
+    """Zapisuje finální odpověď agenta a session id do souborů (workflow outputs).
+
+    ``--session-output`` se zapíše hned, jakmile je session id známé;
+    ``--final-output`` až po skončení běhu. Finální text se skládá stejně jako
+    v telemetrii: poslední souvislý blok ``text`` eventů (přerušený nástrojem
+    nebo reasoningem se začíná skládat znovu).
+    """
+
+    def __init__(self, final_path: Optional[str] = None, session_path: Optional[str] = None) -> None:
+        self._final_path = final_path
+        self._session_path = session_path
+        self._session_written = False
+        self._final_chunks: list[str] = []
+        self._final_open = False
+
+    def handle(self, event: AgentEvent) -> None:
+        if event.type == "text":
+            text = event.data.get("text")
+            if isinstance(text, str) and text:
+                if not self._final_open:
+                    self._final_chunks.clear()
+                self._final_chunks.append(text)
+                self._final_open = True
+        elif event.type in {"reasoning", "tool", "step"}:
+            self._final_open = False
+
+        if not self._session_written and event.type in {"session", "result"}:
+            session_id = event.data.get("session_id")
+            if isinstance(session_id, str) and session_id and self._session_path:
+                self._write(self._session_path, session_id + "\n")
+                self._session_written = True
+
+    def finish(self) -> None:
+        if self._final_path:
+            self._write(self._final_path, "".join(self._final_chunks).strip() + "\n")
+
+    @staticmethod
+    def _write(path: str, content: str) -> None:
+        try:
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            sys.stderr.write(f"[agentiscode] nelze zapsat output {path}: {exc}\n")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -191,6 +239,16 @@ def _parser() -> argparse.ArgumentParser:
         help="Agentis JSON-RPC endpoint (default: $AGENTIS_ENDPOINT). Nutné s --task-id.",
     )
     parser.add_argument(
+        "--final-output",
+        metavar="PATH",
+        help="Po skončení běhu ulož finální odpověď agenta do souboru.",
+    )
+    parser.add_argument(
+        "--session-output",
+        metavar="PATH",
+        help="Ulož agent session id do souboru, jakmile je známé.",
+    )
+    parser.add_argument(
         "--agentis-token",
         metavar="TOKEN",
         default=os.environ.get("AGENTIS_TOKEN"),
@@ -217,6 +275,7 @@ async def _run(
     prompt: str,
     json_mode: bool,
     telemetry: Optional[AgentisTelemetry] = None,
+    recorder: Optional[OutputRecorder] = None,
 ) -> int:
     wrapper = AgentWrapper(config)
     renderer: Any = JsonRenderer() if json_mode else TextRenderer()
@@ -252,6 +311,8 @@ async def _run(
             elif event.type == "result" and event.data.get("is_error"):
                 exit_code = 1
             renderer.handle(event)
+            if recorder is not None:
+                recorder.handle(event)
             if telemetry is not None:
                 telemetry.handle(event)
     except asyncio.CancelledError:
@@ -264,6 +325,8 @@ async def _run(
             with contextlib.suppress(Exception):
                 loop.remove_signal_handler(signum)
         renderer.finish()
+        if recorder is not None:
+            recorder.finish()
         if telemetry is not None:
             telemetry.finish()
     return exit_code
@@ -326,8 +389,12 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             on_error=_telemetry_error,
         )
 
+    recorder: Optional[OutputRecorder] = None
+    if args.final_output or args.session_output:
+        recorder = OutputRecorder(final_path=args.final_output, session_path=args.session_output)
+
     try:
-        return asyncio.run(_run(config, prompt, args.json, telemetry))
+        return asyncio.run(_run(config, prompt, args.json, telemetry, recorder))
     except KeyboardInterrupt:
         sys.stderr.write("\nPřerušeno.\n")
         return 130
@@ -344,4 +411,4 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["run", "main", "JsonRenderer", "TextRenderer"]
+__all__ = ["run", "main", "JsonRenderer", "TextRenderer", "OutputRecorder"]

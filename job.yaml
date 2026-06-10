@@ -1,0 +1,183 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  creationTimestamp: "2026-06-09T20:49:52Z"
+  generateName: wf-019eae25-55352b8f-5-run-agent-
+  generation: 1
+  labels:
+    agentis.attempt: 55352b8f
+    agentis.run_id: 019eae25-8be3-745f-8210-e8e02262f8e3
+    agentis.step: run-agent
+    agentis.step_index: "5"
+    agentis.task_id: 019eae25-8495-7e00-9
+    agentis.workflow: "true"
+    batch.kubernetes.io/controller-uid: 383bbd50-735e-438a-90d0-ae6f10b1f355
+    batch.kubernetes.io/job-name: wf-019eae25-55352b8f-5-run-agent
+    controller-uid: 383bbd50-735e-438a-90d0-ae6f10b1f355
+    job-name: wf-019eae25-55352b8f-5-run-agent
+  name: wf-019eae25-55352b8f-5-run-agent-hvqns
+  namespace: task-2495-spust-hostname
+  ownerReferences:
+  - apiVersion: batch/v1
+    blockOwnerDeletion: true
+    controller: true
+    kind: Job
+    name: wf-019eae25-55352b8f-5-run-agent
+    uid: 383bbd50-735e-438a-90d0-ae6f10b1f355
+  resourceVersion: "14208046"
+  uid: af65dc47-6131-46f0-a72f-5d013368b882
+spec:
+  containers:
+  - command:
+    - /bin/bash
+    - -lc
+    - |
+      set -euo pipefail
+      set -a
+      . /root/.config/agentis/agentis.env
+      set +a
+      cd "$WORKDIR"
+      mkdir -p .agentis/outputs
+      agentiscode --adapter opencode \
+        --model "${AGENTIS_MODEL:-openai/gpt-5.4-mini}" \
+        --run-id "$AGENTIS_RUN_ID" \
+        --task-id "$AGENTIS_TASK_ID" \
+        --final-output .agentis/outputs/final-comment.md \
+        --session-output .agentis/outputs/session-id \
+        < "$AGENTIS_PROMPT_FILE"
+    env:
+    - name: HOME
+      value: /root
+    - name: TASK_NUMBER
+      value: "2495"
+    - name: TASK_TITLE
+      value: spust `hostname`
+    - name: BRANCH
+      value: task-019eae25-8495-7e00-9020-2e3072a7f22c
+    - name: BASE_BRANCH
+      value: main
+    - name: GITHUB_REPO
+      value: https://github.com/ondrejnov/agentis-kubernetes-adapter
+    - name: MAIN_DIR
+      value: /var/www/agentis-adapter
+    - name: AGENT_BROWSER_SCREENSHOT_DIR
+      value: /var/www/agentiscraft/019eae25-8495-7e00-9020-2e3072a7f22c/.screenshots
+    - name: IS_SANDBOX
+      value: "1"
+    - name: PYTHONPATH
+      value: /var/www/agentiscraft/019eae25-8495-7e00-9020-2e3072a7f22c/backend
+    - name: PATH
+      value: /var/www/agentiscraft/019eae25-8495-7e00-9020-2e3072a7f22c/.venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    - name: NAMESPACE
+      value: task-2495-spust-hostname
+    - name: WORKDIR
+      value: /var/www/agentiscraft/019eae25-8495-7e00-9020-2e3072a7f22c
+    - name: RUN_ID
+      value: 019eae25-8be3-745f-8210-e8e02262f8e3
+    - name: TASK_ID
+      value: 019eae25-8495-7e00-9020-2e3072a7f22c
+    - name: AGENTIS_RUN_ID
+      value: 019eae25-8be3-745f-8210-e8e02262f8e3
+    - name: AGENTIS_TASK_ID
+      value: 019eae25-8495-7e00-9020-2e3072a7f22c
+    - name: AGENTIS_PROMPT_FILE
+      value: /var/www/agentiscraft/019eae25-8495-7e00-9020-2e3072a7f22c/.agentis/runs/55352b8f/prompt.md
+    - name: AGENTIS_CONTEXT_FILE
+      value: /var/www/agentiscraft/019eae25-8495-7e00-9020-2e3072a7f22c/.agentis/runs/55352b8f/context.json
+    - name: AGENTIS_MODEL
+      value: openai/gpt-5.4-mini
+    - name: AGENTIS_EFFORT
+      value: low
+    image: rg.nl-ams.scw.cloud/reactis/opencode:1.2
+    imagePullPolicy: IfNotPresent
+    name: step
+    resources: {}
+    terminationMessagePath: /dev/termination-log
+    terminationMessagePolicy: File
+    volumeMounts:
+    - mountPath: /var/www
+      name: www
+    - mountPath: /root/.npm
+      name: npm-cache
+    - mountPath: /root/.cache/pypoetry
+      name: poetry-cache
+    - mountPath: /root/.gitconfig
+      name: gitconfig
+      readOnly: true
+    - mountPath: /root/.config/gh
+      name: gh-config
+      readOnly: true
+    - mountPath: /root/.config/agentis
+      name: agentis-config
+      readOnly: true
+    - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+      name: kube-api-access-d6ktw
+      readOnly: true
+    workingDir: /var/www/agentiscraft/019eae25-8495-7e00-9020-2e3072a7f22c
+  dnsPolicy: ClusterFirst
+  enableServiceLinks: true
+  nodeName: dev4
+  preemptionPolicy: PreemptLowerPriority
+  priority: 0
+  restartPolicy: Never
+  schedulerName: default-scheduler
+  securityContext: {}
+  serviceAccount: default
+  serviceAccountName: default
+  terminationGracePeriodSeconds: 30
+  tolerations:
+  - effect: NoExecute
+    key: node.kubernetes.io/not-ready
+    operator: Exists
+    tolerationSeconds: 300
+  - effect: NoExecute
+    key: node.kubernetes.io/unreachable
+    operator: Exists
+    tolerationSeconds: 300
+  volumes:
+  - hostPath:
+      path: /var/www
+      type: ""
+    name: www
+  - hostPath:
+      path: /root/.npm
+      type: DirectoryOrCreate
+    name: npm-cache
+  - hostPath:
+      path: /root/.cache/pypoetry
+      type: DirectoryOrCreate
+    name: poetry-cache
+  - hostPath:
+      path: /root/.gitnexus
+      type: DirectoryOrCreate
+    name: gitnexus
+  - hostPath:
+      path: /root/.gitconfig
+      type: FileOrCreate
+    name: gitconfig
+  - hostPath:
+      path: /root/.config/gh
+      type: DirectoryOrCreate
+    name: gh-config
+  - hostPath:
+      path: /root/.config/agentis/
+      type: ""
+    name: agentis-config
+  - name: kube-api-access-d6ktw
+    projected:
+      defaultMode: 420
+      sources:
+      - serviceAccountToken:
+          expirationSeconds: 3607
+          path: token
+      - configMap:
+          items:
+          - key: ca.crt
+            path: ca.crt
+          name: kube-root-ca.crt
+      - downwardAPI:
+          items:
+          - fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.namespace
+            path: namespace
