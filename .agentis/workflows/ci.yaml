@@ -103,7 +103,6 @@ workflow:
           echo "Pull request už existuje: $(cat .agentis/outputs/pull-request-url)"
         else
           gh pr create --base "$BASE_BRANCH" --head "$BRANCH" \
-            --repo "$GITHUB_REPO" \
             --title "${TASK_TITLE:-$BRANCH}" \
             --body "${TASK_TITLE:-$BRANCH}" \
             >.agentis/outputs/pull-request-url

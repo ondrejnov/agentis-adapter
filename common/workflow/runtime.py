@@ -154,7 +154,7 @@ class KubectlJobRunner:
         name: str,
         *,
         timeout: float,
-        interval: float = 3.0,
+        interval: float = 2.0,
         abort_event: threading.Event | None = None,
     ) -> str:
         """Sleduje Job do dokončení; vrací `succeeded` / `failed` / `timeout` / `aborted`."""
