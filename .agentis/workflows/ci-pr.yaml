@@ -94,7 +94,7 @@ workflow:
           exit 0
         fi
         git fetch origin "$BASE_BRANCH"
-        if [ "$(git rev-list --count "origin/${BASE_BRANCH}..HEAD")" -eq 0 ]; then
+        if [ "$(git rev-list --count FETCH_HEAD..HEAD)" -eq 0 ]; then
           echo "Žádné commity oproti ${BASE_BRANCH}, pull request se přeskakuje."
           exit 0
         fi
