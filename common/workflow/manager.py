@@ -13,6 +13,7 @@ import json
 import re
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -96,7 +97,8 @@ class WorkflowManager:
             raise WorkflowBusyError(f"Workflow jobs for task {context.task_id} are still active in {namespace}")
 
         worktree_path = Path(worktree)
-        attempt_id = uuid4().hex[:8]
+        # Hex timestamp s pevnou šířkou: lexikografické řazení názvů jobů odpovídá pořadí spuštění.
+        attempt_id = f"{time.time_ns() // 1_000_000:011x}"
         is_project_scope = GitAdapterService.is_project_scope(context)
         workflow_relpath = PROJECT_WORKFLOW_FILE_RELPATH if is_project_scope else WORKFLOW_FILE_RELPATH
         workflow_path = worktree_path / workflow_relpath
