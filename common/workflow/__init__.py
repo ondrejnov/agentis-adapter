@@ -1,4 +1,5 @@
 from common.workflow.schema import (
+    PROJECT_WORKFLOW_FILE_RELPATH,
     WORKFLOW_FILE_RELPATH,
     WorkflowFile,
     WorkflowInterpolationError,
@@ -12,6 +13,7 @@ from common.workflow.runtime import KubectlJobRunner, build_bash_wrapper, build_
 from common.workflow.manager import WorkflowBusyError, WorkflowManager
 
 __all__ = [
+    "PROJECT_WORKFLOW_FILE_RELPATH",
     "WORKFLOW_FILE_RELPATH",
     "WorkflowFile",
     "WorkflowInterpolationError",

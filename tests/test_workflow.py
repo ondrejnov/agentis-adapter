@@ -12,11 +12,12 @@ import pytest
 from pydantic import ValidationError
 
 from common.config import Settings
-from common.models import AgentExecutionContextPayload, StartParams, AbortParams, QuestionParams
+from common.models import AddMessageParams, AgentExecutionContextPayload, StartParams, AbortParams, QuestionParams
 from common.rpc.jsonrpc import AgentJsonRpcException, AgentJsonRpcService
 from common.workflow.manager import WorkflowBusyError, WorkflowManager
 from common.workflow.runtime import build_bash_wrapper, build_job_manifest, job_labels, job_name
 from common.workflow.schema import (
+    PROJECT_WORKFLOW_FILE_RELPATH,
     WORKFLOW_FILE_RELPATH,
     WorkflowFile,
     WorkflowInterpolationError,
@@ -67,6 +68,26 @@ volumes:
 """
 
 
+PROJECT_WORKFLOW_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 120
+  steps:
+    - name: Run agent
+      run: |
+        mkdir -p "$AGENTIS_RUN_DIR/outputs"
+        agentiscode < "$AGENTIS_PROMPT_FILE"
+      outputs:
+        - type: agent_comment
+          bodyFrom: outputs/final-comment.md
+          status: 5
+        - type: session_id
+          valueFrom: outputs/session-id
+"""
+
+
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
         host="127.0.0.1",
@@ -78,6 +99,7 @@ def _settings(tmp_path: Path) -> Settings:
         public_base_url=None,
         agentis_endpoint=None,
         agentis_token=None,
+        project_run_root=tmp_path / "tmp-agentis",
     )
 
 
@@ -311,6 +333,62 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
         assert "AGENTIS_TOKEN" not in env
 
 
+def test_project_scope_uses_project_yaml_and_run_dir_outside_project(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    workflow_path = project_dir / PROJECT_WORKFLOW_FILE_RELPATH
+    workflow_path.parent.mkdir(parents=True, exist_ok=True)
+    workflow_path.write_text(PROJECT_WORKFLOW_YAML, encoding="utf-8")
+
+    runner = FakeRunner()
+    runner.release.clear()
+    manager, calls = _manager(tmp_path, runner)
+    context = _context(adapter={"runtime": "workflow", "scope": "project", "model": "openai/gpt-5"})
+
+    result = manager.start_workflow(context, str(project_dir), "udelej X")
+    assert result["workflow_file"] == PROJECT_WORKFLOW_FILE_RELPATH
+    assert result["steps"] == ["Run agent"]
+
+    # run soubory jdou mimo projekt do <project_run_root>/<run_id>/<attempt>/
+    run_dir = manager.settings.project_run_root / context.run_id / result["attempt"]
+    assert (run_dir / "prompt.md").read_text(encoding="utf-8") == "udelej X"
+    assert json.loads((run_dir / "context.json").read_text(encoding="utf-8"))["task_id"] == "task-77"
+    assert not (project_dir / ".agentis" / "runs").exists()
+
+    # outputs vzniknou až během běhu — agent je píše do run dir
+    outputs_dir = run_dir / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "final-comment.md").write_text("Hotovo bez gitu.", encoding="utf-8")
+    (outputs_dir / "session-id").write_text("ses_77\n", encoding="utf-8")
+
+    runner.release.set()
+    _wait_done(manager, context.task_id)
+
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert len(comment_calls) == 1
+    assert comment_calls[0]["body"] == "Hotovo bez gitu."
+    assert comment_calls[0]["status"] == 5
+    assert any(method == "run.store_session_id" for method, _ in calls)
+
+    # Job dostane cesty do run dir, workdir zůstává projektový adresář
+    assert len(runner.applied) == 1
+    env = {item["name"]: item["value"] for item in runner.applied[0]["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["AGENTIS_RUN_DIR"] == str(run_dir)
+    assert env["AGENTIS_PROMPT_FILE"] == str(run_dir / "prompt.md")
+    assert env["RUN_DIR"] == str(run_dir)
+    assert env["WORKDIR"] == str(project_dir)
+
+
+def test_project_scope_without_project_yaml_fails_with_clear_error(tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True)
+    manager, _calls = _manager(tmp_path, FakeRunner())
+    context = _context(adapter={"runtime": "workflow", "scope": "project"})
+
+    with pytest.raises(FileNotFoundError, match=r"project\.yaml"):
+        manager.start_workflow(context, str(project_dir), "udelej X")
+    assert not (manager.settings.project_run_root / context.run_id).exists()
+
+
 def test_failed_step_stops_workflow_and_reports_log_tail(tmp_path: Path) -> None:
     worktree = tmp_path / "wt"
     _write_workflow(worktree)
@@ -396,6 +474,60 @@ def test_jsonrpc_start_with_workflow_runtime_is_nonblocking(tmp_path: Path) -> N
 
     runner.release.set()
     _wait_done(manager, "task-77")
+
+
+def test_jsonrpc_add_message_reruns_ci_workflow_with_resume_session(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+    runner = FakeRunner()
+    service, manager, _calls = _service(tmp_path, runner)
+    context = _context(session_id="ses_42")
+
+    result = service.add_message(AddMessageParams(run_id=context.run_id, context=context, message="oprav to"))
+
+    steps = result["adapter"]["steps"]
+    assert [step["action"] for step in steps] == ["create_worktree", "workflow_start"]
+    _wait_done(manager, context.task_id)
+
+    # feedback zpráva je prompt nového běhu, worktree se znovu použil
+    run = manager._runs[context.task_id]
+    assert run.prompt_file == worktree / ".agentis" / "runs" / run.attempt_id / "prompt.md"
+    assert run.prompt_file.read_text(encoding="utf-8") == "oprav to"
+
+    # session id z předchozího běhu jde do Jobu, aby agent mohl navázat (--resume)
+    for manifest in runner.applied:
+        env = {item["name"]: item["value"] for item in manifest["spec"]["template"]["spec"]["containers"][0]["env"]}
+        assert env["AGENTIS_SESSION_ID"] == "ses_42"
+
+
+def test_jsonrpc_add_message_project_scope_skips_worktree_and_resumes_session(tmp_path: Path) -> None:
+    project_dir = tmp_path / "wt"  # _service vrací FakeWorkflowAdapter s workspace tmp_path/"wt"
+    workflow_path = project_dir / PROJECT_WORKFLOW_FILE_RELPATH
+    workflow_path.parent.mkdir(parents=True, exist_ok=True)
+    workflow_path.write_text(PROJECT_WORKFLOW_YAML, encoding="utf-8")
+    runner = FakeRunner()
+    service, manager, _calls = _service(tmp_path, runner)
+    context = _context(
+        session_id="ses_42",
+        adapter={"runtime": "workflow", "scope": "project", "model": "openai/gpt-5"},
+    )
+
+    result = service.add_message(AddMessageParams(run_id=context.run_id, context=context, message="oprav to"))
+
+    # žádný create_worktree krok, rovnou workflow_start
+    steps = result["adapter"]["steps"]
+    assert [step["action"] for step in steps] == ["workflow_start"]
+    _wait_done(manager, context.task_id)
+
+    run = manager._runs[context.task_id]
+    assert run.prompt_file == manager.settings.project_run_root / context.run_id / run.attempt_id / "prompt.md"
+    assert run.prompt_file.read_text(encoding="utf-8") == "oprav to"
+    assert not (project_dir / ".agentis" / "runs").exists()
+
+    assert len(runner.applied) == 1
+    env = {item["name"]: item["value"] for item in runner.applied[0]["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["AGENTIS_SESSION_ID"] == "ses_42"
+    assert env["WORKDIR"] == str(project_dir)
 
 
 def test_jsonrpc_question_is_unsupported_in_workflow_mode(tmp_path: Path) -> None:

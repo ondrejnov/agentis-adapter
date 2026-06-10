@@ -1,0 +1,78 @@
+version: 1
+workflow:
+  image: rg.nl-ams.scw.cloud/reactis/opencode:1.2
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 14400
+  ttlSecondsAfterFinished: 3600
+  envFiles:
+    - /root/.config/agentis/agentis.env
+  env:
+    HOME: /root
+    TASK_NUMBER: "[%TASK_NUMBER%]"
+    TASK_TITLE: "[%TASK_TITLE%]"
+    MAIN_DIR: "[%MAIN_DIR%]"
+    AGENT_BROWSER_SCREENSHOT_DIR: "[%RUN_DIR%]/.screenshots"
+    IS_SANDBOX: 1
+    PYTHONPATH: "[%WORKDIR%]/backend"
+    PATH: "[%WORKDIR%]/.venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  volumeMounts:
+    - name: www
+      mountPath: /var/www
+    - name: agentis-tmp
+      mountPath: /tmp/agentis
+    - name: npm-cache
+      mountPath: /root/.npm
+    - name: poetry-cache
+      mountPath: /root/.cache/pypoetry
+    - name: agentis-config
+      mountPath: /root/.config/agentis
+      readOnly: true
+    - name: opencode-config
+      mountPath: /root/.config/opencode
+    - name: opencode-share
+      mountPath: /root/.local/share/opencode
+  steps:
+    - name: Run agent
+      run: |
+        mkdir -p "$AGENTIS_RUN_DIR/outputs"
+        agentiscode --adapter opencode \
+          ${AGENTIS_SESSION_ID:+--resume "$AGENTIS_SESSION_ID"} \
+          --model "${AGENTIS_MODEL:-openai/gpt-5.4-mini}" \
+          --run-id "$AGENTIS_RUN_ID" \
+          --task-id "$AGENTIS_TASK_ID" \
+          --final-output "$AGENTIS_RUN_DIR/outputs/final-comment.md" \
+          --session-output "$AGENTIS_RUN_DIR/outputs/session-id" \
+          < "$AGENTIS_PROMPT_FILE"
+      outputs:
+        - type: agent_comment
+          bodyFrom: outputs/final-comment.md
+          status: 5
+        - type: session_id
+          valueFrom: outputs/session-id
+volumes:
+  - name: www
+    hostPath:
+      path: /var/www
+  - name: agentis-tmp
+    hostPath:
+      path: /tmp/agentis
+      type: DirectoryOrCreate
+  - name: npm-cache
+    hostPath:
+      path: /root/.npm
+      type: DirectoryOrCreate
+  - name: poetry-cache
+    hostPath:
+      path: /root/.cache/pypoetry
+      type: DirectoryOrCreate
+  - name: agentis-config
+    hostPath:
+      path: /root/.config/agentis/
+  - name: opencode-config
+    hostPath:
+      path: /root/.config/opencode
+      type: DirectoryOrCreate
+  - name: opencode-share
+    hostPath:
+      path: /root/.local/share/opencode
+      type: DirectoryOrCreate

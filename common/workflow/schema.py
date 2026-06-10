@@ -17,10 +17,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 WORKFLOW_FILE_RELPATH = ".agentis/workflows/ci.yaml"
 
+#: Workflow pro scope=project: běží přímo v adresáři projektu, bez worktree a git operací.
+PROJECT_WORKFLOW_FILE_RELPATH = ".agentis/workflows/project.yaml"
+
 #: Tokeny povolené pro interpolaci ve string hodnotách YAML.
 INTERPOLATION_ALLOWLIST = (
     "NAMESPACE",
     "WORKDIR",
+    "RUN_DIR",
     "MAIN_DIR",
     "RUN_ID",
     "TASK_ID",
@@ -134,6 +138,7 @@ def load_workflow_file(path: str | Path, values: dict[str, str]) -> WorkflowFile
 
 __all__ = [
     "WORKFLOW_FILE_RELPATH",
+    "PROJECT_WORKFLOW_FILE_RELPATH",
     "INTERPOLATION_ALLOWLIST",
     "WorkflowInterpolationError",
     "WorkflowOutput",

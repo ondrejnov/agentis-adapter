@@ -25,7 +25,13 @@ from common.kubernetes.runtime import KubernetesRuntime
 from common.models import AgentExecutionContextPayload
 from common.session_manager import BaseSessionManager
 from common.workflow.runtime import KubectlJobRunner, build_job_manifest, job_labels, job_name, safe_step_name
-from common.workflow.schema import WORKFLOW_FILE_RELPATH, WorkflowFile, WorkflowOutput, load_workflow_file
+from common.workflow.schema import (
+    PROJECT_WORKFLOW_FILE_RELPATH,
+    WORKFLOW_FILE_RELPATH,
+    WorkflowFile,
+    WorkflowOutput,
+    load_workflow_file,
+)
 
 _LOG_TAIL_LINES = 50
 
@@ -41,6 +47,8 @@ class _WorkflowRun:
     workflow: WorkflowFile
     namespace: str
     attempt_id: str
+    run_dir: Path
+    output_root: Path
     prompt_file: Path
     context_file: Path
     abort_event: threading.Event = field(default_factory=threading.Event)
@@ -71,7 +79,12 @@ class WorkflowManager:
         worktree: str,
         prompt: str,
     ) -> dict[str, Any]:
-        """Připraví run, načte a zmrazí ci.yaml a spustí workflow na pozadí."""
+        """Připraví run, načte a zmrazí workflow YAML a spustí workflow na pozadí.
+
+        Pro scope=project se použije `project.yaml` místo `ci.yaml` a run soubory
+        (prompt, context, outputs) se zapisují mimo projekt do
+        `<project_run_root>/<run_id>/<attempt>/`, aby mohlo běžet víc runů zároveň.
+        """
 
         namespace = KubernetesRuntime.namespace_for_context(context, self.settings)
         task_label = self._task_label(context)
@@ -84,7 +97,19 @@ class WorkflowManager:
 
         worktree_path = Path(worktree)
         attempt_id = uuid4().hex[:8]
-        run_dir = worktree_path / ".agentis" / "runs" / attempt_id
+        is_project_scope = GitAdapterService.is_project_scope(context)
+        workflow_relpath = PROJECT_WORKFLOW_FILE_RELPATH if is_project_scope else WORKFLOW_FILE_RELPATH
+        workflow_path = worktree_path / workflow_relpath
+        if is_project_scope and not workflow_path.is_file():
+            raise FileNotFoundError(
+                f"Project scope vyžaduje workflow soubor {PROJECT_WORKFLOW_FILE_RELPATH}, "
+                f"ale {workflow_path} neexistuje"
+            )
+
+        if is_project_scope:
+            run_dir = self.settings.project_run_root / context.run_id / attempt_id
+        else:
+            run_dir = worktree_path / ".agentis" / "runs" / attempt_id
         run_dir.mkdir(parents=True, exist_ok=True)
         prompt_file = run_dir / "prompt.md"
         prompt_file.write_text(prompt, encoding="utf-8")
@@ -92,8 +117,8 @@ class WorkflowManager:
         context_dump = context.model_dump(mode="json")
         context_file.write_text(json.dumps(context_dump, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        values = self._interpolation_values(context, worktree_path, namespace)
-        workflow = load_workflow_file(worktree_path / WORKFLOW_FILE_RELPATH, values)
+        values = self._interpolation_values(context, worktree_path, namespace, run_dir=run_dir)
+        workflow = load_workflow_file(workflow_path, values)
 
         run = _WorkflowRun(
             context=context,
@@ -101,6 +126,8 @@ class WorkflowManager:
             workflow=workflow,
             namespace=namespace,
             attempt_id=attempt_id,
+            run_dir=run_dir,
+            output_root=run_dir if is_project_scope else worktree_path,
             prompt_file=prompt_file,
             context_file=context_file,
         )
@@ -121,7 +148,7 @@ class WorkflowManager:
             "task_id": context.task_id,
             "attempt": attempt_id,
             "namespace": namespace,
-            "workflow_file": WORKFLOW_FILE_RELPATH,
+            "workflow_file": workflow_relpath,
             "steps": [step.name for step in workflow.workflow.steps],
         }
 
@@ -172,6 +199,7 @@ class WorkflowManager:
         context: AgentExecutionContextPayload,
         worktree: Path,
         namespace: str,
+        run_dir: Path | None = None,
     ) -> dict[str, str]:
         try:
             branch = GitAdapterService._branch_name_for_context(context)
@@ -180,6 +208,7 @@ class WorkflowManager:
         return {
             "NAMESPACE": namespace,
             "WORKDIR": str(worktree),
+            "RUN_DIR": str(run_dir) if run_dir is not None else "",
             "MAIN_DIR": context.working_dir or "",
             "RUN_ID": context.run_id,
             "TASK_ID": context.task_id,
@@ -191,12 +220,13 @@ class WorkflowManager:
         }
 
     def _runtime_env(self, run: _WorkflowRun) -> dict[str, str]:
-        values = self._interpolation_values(run.context, run.worktree, run.namespace)
+        values = self._interpolation_values(run.context, run.worktree, run.namespace, run_dir=run.run_dir)
         env = dict(values)
         env.update(
             {
                 "AGENTIS_RUN_ID": run.context.run_id,
                 "AGENTIS_TASK_ID": run.context.task_id,
+                "AGENTIS_RUN_DIR": str(run.run_dir),
                 "AGENTIS_PROMPT_FILE": str(run.prompt_file),
                 "AGENTIS_CONTEXT_FILE": str(run.context_file),
             }
@@ -331,8 +361,8 @@ class WorkflowManager:
     def _read_output_file(self, run: _WorkflowRun, relpath: str | None) -> str | None:
         if not relpath:
             return None
-        path = (run.worktree / relpath).resolve()
-        if run.worktree.resolve() not in path.parents:
+        path = (run.output_root / relpath).resolve()
+        if run.output_root.resolve() not in path.parents:
             return None
         if not path.is_file():
             return None
@@ -410,8 +440,8 @@ class WorkflowManager:
     def _collect_artifact(self, run: _WorkflowRun, output: WorkflowOutput) -> dict[str, Any] | None:
         if not output.path:
             return None
-        path = (run.worktree / output.path).resolve()
-        if run.worktree.resolve() not in path.parents or not path.is_file():
+        path = (run.output_root / output.path).resolve()
+        if run.output_root.resolve() not in path.parents or not path.is_file():
             return None
         try:
             content = base64.b64encode(path.read_bytes()).decode("ascii")
