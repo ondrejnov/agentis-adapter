@@ -21,7 +21,6 @@ from common.models import (
     UndoParams,
 )
 from common.adapter_base import BaseAdapterService
-from common.kubernetes_runtime import KubernetesAdapterService
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 from common.rpc.session_registry import SessionContextRegistry
 from common.workflow.manager import WorkflowBusyError, WorkflowManager
@@ -42,12 +41,12 @@ class AgentJsonRpcService:
     def __init__(
         self,
         settings: Settings,
-        adapter_factory: Callable[[AgentExecutionContextPayload], BaseAdapterService] | None = None,
+        adapter_factory: Callable[[AgentExecutionContextPayload], BaseAdapterService],
         session_registry: SessionContextRegistry | None = None,
         workflow_manager: WorkflowManager | None = None,
     ):
         self.settings = settings
-        self._adapter_factory = adapter_factory or (lambda context: KubernetesAdapterService(context, settings))
+        self._adapter_factory = adapter_factory
         self.session_registry = session_registry or SessionContextRegistry()
         self._workflow_manager = workflow_manager
 
@@ -162,16 +161,16 @@ class AgentJsonRpcService:
                 self._run_adapter_step(
                     adapter,
                     kind="deploy",
-                    started_message="Nasazuji prostředí do Kubernetes.",
-                    success_message="Deploy do Kubernetes je hotový.",
+                    started_message="Připravuji prostředí.",
+                    success_message="Prostředí je připravené.",
                     callback=adapter.deploy,
                 )
             )
             wait_result = self._run_adapter_step(
                 adapter,
                 kind="wait_ready",
-                started_message="Čekám na inicializaci podu.",
-                success_message="Pod je připravený.",
+                started_message="Čekám na připravenost prostředí.",
+                success_message="Prostředí běží.",
                 callback=adapter.wait_ready,
             )
             adapter_steps.append(wait_result)
@@ -323,16 +322,16 @@ class AgentJsonRpcService:
                 self._run_adapter_step(
                     adapter,
                     kind="deploy",
-                    started_message="Nasazuji prostředí do Kubernetes.",
-                    success_message="Deploy do Kubernetes je hotový.",
+                    started_message="Připravuji prostředí.",
+                    success_message="Prostředí je připravené.",
                     callback=adapter.deploy,
                 )
             )
             wait_result = self._run_adapter_step(
                 adapter,
                 kind="wait_ready",
-                started_message="Čekám na inicializaci podu.",
-                success_message="Pod je připravený.",
+                started_message="Čekám na připravenost prostředí.",
+                success_message="Prostředí běží.",
                 callback=adapter.wait_ready,
             )
             adapter_steps.append(wait_result)
@@ -397,16 +396,16 @@ class AgentJsonRpcService:
                 self._run_adapter_step(
                     adapter,
                     kind="deploy",
-                    started_message="Nasazuji prostředí do Kubernetes.",
-                    success_message="Deploy do Kubernetes je hotový.",
+                    started_message="Připravuji prostředí.",
+                    success_message="Prostředí je připravené.",
                     callback=adapter.deploy,
                 )
             )
             wait_result = self._run_adapter_step(
                 adapter,
                 kind="wait_ready",
-                started_message="Čekám na inicializaci podu.",
-                success_message="Pod je připravený.",
+                started_message="Čekám na připravenost prostředí.",
+                success_message="Prostředí běží.",
                 callback=adapter.wait_ready,
             )
             adapter_steps.append(wait_result)
@@ -534,7 +533,7 @@ class AgentJsonRpcService:
             step = self._run_adapter_step(
                 adapter,
                 kind="close",
-                started_message="Uklízím Kubernetes namespace a git větev.",
+                started_message="Uklízím prostředí a git větev.",
                 success_message="Prostředí bylo uklizeno.",
                 callback=adapter.close,
             )
@@ -579,7 +578,7 @@ class AgentJsonRpcService:
             step = self._run_adapter_step(
                 adapter,
                 kind="close",
-                started_message="Uklízím Kubernetes namespace a git větev.",
+                started_message="Uklízím prostředí a git větev.",
                 success_message="Prostředí bylo uklizeno.",
                 callback=adapter.close,
             )
@@ -592,7 +591,7 @@ class AgentJsonRpcService:
                 method="task.add_agent_comment",
                 params={
                     "run_id": context.run_id,
-                    "body": "Kubernetes namespace a git větev byly uklizeny.",
+                    "body": "Prostředí a git větev byly uklizeny.",
                     "status": TaskStatus.CANCELLED,
                 },
             )

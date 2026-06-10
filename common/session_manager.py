@@ -16,21 +16,19 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shlex
-import shutil
 import signal
 import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 from common.config import Settings
 from common.models import AgentExecutionContextPayload, completion_task_status
 from common.git_adapter import GitAdapterService
-from common.kubernetes_runtime import KubernetesAdapterService
+from common.namespaces import dev_server_url_for_context
 from common.artifacts.expected import collect_expected_artifacts
 from common.artifacts.screenshots import collect_screenshot_images
 from common.artifacts.source_snapshot import (
@@ -41,9 +39,6 @@ from common.artifacts.source_snapshot import (
 )
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 from common.integrations.github_pr import GithubPrError, GithubPrResult, GithubPrService
-
-if TYPE_CHECKING:
-    from common.cli_session import KubectlExecTarget
 
 
 _AGENT_SESSION_START_TIMEOUT_SEC = 300.0
@@ -56,7 +51,6 @@ class _AgentSession:
     pending_key: str
     context: AgentExecutionContextPayload
     worktree: str
-    kubectl_target: Optional["KubectlExecTarget"] = None
     agent_session_id: Optional[str] = None
     abort_event: threading.Event = field(default_factory=threading.Event)
     proc_holder: dict[str, Any] = field(default_factory=dict)  # {"proc": asyncio.subprocess.Process}
@@ -79,8 +73,6 @@ class BaseSessionManager:
     # Prefix used for snapshot keys / adapter event kinds and the label shown
     # in source-snapshot records. Overridden by each concrete agent.
     _AGENT_LABEL = "agent"
-    # `pkill -f` pattern used to terminate the agent process inside a k8s pod.
-    _REMOTE_PKILL_PATTERN = ""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -96,7 +88,6 @@ class BaseSessionManager:
         context: AgentExecutionContextPayload,
         worktree: str,
         prompt: str,
-        kubectl_target: Optional["KubectlExecTarget"] = None,
     ) -> str:
         """Spustí novou session a vrátí skutečné agentí session_id."""
         mode = self._mode_from_context(context)
@@ -107,7 +98,6 @@ class BaseSessionManager:
             pending_key=pending_key,
             context=context,
             worktree=worktree,
-            kubectl_target=kubectl_target,
         )
         sess.snapshot_key = build_snapshot_key(self._AGENT_LABEL, context.run_id, context.task_id, pending_key)
         snapshot_sources_best_effort(worktree, sess.snapshot_key, label=f"{self._AGENT_LABEL}-start")
@@ -136,7 +126,6 @@ class BaseSessionManager:
         context: AgentExecutionContextPayload,
         worktree: str,
         prompt: str,
-        kubectl_target: Optional["KubectlExecTarget"] = None,
     ) -> None:
         """Pošle do existující session další prompt (nový run s `--resume`)."""
         with self._lock:
@@ -147,7 +136,6 @@ class BaseSessionManager:
                 pending_key=f"{self._AGENT_LABEL}-resume-{uuid4().hex}",
                 context=context,
                 worktree=worktree,
-                kubectl_target=kubectl_target,
                 agent_session_id=session_id,
             )
             with self._lock:
@@ -155,8 +143,6 @@ class BaseSessionManager:
 
         sess.context = context
         sess.worktree = worktree
-        if kubectl_target is not None:
-            sess.kubectl_target = kubectl_target
         sess.abort_event = threading.Event()
         sess.snapshot_key = build_snapshot_key(
             self._AGENT_LABEL, context.run_id, context.task_id, session_id, uuid4().hex
@@ -179,31 +165,12 @@ class BaseSessionManager:
             return
         sess.abort_event.set()
         proc = sess.proc_holder.get("proc")
-        kubectl_target = sess.kubectl_target
-
-        if kubectl_target is not None:
-            # `proc` je lokální `kubectl exec` klient — jeho zabití pouze
-            # přeruší stream, ale agentí proces uvnitř podu běží dál.
-            # Zabijeme tedy agenta přímo v podu pomocí samostatného
-            # `kubectl exec ... -- pkill`.
-            if proc is not None:
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-                except Exception as exc:  # noqa: BLE001
-                    sys.stderr.write(
-                        f"[{self._AGENT_LABEL}-session] kill kubectl client failed for {session_id}: {exc}\n"
-                    )
-            self._remote_pkill_agent(kubectl_target, session_id)
-            return
-
         if proc is None:
             return
 
-        # Lokální mód — proces byl spuštěn s `start_new_session=True`,
-        # takže mu patří vlastní process group. Killneme celou skupinu,
-        # aby šly s CLI agentem dolů i jeho potomci.
+        # Proces byl spuštěn s `start_new_session=True`, takže mu patří
+        # vlastní process group. Killneme celou skupinu, aby šly s CLI
+        # agentem dolů i jeho potomci.
         try:
             pgid = os.getpgid(proc.pid)
         except ProcessLookupError:
@@ -227,26 +194,6 @@ class BaseSessionManager:
             pass
         except Exception as exc:  # noqa: BLE001
             sys.stderr.write(f"[{self._AGENT_LABEL}-session] kill failed for {session_id}: {exc}\n")
-
-    def _remote_pkill_agent(self, target: "KubectlExecTarget", session_id: str) -> None:
-        kubectl_path = target.kubectl
-        if shutil.which(kubectl_path) is None and not os.path.isabs(kubectl_path):
-            sys.stderr.write(
-                f"[{self._AGENT_LABEL}-session] remote pkill skipped for {session_id}: "
-                f"kubectl not on PATH ({kubectl_path})\n"
-            )
-            return
-
-        args = [kubectl_path, "-n", target.namespace, "exec", target.selector]
-        if target.container:
-            args.extend(["-c", target.container])
-        args.extend(["--", "pkill", "-KILL", "-f", self._REMOTE_PKILL_PATTERN])
-        try:
-            subprocess.run(args, capture_output=True, text=True, timeout=15.0, check=False)
-        except subprocess.TimeoutExpired:
-            sys.stderr.write(f"[{self._AGENT_LABEL}-session] remote pkill timed out for {session_id}\n")
-        except Exception as exc:  # noqa: BLE001
-            sys.stderr.write(f"[{self._AGENT_LABEL}-session] remote pkill failed for {session_id}: {exc}\n")
 
     def remove(self, session_id: str) -> None:
         with self._lock:
@@ -473,7 +420,7 @@ class BaseSessionManager:
             },
             {
                 "title": "Zavřít prostředí",
-                "prompt": "Uklidit Kubernetes namespace, worktree a task větev.",
+                "prompt": "Uklidit prostředí, worktree a task větev.",
                 "adapter_method": "close",
                 "continue_previous_run": False,
             },
@@ -566,32 +513,11 @@ class BaseSessionManager:
 
     def _start_dev_server(self, sess: _AgentSession) -> dict[str, Any]:
         worktree_path = Path(sess.worktree)
-        if sess.kubectl_target is None:
-            script = worktree_path / "run-dev.sh"
-            if not script.is_file():
-                raise RuntimeError(f"Dev server script {script} does not exist")
-            output = self._run_completed_process(["./run-dev.sh"], cwd=worktree_path)
-            result: dict[str, Any] = {"working_dir": str(worktree_path)}
-            if output:
-                result["output"] = output
-            return result
-
-        target = sess.kubectl_target
-        if shutil.which(target.kubectl) is None and not Path(target.kubectl).is_absolute():
-            raise RuntimeError(f"kubectl CLI is not available on PATH: {target.kubectl}")
-
-        args = [target.kubectl, "-n", target.namespace, "exec", target.selector]
-        if target.container:
-            args.extend(["-c", target.container])
-        args.extend(["--", "sh", "-lc", f"cd {shlex.quote(str(worktree_path))} && ./run-dev.sh"])
-        output = self._run_completed_process(args)
-        result = {
-            "namespace": target.namespace,
-            "selector": target.selector,
-            "working_dir": str(worktree_path),
-        }
-        if target.container:
-            result["container"] = target.container
+        script = worktree_path / "run-dev.sh"
+        if not script.is_file():
+            raise RuntimeError(f"Dev server script {script} does not exist")
+        output = self._run_completed_process(["./run-dev.sh"], cwd=worktree_path)
+        result: dict[str, Any] = {"working_dir": str(worktree_path)}
         if output:
             result["output"] = output
         return result
@@ -684,7 +610,7 @@ class BaseSessionManager:
                 {
                     "label": "Dev server",
                     "type": "url",
-                    "value": KubernetesAdapterService.dev_server_url_for_context(context, self.settings),
+                    "value": dev_server_url_for_context(context, self.settings),
                 }
             )
 

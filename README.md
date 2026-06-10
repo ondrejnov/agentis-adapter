@@ -1,4 +1,4 @@
-# Agentis Kubernetes Adapter
+# Agentis Adapter
 
 Samostatny FastAPI JSON-RPC adapter pro agenta. Projekt nema zadnou databazi a drzi runtime stav pouze v pameti procesu.
 
@@ -7,8 +7,7 @@ Samostatny FastAPI JSON-RPC adapter pro agenta. Projekt nema zadnou databazi a d
 - pasivni WebSocket transport prijima JSON-RPC 2.0 metody `start`, `add_message`, `question`, `approve`, `git_merge`, `abort`, `close` z Agentisu pres odchozi spojeni
 - aktivitu agenta (komentare, dokoncovaci akce, adapter eventy) adapter cte primo z postupneho vystupu `opencode`/`claude` CLI a forwarduje do endpointu z `AGENTIS_ENDPOINT` — agent runtime uz nedela zadne callbacky zpet do adapteru
 - `GET /health` na ASGI aplikaci pro healthcheck (adapter ale neposlucha na zadnem inbound portu)
-- `start` vytvori git branch a worktree podle `task_id`, a pak aplikuje Kubernetes manifest pres `kubectl`
-- placeholder substituce v Kubernetes manifestech: `[%NAMESPACE%]`, `[%WORKDIR%]`, `[%APP_HOST%]`, `[%MAIN_DIR%]`, `[%AGENTIS_URL%]`
+- `start` vytvori git branch a worktree podle `task_id` a spusti agenta lokalne (environment `local`); s `context.adapter.runtime = "workflow"` se misto toho spusti deklarativni workflow (kroky jako Kubernetes Joby pres `kubectl`)
 
 ## Vyvojarska dokumentace
 
@@ -99,17 +98,13 @@ Script umi:
 - `AGENTIS_WS_RECONNECT_INITIAL_DELAY` default `1`
 - `AGENTIS_WS_RECONNECT_MAX_DELAY` default `30`
 - `AGENTIS_WS_RECONNECT_MAX_ATTEMPTS` default `0` znamena neomezene reconnect pokusy
-- `ADAPTER_NAMESPACE` default `agentis`
-- `ADAPTER_NAMESPACE_PREFIX` default `Task`; pouzije se pro namespace ve tvaru `<prefix>-<task_number>-<prvnich 20 znaku title>`, vysledek se normalizuje pro Kubernetes DNS label
+- `ADAPTER_NAMESPACE_PREFIX` default `Task`; pouzije se pro namespace workflow Jobu ve tvaru `<prefix>-<task_number>-<prvnich 20 znaku title>`, vysledek se normalizuje pro Kubernetes DNS label
 - `ADAPTER_WORKSPACE_ROOT` default root tohoto repozitare
 - `ADAPTER_MAIN_DIR` default hodnota `ADAPTER_WORKSPACE_ROOT`
-- `ADAPTER_APP_HOST` optional hostname override pro manifest
 - `ADAPTER_PUBLIC_URL` optional verejna nebo clusterova base URL adapteru; pokud chybi, adapter zkusi slozit cluster DNS z `K8S_SERVICE_NAME` a `K8S_NAMESPACE`
 - `AGENTIS_ENDPOINT` default `http://10.0.0.205:8891`
 - `AGENTIS_TOKEN` default `1234`
-- `ADAPTER_MANIFEST_PATH` default `kubernetes` v tomto repozitari; muze byt adresar i konkretni soubor
-- konkretni soubor manifestu v requestu posilej jako `context.adapter.manifest` (napr. `opencode.yaml`)
-- projektovy rezim zapnes pres `context.adapter.scope = "project"`; adapter pouzije `opencode-project.yaml`, namespace podle `project_slug`, aktualni git worktree z `context.working_dir` a nebude vytvaret task branch/worktree
+- projektovy rezim zapnes pres `context.adapter.scope = "project"`; adapter pouzije namespace podle `project_slug`, aktualni git worktree z `context.working_dir` a nebude vytvaret task branch/worktree
 - kdyz `context.working_dir` chybi, adapter vytvori worktree v sourozenecke ceste `../worktree/<task_id>`
 - `ADAPTER_LOG_LEVEL` default `info`
 - `DOCKER_IMAGE` image name pro deploy script
@@ -134,7 +129,6 @@ Script umi:
       "project_slug": "agentis",
       "working_dir": "/var/www/worktree/task-1",
       "adapter": {
-        "manifest": "opencode.yaml",
         "agent": "build",
         "model": "gpt-5.4"
       }

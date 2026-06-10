@@ -4,7 +4,7 @@ import asyncio
 import json
 from typing import Any
 
-from claude.client import ClaudeCodeClient, ClaudeRunConfig, KubectlExecTarget
+from claude.client import ClaudeCodeClient, ClaudeRunConfig
 
 
 class _FakeStdin:
@@ -158,11 +158,11 @@ def test_stream_wraps_local_claude_with_local_setup(monkeypatch) -> None:
     assert captured["cwd"] == "/work/project"
 
 
-def test_stream_uses_informative_stderr_before_kubectl_exit_tail(monkeypatch) -> None:
+def test_stream_failure_message_uses_last_stderr_line(monkeypatch) -> None:
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
         return _FakeProcess(
             stdout_lines=[],
-            stderr_lines=["claude: unknown option '--bad'\n", "command terminated with exit code 2\n"],
+            stderr_lines=["warning: something\n", "claude: unknown option '--bad'\n"],
             returncode=2,
         )
 
@@ -176,7 +176,7 @@ def test_stream_uses_informative_stderr_before_kubectl_exit_tail(monkeypatch) ->
 
     assert events[-1]["type"] == "error"
     assert events[-1]["exit_code"] == 2
-    assert events[-1]["stderr"] == "claude: unknown option '--bad'\ncommand terminated with exit code 2"
+    assert events[-1]["stderr"] == "warning: something\nclaude: unknown option '--bad'"
     assert events[-1]["message"] == "claude skončil s kódem 2: claude: unknown option '--bad'"
 
 
@@ -253,34 +253,3 @@ def test_stream_stops_and_kills_when_process_hangs_after_result(monkeypatch) -> 
 
     assert "result" in types
     assert proc.killed.is_set()
-
-
-def test_stream_passes_config_env_into_kubectl_exec_shell(monkeypatch) -> None:
-    captured: dict[str, Any] = {}
-
-    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
-        captured["args"] = args
-        captured["env"] = kwargs["env"]
-        return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
-
-    monkeypatch.setattr("claude.client.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
-
-    async def collect_events() -> list[dict[str, Any]]:
-        client = ClaudeCodeClient(
-            config=ClaudeRunConfig(
-                command="claude",
-                cwd="/work/project",
-                env={"IS_SANDBOX": "1", "AGENTIS_URL": "http://adapter.internal:8002"},
-                kubectl_target=KubectlExecTarget(namespace="ns", selector="deployment/opencode", kubectl="/usr/bin/kubectl"),
-            )
-        )
-        return [{"type": event.type, **event.data} async for event in client.stream("Ahoj")]
-
-    events = asyncio.run(collect_events())
-
-    assert events == []
-    assert captured["env"]["IS_SANDBOX"] == "1"
-    assert captured["args"][-2:] == (
-        "-c",
-        "cd /work/project && exec env IS_SANDBOX=1 AGENTIS_URL=http://adapter.internal:8002 claude --print - --output-format stream-json --verbose --dangerously-skip-permissions --disallowedTools AskUserQuestion",
-    )

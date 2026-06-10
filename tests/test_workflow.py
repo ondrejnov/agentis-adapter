@@ -123,9 +123,6 @@ def _settings(tmp_path: Path) -> Settings:
     return Settings(
         host="127.0.0.1",
         port=8001,
-        default_namespace="agentis",
-        app_host=None,
-        manifest_path=tmp_path / "kubernetes",
         worktree_root=tmp_path / "worktrees",
         public_base_url=None,
         agentis_endpoint=None,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -10,9 +9,7 @@ import pytest
 from agentiscode.adapter import AgentisCodeAdapterService
 from agentiscode.api import _DISPATCH, create_app
 from agentiscode.session_manager import AgentisCodeSessionManager, _AgentisCodeSession
-from common.cli_session import KubectlExecTarget
 from common.config import Settings
-from common.kubernetes.runtime import KubernetesRuntime
 from common.models import AdapterOptionsPayload, AgentExecutionContextPayload
 from tests.support import RpcTestClient
 
@@ -21,9 +18,6 @@ def make_settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 8004,
-        "default_namespace": "agentis",
-        "app_host": None,
-        "manifest_path": Path("/tmp/opencode.yaml"),
         "worktree_root": Path("/var/www/worktrees"),
         "public_base_url": "http://adapter.internal:8004",
         "agentis_endpoint": "http://agentis.local",
@@ -195,7 +189,7 @@ def test_session_manager_posts_completion_comment_with_attachments(monkeypatch, 
     ]
 
 
-def test_agentiscode_runtime_claude_does_not_enable_kubernetes(monkeypatch) -> None:
+def test_agentiscode_runs_locally(monkeypatch) -> None:
     manager = MagicMock(spec=AgentisCodeSessionManager)
     manager.start.return_value = "ses_local"
     monkeypatch.setattr(AgentisCodeAdapterService, "_persist_agentis_session_id", lambda self, session_id: None)
@@ -208,76 +202,6 @@ def test_agentiscode_runtime_claude_does_not_enable_kubernetes(monkeypatch) -> N
     assert deploy_result["status"] == "skipped"
     assert deploy_result["reason"] == "agentiscode_local"
     assert "kubectl_target" not in manager.start.call_args.kwargs
-
-
-def test_agentiscode_kubernetes_runtime_runs_deploy_and_passes_kubectl_target(monkeypatch) -> None:
-    manager = MagicMock(spec=AgentisCodeSessionManager)
-    manager.start.return_value = "ses_k8s"
-    monkeypatch.setattr(AgentisCodeAdapterService, "_persist_agentis_session_id", lambda self, session_id: None)
-    monkeypatch.setattr(
-        KubernetesRuntime,
-        "deploy",
-        lambda self: {"action": "deploy", "task_id": self.context.task_id, "status": "applied"},
-    )
-    context = make_context(
-        namespace="task-7-demo",
-        adapter=AdapterOptionsPayload(runtime="kubernetes", agent="build"),
-    )
-    adapter = AgentisCodeAdapterService(context=context, settings=make_settings(), session_manager=manager)
-
-    deploy_result = adapter.deploy()
-    adapter.start_session()
-
-    assert deploy_result["status"] == "applied"
-    target = manager.start.call_args.kwargs["kubectl_target"]
-    assert isinstance(target, KubectlExecTarget)
-    assert target.namespace == "task-7-demo"
-    assert target.selector == "deployment/opencode"
-    assert target.container == "opencode"
-
-
-def test_session_manager_abort_terminates_remote_agentiscode_for_kubectl_session(monkeypatch) -> None:
-    manager = AgentisCodeSessionManager(settings=make_settings())
-    target = KubectlExecTarget(namespace="task-9-demo", selector="deployment/opencode", container="opencode")
-    sess = _AgentisCodeSession(
-        session_id="ses_k8s",
-        context=make_context(namespace="task-9-demo"),
-        worktree="/var/www/worktrees/task-1",
-        kubectl_target=target,
-    )
-    proc: Any = SimpleNamespace(poll=lambda: None, kill=MagicMock())
-    sess.proc = proc
-    manager._sessions["ses_k8s"] = sess
-
-    monkeypatch.setattr("agentiscode.session_manager.shutil.which", lambda cmd: f"/usr/bin/{cmd}")
-    captured: dict[str, Any] = {}
-
-    def fake_run(args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr("agentiscode.session_manager.subprocess.run", fake_run)
-
-    manager.abort("ses_k8s")
-
-    assert sess.abort_event.is_set()
-    proc.kill.assert_called_once()
-    assert captured["args"] == [
-        "kubectl",
-        "-n",
-        "task-9-demo",
-        "exec",
-        "deployment/opencode",
-        "-c",
-        "opencode",
-        "--",
-        "pkill",
-        "-TERM",
-        "-f",
-        "agentiscode",
-    ]
-    assert captured["kwargs"] == {"capture_output": True, "text": True, "timeout": 15.0, "check": False}
 
 
 @pytest.fixture()

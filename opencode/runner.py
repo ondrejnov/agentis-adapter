@@ -32,11 +32,10 @@ import os
 import shlex
 import shutil
 import tempfile
-import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
 
-from common.cli_session import KubectlExecTarget, unbounded_line_reader as _unbounded_line_reader
+from common.cli_session import unbounded_line_reader as _unbounded_line_reader
 from common.local_setup import build_local_setup_shell_command
 
 
@@ -75,7 +74,6 @@ class OpenCodeRunConfig:
     extra_args: Sequence[str] = field(default_factory=list)
     env: Dict[str, str] = field(default_factory=dict)
     timeout_sec: float = 0.0  # 0 = bez limitu
-    kubectl_target: Optional[KubectlExecTarget] = None
 
     def build_args(self, message: str, *, prompt_file: Optional[str] = None) -> List[str]:
         args: List[str] = ["run", message]
@@ -124,9 +122,8 @@ class OpenCodeRunner:
         if not lines:
             return ""
 
-        kubectl_tail = f"command terminated with exit code {returncode}"
         for line in reversed(lines):
-            if line != kubectl_tail and line not in {"--- Start ---", "--- End ---"}:
+            if line not in {"--- Start ---", "--- End ---"}:
                 return line
         return lines[-1]
 
@@ -163,12 +160,6 @@ class OpenCodeRunner:
         details = [f"příkaz: {cls._safe_command_display(cfg.command, args)}"]
         if cfg.cwd:
             details.append(f"cwd: {cfg.cwd}")
-        if cfg.kubectl_target is not None:
-            target = cfg.kubectl_target
-            details.append(
-                "kubectl target: "
-                f"namespace={target.namespace}, selector={target.selector}, container={target.container or '-'}"
-            )
 
         stderr_tail = [line for line in stderr_lines[-20:] if line.strip()]
         if stderr_tail:
@@ -195,80 +186,38 @@ class OpenCodeRunner:
         local_prompt_path: Optional[str] = None
         use_prompt_file = self._should_use_prompt_file(prompt)
 
-        if cfg.kubectl_target is not None:
-            target = cfg.kubectl_target
-            if not shutil.which(target.kubectl) and not os.path.isabs(target.kubectl):
-                yield OpenCodeEvent("error", {"message": f"kubectl nenalezeno v PATH: {target.kubectl}"})
-                return
+        if not shutil.which("bash"):
+            yield OpenCodeEvent("error", {"message": "bash nenalezeno v PATH pro lokální spuštění opencode"})
+            return
 
-            if use_prompt_file:
-                pod_prompt_path = f"/tmp/opencode-prompt-{uuid.uuid4().hex}.md"
-                args = cfg.build_args(PROMPT_FILE_MESSAGE, prompt_file=pod_prompt_path)
-            else:
-                pod_prompt_path = None
-                args = cfg.build_args(prompt)
-            inner_argv = [cfg.command, *args]
-            if cfg.env:
-                env_argv = [f"{key}={value}" for key, value in cfg.env.items()]
-                inner_argv = ["env", *env_argv, *inner_argv]
-            command = " ".join(shlex.quote(a) for a in inner_argv)
-            if use_prompt_file:
-                if cfg.cwd:
-                    command = f"cd {shlex.quote(cfg.cwd)} && {command}"
-                assert pod_prompt_path is not None
-                inner = f'tmp={shlex.quote(pod_prompt_path)}; trap \'rm -f "$tmp"\' EXIT; cat > "$tmp"; {command}'
-                prompt_stdin = prompt.encode("utf-8")
-            else:
-                inner = f"exec {command}"
-                if cfg.cwd:
-                    inner = f"cd {shlex.quote(cfg.cwd)} && {inner}"
-
-            kubectl_argv: List[str] = [target.kubectl, "-n", target.namespace, "exec", "-i", target.selector]
-            if target.container:
-                kubectl_argv += ["-c", target.container]
-            kubectl_argv += ["--", "sh", "-c", inner]
-            print(" ".join(kubectl_argv))
+        if use_prompt_file:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", suffix=".md", prefix="opencode-prompt-", delete=False
+            ) as prompt_file:
+                prompt_file.write(prompt)
+                local_prompt_path = prompt_file.name
+            args = cfg.build_args(PROMPT_FILE_MESSAGE, prompt_file=local_prompt_path)
+        else:
+            args = cfg.build_args(prompt)
+        local_command = build_local_setup_shell_command([cfg.command, *args])
+        print(local_command)
+        try:
             proc = await asyncio.create_subprocess_exec(
-                kubectl_argv[0],
-                *kubectl_argv[1:],
+                "bash",
+                "-c",
+                local_command,
+                cwd=cfg.cwd,
                 env=env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
-        else:
-            if not shutil.which("bash"):
-                yield OpenCodeEvent("error", {"message": "bash nenalezeno v PATH pro lokální spuštění opencode"})
-                return
-
-            if use_prompt_file:
-                with tempfile.NamedTemporaryFile(
-                    "w", encoding="utf-8", suffix=".md", prefix="opencode-prompt-", delete=False
-                ) as prompt_file:
-                    prompt_file.write(prompt)
-                    local_prompt_path = prompt_file.name
-                args = cfg.build_args(PROMPT_FILE_MESSAGE, prompt_file=local_prompt_path)
-            else:
-                args = cfg.build_args(prompt)
-            local_command = build_local_setup_shell_command([cfg.command, *args])
-            print(local_command)
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "bash",
-                    "-c",
-                    local_command,
-                    cwd=cfg.cwd,
-                    env=env,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    start_new_session=True,
-                )
-            except BaseException:
-                if local_prompt_path is not None:
-                    with contextlib.suppress(OSError):
-                        os.unlink(local_prompt_path)
-                raise
+        except BaseException:
+            if local_prompt_path is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(local_prompt_path)
+            raise
 
         if on_proc_started is not None:
             try:

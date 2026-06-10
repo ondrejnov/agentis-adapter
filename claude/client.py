@@ -25,7 +25,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shlex
 import shutil
 import signal
 from dataclasses import dataclass, field
@@ -33,12 +32,12 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
 
 import asyncio
 
-from common.cli_session import KubectlExecTarget, unbounded_line_reader as _unbounded_line_reader
+from common.cli_session import unbounded_line_reader as _unbounded_line_reader
 from common.local_setup import build_local_setup_shell_command
 
 
 # Po terminálním `result` eventu necháme claude CLI doběhnout jen krátce; pokud
-# stdout neuzavře a sám neskončí (vídáno u `kubectl exec`), tvrdě ho ukončíme.
+# stdout neuzavře a sám neskončí, tvrdě ho ukončíme.
 _PROC_EXIT_GRACE_SEC = 10.0
 
 
@@ -81,7 +80,6 @@ class ClaudeRunConfig:
     extra_args: Sequence[str] = field(default_factory=list)
     env: Dict[str, str] = field(default_factory=dict)
     timeout_sec: float = 0.0  # 0 = bez limitu
-    kubectl_target: Optional[KubectlExecTarget] = None
 
     def build_args(self) -> List[str]:
         args = [
@@ -152,26 +150,13 @@ class ClaudeCodeClient:
         lines = [line.strip() for line in stderr_lines if line.strip()]
         if not lines:
             return ""
-
-        kubectl_tail = f"command terminated with exit code {returncode}"
-        for line in reversed(lines):
-            if line != kubectl_tail:
-                return line
         return lines[-1]
 
     async def _terminate_proc(self, proc: asyncio.subprocess.Process) -> None:
         """Tvrdě ukončí běžící claude proces (a jeho potomky)."""
         if proc.returncode is not None:
             return
-        cfg = self.config
-        if cfg.kubectl_target is not None:
-            # `proc` je jen lokální `kubectl exec` klient — jeho zabití přeruší
-            # stream, ale claude uvnitř podu poběží dál. Zabijeme ho zvlášť.
-            await self._remote_pkill_claude(cfg.kubectl_target)
-            with contextlib.suppress(Exception):
-                proc.kill()
-            return
-        # Lokální mód — proces má vlastní session/process group (start_new_session),
+        # Proces má vlastní session/process group (start_new_session),
         # killneme celou skupinu, ať jdou dolů i potomci claude CLI.
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -180,29 +165,6 @@ class ClaudeCodeClient:
             pass
         with contextlib.suppress(Exception):
             proc.kill()
-
-    @staticmethod
-    async def _remote_pkill_claude(target: KubectlExecTarget) -> None:
-        """Zabije viset zůstavší claude proces uvnitř k8s podu přes `kubectl exec`."""
-        kubectl_path = target.kubectl
-        if shutil.which(kubectl_path) is None and not os.path.isabs(kubectl_path):
-            return
-        args = [kubectl_path, "-n", target.namespace, "exec", target.selector]
-        if target.container:
-            args += ["-c", target.container]
-        args += ["--", "pkill", "-KILL", "-f", "claude --print"]
-        proc: Optional[asyncio.subprocess.Process] = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(proc.wait(), timeout=15.0)
-        except Exception:
-            if proc is not None:
-                with contextlib.suppress(Exception):
-                    proc.kill()
 
     # -- veřejné API -------------------------------------------------------
 
@@ -234,50 +196,22 @@ class ClaudeCodeClient:
         env = {**os.environ, **cfg.env}
         args = cfg.build_args()
 
-        if cfg.kubectl_target is not None:
-            target = cfg.kubectl_target
-            if not shutil.which(target.kubectl) and not os.path.isabs(target.kubectl):
-                yield ClaudeEvent("error", {"message": f"kubectl nenalezeno v PATH: {target.kubectl}"})
-                return
+        if not shutil.which("bash"):
+            yield ClaudeEvent("error", {"message": "bash nenalezeno v PATH pro lokální spuštění claude"})
+            return
 
-            inner_argv = [cfg.command, *args]
-            if cfg.env:
-                env_argv = [f"{key}={value}" for key, value in cfg.env.items()]
-                inner_argv = ["env", *env_argv, *inner_argv]
-            inner = " ".join(shlex.quote(a) for a in inner_argv)
-            if cfg.cwd:
-                inner = f"cd {shlex.quote(cfg.cwd)} && exec {inner}"
-
-            kubectl_argv: List[str] = [target.kubectl, "-n", target.namespace, "exec", "-i", target.selector]
-            if target.container:
-                kubectl_argv += ["-c", target.container]
-            kubectl_argv += ["--", "sh", "-c", inner]
-
-            proc = await asyncio.create_subprocess_exec(
-                kubectl_argv[0],
-                *kubectl_argv[1:],
-                env=env,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        else:
-            if not shutil.which("bash"):
-                yield ClaudeEvent("error", {"message": "bash nenalezeno v PATH pro lokální spuštění claude"})
-                return
-
-            local_command = build_local_setup_shell_command([cfg.command, *args])
-            proc = await asyncio.create_subprocess_exec(
-                "bash",
-                "-c",
-                local_command,
-                cwd=cfg.cwd,
-                env=env,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
+        local_command = build_local_setup_shell_command([cfg.command, *args])
+        proc = await asyncio.create_subprocess_exec(
+            "bash",
+            "-c",
+            local_command,
+            cwd=cfg.cwd,
+            env=env,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
 
         if on_proc_started is not None:
             try:
@@ -364,15 +298,15 @@ class ClaudeCodeClient:
                     yield normalized
                     # `result` je poslední event běhu. Po něm už nic
                     # smysluplného nechodí; nečekáme na EOF stdoutu, protože
-                    # claude (zvlášť přes `kubectl exec`) ho někdy neuzavře.
+                    # claude ho někdy neuzavře.
                     if normalized.type == "result":
                         terminal = True
                 if terminal:
                     break
         finally:
             # Doběh stderru a procesu. Na ukončení procesu čekáme jen krátce;
-            # když po `result` eventu nevyskočí sám, ukončíme ho (i vzdálený
-            # claude v podu), ať nezůstane viset a generátor může doběhnout.
+            # když po `result` eventu nevyskočí sám, ukončíme ho, ať nezůstane
+            # viset a generátor může doběhnout.
             try:
                 await asyncio.wait_for(proc.wait(), timeout=_PROC_EXIT_GRACE_SEC)
             except asyncio.TimeoutError:

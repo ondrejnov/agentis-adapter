@@ -1,9 +1,8 @@
 from pathlib import Path
-from typing import Any
 
 from common.config import Settings
 from common.models import AgentExecutionContextPayload
-from common.kubernetes_runtime import KubernetesAdapterService, KubernetesRuntime
+from common.git_adapter import GitAdapterService
 
 
 def _make_context() -> AgentExecutionContextPayload:
@@ -19,14 +18,9 @@ def _make_context() -> AgentExecutionContextPayload:
 def _make_settings(tmp_path: Path) -> Settings:
     worktree = tmp_path / "worktree"
     worktree.mkdir()
-    manifest = tmp_path / "manifest"
-    manifest.mkdir()
     return Settings(
         host="0.0.0.0",
         port=8001,
-        default_namespace="agentis",
-        app_host=None,
-        manifest_path=manifest,
         worktree_root=worktree,
         public_base_url="http://adapter.local",
         agentis_endpoint="http://agentis.local",
@@ -36,7 +30,7 @@ def _make_settings(tmp_path: Path) -> Settings:
 
 def test_post_agentis_event_invokes_rpc_without_log_kwarg_conflict(tmp_path, monkeypatch):
     """Regression: log_json(level, message, **fields) conflicts with fields named 'message'."""
-    service = KubernetesAdapterService(_make_context(), _make_settings(tmp_path))
+    service = GitAdapterService(_make_context(), _make_settings(tmp_path))
     captured: dict = {}
 
     def fake_call(method: str, payload: dict):  # noqa: ANN001
@@ -63,7 +57,7 @@ def test_post_agentis_event_invokes_rpc_without_log_kwarg_conflict(tmp_path, mon
 
 
 def test_close_falls_back_when_git_worktree_remove_fails(monkeypatch, tmp_path):
-    service = KubernetesAdapterService(_make_context(), _make_settings(tmp_path))
+    service = GitAdapterService(_make_context(), _make_settings(tmp_path))
     repository_root = tmp_path / "repo"
     repository_root.mkdir()
     worktree_path = tmp_path / "worktree" / "task-1"
@@ -71,13 +65,6 @@ def test_close_falls_back_when_git_worktree_remove_fails(monkeypatch, tmp_path):
     (worktree_path / "untracked.txt").write_text("dirty", encoding="utf-8")
 
     captured: list[tuple[Path, tuple[str, ...]]] = []
-
-    class FakeManifestParser:
-        def __init__(self, **_: Any) -> None:
-            pass
-
-        def delete(self, source_path: str, ignore_not_found: bool = True) -> str:
-            return "deleted"
 
     def fake_run_git(cwd: Path, *args: str) -> str:
         captured.append((cwd, args))
@@ -87,16 +74,10 @@ def test_close_falls_back_when_git_worktree_remove_fails(monkeypatch, tmp_path):
             return "Deleted branch task-1 (was abc123)."
         raise AssertionError(f"Unexpected git command: {args}")
 
-    monkeypatch.setattr("common.kubernetes.runtime.OpenCodeManifestParser", FakeManifestParser)
-    monkeypatch.setattr(KubernetesAdapterService, "_repository_root", lambda self: repository_root)
-    monkeypatch.setattr(KubernetesAdapterService, "_resolved_worktree_path", lambda self: worktree_path)
+    monkeypatch.setattr(GitAdapterService, "_repository_root", lambda self: repository_root)
+    monkeypatch.setattr(GitAdapterService, "_resolved_worktree_path", lambda self: worktree_path)
     monkeypatch.setattr(
-        KubernetesRuntime,
-        "_resolve_manifest_source",
-        lambda self: tmp_path / "opencode.yaml",
-    )
-    monkeypatch.setattr(
-        KubernetesAdapterService,
+        GitAdapterService,
         "_git_succeeds",
         staticmethod(
             lambda cwd, *args: (
@@ -104,7 +85,7 @@ def test_close_falls_back_when_git_worktree_remove_fails(monkeypatch, tmp_path):
             )
         ),
     )
-    monkeypatch.setattr(KubernetesAdapterService, "_run_git", staticmethod(fake_run_git))
+    monkeypatch.setattr(GitAdapterService, "_run_git", staticmethod(fake_run_git))
 
     result = service.close()
 
@@ -118,7 +99,7 @@ def test_close_falls_back_when_git_worktree_remove_fails(monkeypatch, tmp_path):
 
 
 def test_create_worktree_preserves_permissions(monkeypatch, tmp_path):
-    service = KubernetesAdapterService(_make_context(), _make_settings(tmp_path))
+    service = GitAdapterService(_make_context(), _make_settings(tmp_path))
     repository_root = tmp_path / "repo"
     repository_root.mkdir()
     worktree_root = tmp_path / "worktree"
@@ -137,14 +118,14 @@ def test_create_worktree_preserves_permissions(monkeypatch, tmp_path):
             return ""
         raise AssertionError(f"Unexpected git command: cwd={cwd}, args={args}")
 
-    monkeypatch.setattr(KubernetesAdapterService, "_repository_root", lambda self: repository_root)
-    monkeypatch.setattr(KubernetesAdapterService, "_resolve_base_ref", lambda self, root: "master")
+    monkeypatch.setattr(GitAdapterService, "_repository_root", lambda self: repository_root)
+    monkeypatch.setattr(GitAdapterService, "_resolve_base_ref", lambda self, root: "master")
     monkeypatch.setattr(
-        KubernetesAdapterService,
+        GitAdapterService,
         "_git_succeeds",
         staticmethod(lambda cwd, *args: False),
     )
-    monkeypatch.setattr(KubernetesAdapterService, "_run_git", staticmethod(fake_run_git))
+    monkeypatch.setattr(GitAdapterService, "_run_git", staticmethod(fake_run_git))
 
     result = service.create_worktree()
 
@@ -156,7 +137,7 @@ def test_create_worktree_preserves_permissions(monkeypatch, tmp_path):
 
 
 def test_git_merge_rebases_task_branch_before_fast_forwarding_base(monkeypatch, tmp_path):
-    service = KubernetesAdapterService(_make_context(), _make_settings(tmp_path))
+    service = GitAdapterService(_make_context(), _make_settings(tmp_path))
     repository_root = tmp_path / "repo"
     repository_root.mkdir()
     worktree_path = tmp_path / "worktree" / "task-1"
@@ -185,10 +166,10 @@ def test_git_merge_rebases_task_branch_before_fast_forwarding_base(monkeypatch, 
             return ""
         raise AssertionError(f"Unexpected git command: cwd={cwd}, args={args}")
 
-    monkeypatch.setattr(KubernetesAdapterService, "_repository_root", lambda self: repository_root)
-    monkeypatch.setattr(KubernetesAdapterService, "_resolved_worktree_path", lambda self: worktree_path)
-    monkeypatch.setattr(KubernetesAdapterService, "_resolve_base_ref", lambda self, root: "master")
-    monkeypatch.setattr(KubernetesAdapterService, "_resolve_push_remote", lambda self, root: "origin")
+    monkeypatch.setattr(GitAdapterService, "_repository_root", lambda self: repository_root)
+    monkeypatch.setattr(GitAdapterService, "_resolved_worktree_path", lambda self: worktree_path)
+    monkeypatch.setattr(GitAdapterService, "_resolve_base_ref", lambda self, root: "master")
+    monkeypatch.setattr(GitAdapterService, "_resolve_push_remote", lambda self, root: "origin")
 
     def fake_git_succeeds(cwd: Path, *args: str) -> bool:
         succeeds_calls.append((cwd, args))
@@ -199,11 +180,11 @@ def test_git_merge_rebases_task_branch_before_fast_forwarding_base(monkeypatch, 
         )
 
     monkeypatch.setattr(
-        KubernetesAdapterService,
+        GitAdapterService,
         "_git_succeeds",
         staticmethod(fake_git_succeeds),
     )
-    monkeypatch.setattr(KubernetesAdapterService, "_run_git", staticmethod(fake_run_git))
+    monkeypatch.setattr(GitAdapterService, "_run_git", staticmethod(fake_run_git))
 
     result = service.git_merge()
 

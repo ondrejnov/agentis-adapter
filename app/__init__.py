@@ -1,1 +1,1 @@
-"""Agentis Kubernetes Adapter package."""
+"""Agentis Adapter package."""

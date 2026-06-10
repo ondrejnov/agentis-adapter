@@ -3,8 +3,7 @@
 ``BaseAdapterService`` is intentionally tiny: it accepts an execution context,
 talks to Agentis (progress events + session persistence) and declares the agent
 lifecycle that concrete adapters implement. It deliberately knows nothing about
-git, worktrees or Kubernetes — those concerns live in :class:`GitAdapterService`
-and :class:`KubernetesRuntime` respectively.
+git or worktrees — those concerns live in :class:`GitAdapterService`.
 """
 
 from __future__ import annotations

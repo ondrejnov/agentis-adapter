@@ -11,7 +11,6 @@ from uuid import UUID
 import pytest
 
 from common.config import Settings
-from common.cli_session import KubectlExecTarget
 from common.models import AdapterOptionsPayload, AgentExecutionContextPayload
 from opencode.api import create_app, _DISPATCH
 from tests.support import RpcTestClient
@@ -25,16 +24,10 @@ def make_settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 8003,
-        "default_namespace": "agentis",
-        "app_host": None,
-        "manifest_path": Path("/tmp/opencode.yaml"),
         "worktree_root": Path("/var/www/worktrees"),
         "public_base_url": "http://adapter.internal:8003",
         "agentis_endpoint": None,
         "agentis_token": None,
-        "claude_run_mode": "local",
-        "claude_pod_selector": "deployment/opencode",
-        "claude_pod_container": "opencode",
         "kubectl_command": "kubectl",
     }
     values.update(overrides)
@@ -184,84 +177,6 @@ def test_stream_uses_temp_prompt_file_for_long_local_prompt(monkeypatch) -> None
     assert prompt_match is not None
     assert not Path(prompt_match.group(1)).exists()
     assert "x" * 11 not in captured["args"][2]
-
-
-def test_stream_passes_config_env_into_kubectl_exec_shell(monkeypatch) -> None:
-    captured: dict[str, Any] = {}
-    process = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
-
-    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
-        captured["args"] = args
-        captured["env"] = kwargs["env"]
-        return process
-
-    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
-
-    async def collect_events() -> list[dict[str, Any]]:
-        client = OpenCodeRunner(
-            config=OpenCodeRunConfig(
-                command="opencode",
-                cwd="/work/project",
-                env={"IS_SANDBOX": "1"},
-                kubectl_target=KubectlExecTarget(
-                    namespace="ns", selector="deployment/opencode", kubectl="/usr/bin/kubectl"
-                ),
-            )
-        )
-        return [{"type": event.type, **event.data} async for event in client.stream("Ahoj")]
-
-    events = asyncio.run(collect_events())
-
-    assert events == []
-    assert captured["env"]["IS_SANDBOX"] == "1"
-    assert captured["args"][-2:] == (
-        "-c",
-        "cd /work/project && exec env IS_SANDBOX=1 opencode run Ahoj --format json --dangerously-skip-permissions",
-    )
-    assert process.stdin.data == bytearray()
-    assert process.stdin.closed is True
-
-
-def test_stream_uses_pod_temp_prompt_file_for_long_kubectl_prompt(monkeypatch) -> None:
-    captured: dict[str, Any] = {}
-    process = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
-
-    monkeypatch.setattr(OpenCodeRunner, "_prompt_file_threshold_bytes", staticmethod(lambda: 10))
-
-    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
-        captured["args"] = args
-        captured["env"] = kwargs["env"]
-        return process
-
-    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
-
-    async def collect_events() -> list[dict[str, Any]]:
-        client = OpenCodeRunner(
-            config=OpenCodeRunConfig(
-                command="opencode",
-                cwd="/work/project",
-                env={"IS_SANDBOX": "1"},
-                kubectl_target=KubectlExecTarget(
-                    namespace="ns", selector="deployment/opencode", kubectl="/usr/bin/kubectl"
-                ),
-            )
-        )
-        return [{"type": event.type, **event.data} async for event in client.stream("x" * 11)]
-
-    events = asyncio.run(collect_events())
-
-    assert events == []
-    assert captured["env"]["IS_SANDBOX"] == "1"
-    assert captured["args"][-2] == "-c"
-    shell = captured["args"][-1]
-    assert shell.startswith("tmp=/tmp/opencode-prompt-")
-    assert 'trap \'rm -f "$tmp"\' EXIT; cat > "$tmp";' in shell
-    assert "cd /work/project && env IS_SANDBOX=1 opencode run" in shell
-    assert "--file /tmp/opencode-prompt-" in shell
-    assert "--format json --dangerously-skip-permissions" in shell
-    assert "x" * 11 not in shell
-    assert process.stdin.data.decode("utf-8") == "x" * 11
-    assert process.stdin.closed is True
 
 
 def test_stream_includes_stderr_in_nonzero_exit_error(monkeypatch) -> None:
@@ -577,26 +492,6 @@ def test_wait_ready_returns_local_url() -> None:
     }
 
 
-def test_claude_run_mode_kubernetes_does_not_leak_into_opencode() -> None:
-    # OpenCode must default to local even when claude_run_mode is kubernetes.
-    adapter = OpenCodeAdapterService(
-        context=make_context(),
-        settings=make_settings(claude_run_mode="kubernetes"),
-        session_manager=MagicMock(spec=OpenCodeSessionManager),
-    )
-    assert adapter.is_kubernetes_mode is False
-    assert adapter.deploy()["status"] == "skipped"
-
-
-def test_context_runtime_kubernetes_enables_kubernetes_mode() -> None:
-    adapter = OpenCodeAdapterService(
-        context=make_context(adapter=AdapterOptionsPayload(runtime="kubernetes", agent="build")),
-        settings=make_settings(),
-        session_manager=MagicMock(spec=OpenCodeSessionManager),
-    )
-    assert adapter.is_kubernetes_mode is True
-
-
 def test_start_session_starts_session_manager(monkeypatch) -> None:
     manager = MagicMock(spec=OpenCodeSessionManager)
     manager.start.return_value = "ses_abc"
@@ -662,10 +557,9 @@ def test_abort_delegates_to_session_manager() -> None:
     manager.abort.assert_called_once_with("ses_abc")
 
 
-def test_session_manager_uses_opencode_labels_and_pkill_pattern() -> None:
+def test_session_manager_uses_opencode_label() -> None:
     manager = OpenCodeSessionManager(settings=make_settings())
     assert manager._AGENT_LABEL == "opencode"
-    assert manager._REMOTE_PKILL_PATTERN == "opencode run"
 
 
 # ---------------------------------------------------------------------------

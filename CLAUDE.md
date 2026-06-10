@@ -5,7 +5,6 @@
 - Keep the FastAPI entrypoint thin in `app/main.py`; request validation, run lifecycle logic, and adapter orchestration belong in services and models.
 - Treat `app/services/jsonrpc.py` as the source of truth for JSON-RPC method behavior and in-memory run state. This service is intentionally stateless across process restarts; do not add persistence unless a task explicitly requires it.
 - Keep API payload schemas in `app/models.py` and validate via Pydantic models instead of ad-hoc dict handling.
-- Keep Kubernetes manifest templating and `kubectl` execution inside `app/services/manifest_parser.py` and `app/services/adapter.py`.
 
 ## Build And Test
 
@@ -23,8 +22,8 @@
 
 ## Gotchas
 
-- Runtime adapter flows call `kubectl` and require a valid kube context plus a readable manifest path.
-- The default manifest is `kubernetes/opencode.yaml`, which relies on placeholder substitution for `[%NAMESPACE%]`, `[%WORKDIR%]`, `[%APP_HOST%]`, and `[%MAIN_DIR%]
+- Agenti beží jen v environmentech `local` (CLI proces na hostu) a `workflow` (`context.adapter.runtime = "workflow"`). Environment `kubernetes` byl odstraněn.
+- Workflow runtime spouští kroky jako Kubernetes Joby přes `kubectl` (`common/workflow/`) a vyžaduje platný kube context.
 
 ##  Agentis
 - aplikace komunukuje s ticket systémem Agentis pres json AgentisJsonRpcClient

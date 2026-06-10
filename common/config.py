@@ -58,18 +58,12 @@ def _read_env_file(path: Path) -> dict[str, str]:
 class Settings:
     host: str
     port: int
-    default_namespace: str
-    app_host: str | None
-    manifest_path: Path
     worktree_root: Path
     public_base_url: str | None
     agentis_endpoint: str | None
     agentis_token: str | None
     namespace_prefix: str = "Task"
     project_run_root: Path = Path("/tmp/agentis")
-    claude_run_mode: str = "local"
-    claude_pod_selector: str = "deployment/opencode"
-    claude_pod_container: str = "opencode"
     kubectl_command: str = "kubectl"
     agentis_ws_endpoint: str | None = None
     agentis_adapter_id: str | None = None
@@ -116,15 +110,9 @@ def _build_settings() -> Settings:
     env_file = project_root / ".env"
     env: dict[str, str] = {**_read_env_file(env_file), **os.environ}
     port = int(_get_env(env, "ADAPTER_PORT", "8001") or "8001")
-    manifest_path = Path(
-        _get_env(env, "ADAPTER_MANIFEST_PATH", str(project_root / "kubernetes")) or str(project_root / "kubernetes")
-    ).resolve()
     return Settings(
         host=_get_env(env, "ADAPTER_HOST", "0.0.0.0") or "0.0.0.0",
         port=port,
-        default_namespace=_get_env(env, "ADAPTER_NAMESPACE", "agentis") or "agentis",
-        app_host=_get_env(env, "ADAPTER_APP_HOST"),
-        manifest_path=manifest_path,
         worktree_root=Path(
             _get_env(env, "ADAPTER_WORKTREE_ROOT", str(project_root / "worktrees")) or str(project_root / "worktrees")
         ).resolve(),
@@ -135,9 +123,6 @@ def _build_settings() -> Settings:
         project_run_root=Path(
             _get_env(env, "ADAPTER_PROJECT_RUN_ROOT", "/tmp/agentis") or "/tmp/agentis"
         ).resolve(),
-        claude_run_mode=(_get_env(env, "CLAUDE_RUN_MODE", "kubernetes") or "kubernetes").strip().lower(),
-        claude_pod_selector=_get_env(env, "CLAUDE_POD_SELECTOR", "deployment/opencode") or "deployment/opencode",
-        claude_pod_container=_get_env(env, "CLAUDE_POD_CONTAINER", "opencode") or "opencode",
         kubectl_command=_get_env(env, "KUBECTL_COMMAND", "kubectl") or "kubectl",
         agentis_ws_endpoint=_get_env(env, "AGENTIS_WS_ENDPOINT"),
         agentis_adapter_id=_get_env(env, "AGENTIS_ADAPTER_ID"),

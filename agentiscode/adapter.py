@@ -4,7 +4,7 @@ from typing import cast
 
 from common.models import AgentExecutionContextPayload
 from common.config import Settings
-from common.cli_adapter import KUBERNETES_MODE, LOCAL_MODE, CliAdapterService
+from common.cli_adapter import CliAdapterService
 from common.session_manager import BaseSessionManager
 from agentiscode.session_manager import AgentisCodeSessionManager
 
@@ -19,11 +19,6 @@ class AgentisCodeAdapterService(CliAdapterService):
         session_manager: AgentisCodeSessionManager,
     ) -> None:
         super().__init__(context, settings, cast(BaseSessionManager, session_manager))
-        runtime = context.adapter.runtime if context.adapter and context.adapter.runtime else None
-        if runtime and runtime.strip().lower() == KUBERNETES_MODE:
-            self._mode = KUBERNETES_MODE
-        else:
-            self._mode = LOCAL_MODE
 
     @staticmethod
     def _join_prompt_parts(*texts: str | None) -> str:
@@ -45,4 +40,4 @@ class AgentisCodeAdapterService(CliAdapterService):
         )
 
 
-__all__ = ["AgentisCodeAdapterService", "KUBERNETES_MODE", "LOCAL_MODE"]
+__all__ = ["AgentisCodeAdapterService"]

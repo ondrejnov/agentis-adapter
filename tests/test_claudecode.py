@@ -12,14 +12,12 @@ import pytest
 from claude.api import create_app, _DISPATCH
 from common.config import Settings
 from common.git_adapter import GitAdapterService
-from common.cli_session import KubectlExecTarget
 from common.models import (
     AdapterOptionsPayload,
     AgentAttachmentPayload,
     AgentExecutionContextPayload,
 )
 from claude.adapter import ClaudeCodeAdapterService
-from common.kubernetes_runtime import KubernetesRuntime
 from claude.activity_mapper import ClaudeActivityMapper
 from claude.session_manager import ClaudeSessionManager, _ClaudeSession
 from common.integrations.github_pr import GithubPrResult
@@ -30,16 +28,10 @@ def make_settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 8002,
-        "default_namespace": "agentis",
-        "app_host": None,
-        "manifest_path": Path("/tmp/opencode.yaml"),
         "worktree_root": Path("/var/www/worktrees"),
         "public_base_url": "http://adapter.internal:8002",
         "agentis_endpoint": None,
         "agentis_token": None,
-        "claude_run_mode": "local",
-        "claude_pod_selector": "deployment/opencode",
-        "claude_pod_container": "opencode",
         "kubectl_command": "kubectl",
     }
     values.update(overrides)
@@ -237,28 +229,7 @@ def test_abort_delegates_to_session_manager():
     manager.abort.assert_called_once_with("ses_abc")
 
 
-def test_start_session_passes_kubectl_target_in_kubernetes_mode(monkeypatch):
-    manager = MagicMock(spec=ClaudeSessionManager)
-    manager.start.return_value = "ses_k8s"
-    monkeypatch.setattr(ClaudeCodeAdapterService, "_persist_agentis_session_id", lambda self, session_id: None)
-
-    context = make_context(namespace="task-7-demo")
-    adapter = ClaudeCodeAdapterService(
-        context=context,
-        settings=make_settings(claude_run_mode="kubernetes"),
-        session_manager=manager,
-    )
-
-    adapter.start_session()
-
-    target = manager.start.call_args.kwargs["kubectl_target"]
-    assert isinstance(target, KubectlExecTarget)
-    assert target.namespace == "task-7-demo"
-    assert target.selector == "deployment/opencode"
-    assert target.container == "opencode"
-
-
-def test_context_runtime_local_overrides_kubernetes_mode(monkeypatch):
+def test_context_runtime_local_runs_locally(monkeypatch):
     manager = MagicMock(spec=ClaudeSessionManager)
     manager.start.return_value = "ses_local"
     monkeypatch.setattr(ClaudeCodeAdapterService, "_persist_agentis_session_id", lambda self, session_id: None)
@@ -266,7 +237,7 @@ def test_context_runtime_local_overrides_kubernetes_mode(monkeypatch):
     context = make_context(adapter=AdapterOptionsPayload(runtime="local", agent="build"))
     adapter = ClaudeCodeAdapterService(
         context=context,
-        settings=make_settings(claude_run_mode="kubernetes"),
+        settings=make_settings(),
         session_manager=manager,
     )
 
@@ -350,43 +321,6 @@ def test_session_manager_send_resumes_unknown_session_after_adapter_restart(monk
     assert spawned[0][1]["resume_id"] == "sess-1"
 
 
-def test_add_message_passes_kubectl_target_in_kubernetes_mode():
-    manager = MagicMock(spec=ClaudeSessionManager)
-    context = make_context(session_id="ses_abc", namespace="task-7-demo")
-    adapter = ClaudeCodeAdapterService(
-        context=context,
-        settings=make_settings(claude_run_mode="kubernetes"),
-        session_manager=manager,
-    )
-
-    adapter.add_message("ahoj")
-
-    target = manager.send.call_args.kwargs["kubectl_target"]
-    assert isinstance(target, KubectlExecTarget)
-    assert target.namespace == "task-7-demo"
-
-
-def test_deploy_runs_kubernetes_flow_when_mode_is_kubernetes(monkeypatch):
-    invoked: list[str] = []
-
-    def fake_super_deploy(self):  # noqa: ANN001
-        invoked.append("deploy")
-        return {"action": "deploy", "task_id": self.context.task_id, "status": "applied"}
-
-    monkeypatch.setattr(KubernetesRuntime, "deploy", fake_super_deploy)
-
-    adapter = ClaudeCodeAdapterService(
-        context=make_context(namespace="task-7-demo"),
-        settings=make_settings(claude_run_mode="kubernetes"),
-        session_manager=MagicMock(spec=ClaudeSessionManager),
-    )
-
-    result = adapter.deploy()
-
-    assert invoked == ["deploy"]
-    assert result["status"] == "applied"
-
-
 def test_question_reply_is_not_implemented():
     adapter = ClaudeCodeAdapterService(
         context=make_context(),
@@ -398,7 +332,7 @@ def test_question_reply_is_not_implemented():
         adapter.question_reply("req-1", [["ano"]])
 
 
-def test_close_aborts_session_and_skips_kubernetes(monkeypatch):
+def test_close_aborts_session_and_cleans_worktree(monkeypatch):
     manager = MagicMock(spec=ClaudeSessionManager)
     git_calls: list[tuple[str, ...]] = []
 
@@ -435,8 +369,6 @@ def test_close_aborts_session_and_skips_kubernetes(monkeypatch):
     assert result["branch"] == "task-1"
     assert result["worktree_removed"] is True
     assert result["branch_deleted"] is True
-    # ensure manifest delete was NOT attempted (no kubectl calls; we only invoke git)
-    assert all(call[0] != "kubectl" for call in git_calls)
 
 
 # ---------------------------------------------------------------------------
@@ -566,59 +498,11 @@ def test_session_manager_abort_kills_local_process_group(monkeypatch):
         "common.session_manager.os.killpg",
         lambda pgid, sig: killed.append((pgid, sig)),
     )
-    remote_pkill = MagicMock()
-    monkeypatch.setattr(manager, "_remote_pkill_agent", remote_pkill)
-
     manager.abort("ses_local")
 
     assert sess.abort_event.is_set()
     assert killed == [(999, signal.SIGKILL)]
     proc.kill.assert_not_called()
-    remote_pkill.assert_not_called()
-
-
-def test_session_manager_abort_pkills_remote_claude_for_kubectl_session(monkeypatch):
-    manager = ClaudeSessionManager(settings=make_settings(claude_run_mode="kubernetes"))
-    target = KubectlExecTarget(namespace="task-9-demo", selector="deployment/opencode", container="opencode")
-    sess = _ClaudeSession(
-        session_id="ses_k8s",
-        pending_key="pending",
-        context=make_context(namespace="task-9-demo"),
-        worktree="/var/www/worktrees/task-1",
-        kubectl_target=target,
-    )
-    proc = SimpleNamespace(pid=42, kill=MagicMock())
-    sess.proc_holder["proc"] = proc
-    manager._sessions["ses_k8s"] = sess
-
-    monkeypatch.setattr("common.session_manager.shutil.which", lambda cmd: f"/usr/bin/{cmd}")
-    captured: dict[str, Any] = {}
-
-    def fake_run(args, **kwargs):
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr("common.session_manager.subprocess.run", fake_run)
-
-    manager.abort("ses_k8s")
-
-    assert sess.abort_event.is_set()
-    proc.kill.assert_called_once()
-    assert captured["args"] == [
-        "kubectl",
-        "-n",
-        "task-9-demo",
-        "exec",
-        "deployment/opencode",
-        "-c",
-        "opencode",
-        "--",
-        "pkill",
-        "-KILL",
-        "-f",
-        "claude --print",
-    ]
 
 
 def test_mapper_uses_real_claude_session_id_from_session_start():

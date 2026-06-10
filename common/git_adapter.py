@@ -6,8 +6,8 @@ owns everything git: resolving the repository, creating/reusing a per-task
 worktree, naming branches, merging the task branch back into the base branch and
 tearing the worktree down again.
 
-Concrete adapters (the local CLI adapters and the Kubernetes/OpenCode adapter)
-subclass this and add their own session lifecycle on top.
+Concrete adapters (the local CLI adapters) subclass this and add their own
+session lifecycle on top.
 """
 
 from __future__ import annotations

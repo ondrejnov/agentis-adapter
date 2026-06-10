@@ -2,14 +2,11 @@
 
 Both the Claude Code (`claude`) and OpenCode (`opencode run`) adapters spawn a
 local CLI process per task worktree and stream its output to Agentis via a
-``BaseSessionManager``. Neither deploys a long-running web server; the only
-Kubernetes machinery they need is the optional ``kubernetes`` fallback, where
-the regular Kubernetes runtime is delegated to and the CLI is invoked through
-``kubectl exec``.
+``BaseSessionManager``. Neither deploys a long-running web server.
 
 ``ClaudeCodeAdapterService`` and ``OpenCodeAdapterService`` are siblings: both
-subclass this base and override only the few CLI-specific knobs (the run-mode
-default, fork support, and the label used in logs and skip payloads).
+subclass this base and override only the few CLI-specific knobs (fork support
+and the label used in logs and skip payloads).
 """
 
 from __future__ import annotations
@@ -23,17 +20,13 @@ from typing import TYPE_CHECKING, Any
 
 from common.config import Settings
 from common.models import AgentExecutionContextPayload
-from common.cli_session import KubectlExecTarget
 from common.adapter_base import log_json
 from common.git_adapter import GitAdapterService
-from common.kubernetes.runtime import KubernetesRuntime
 
 if TYPE_CHECKING:
     from common.session_manager import BaseSessionManager
 
 
-KUBERNETES_MODE = "kubernetes"
-LOCAL_MODE = "local"
 _ATTACHMENTS_DIR = Path(".agentis/attachments")
 _MIME_EXTENSIONS = {
     "image/png": ".png",
@@ -45,11 +38,11 @@ _MIME_EXTENSIONS = {
 
 
 class CliAdapterService(GitAdapterService):
-    """Base adapter for CLI agents run locally (or via ``kubectl exec``).
+    """Base adapter for CLI agents run locally.
 
     Subclasses set :attr:`runtime_label` — used in log messages, the local
     ``wait_ready`` URL and the deploy skip reason — and may override
-    :meth:`_default_run_mode` or :attr:`supports_fork`.
+    :attr:`supports_fork`.
     """
 
     requires_agentis_init = False
@@ -67,43 +60,15 @@ class CliAdapterService(GitAdapterService):
     ) -> None:
         super().__init__(context, settings)
         self._sessions = session_manager
-        runtime = context.adapter.runtime if context.adapter and context.adapter.runtime else None
-        self._mode = (runtime or self._default_run_mode() or LOCAL_MODE).lower()
 
     # ------------------------------------------------------------------
-    # CLI-specific hooks
-    # ------------------------------------------------------------------
-
-    def _default_run_mode(self) -> str | None:
-        """Run mode used when the context does not pin one. Defaults to ``local``."""
-        return LOCAL_MODE
-
-    @property
-    def is_kubernetes_mode(self) -> bool:
-        return self._mode == KUBERNETES_MODE
-
-    def _kubectl_target(self) -> KubectlExecTarget:
-        namespace = KubernetesRuntime.namespace_for_context(self.context, self.settings)
-        return KubectlExecTarget(
-            namespace=namespace,
-            selector=self.settings.claude_pod_selector,
-            container=self.settings.claude_pod_container,
-            kubectl=self.settings.kubectl_command,
-        )
-
-    def _kubernetes_runtime(self) -> KubernetesRuntime:
-        return KubernetesRuntime(self.context, self.settings, self._workspace_path())
-
-    # ------------------------------------------------------------------
-    # Deploy / wait_ready — no-op locally, reuse the k8s flow in kubernetes mode.
+    # Deploy / wait_ready — the CLI runs locally, both are no-ops.
     # ------------------------------------------------------------------
 
     def deploy(self) -> dict[str, Any]:
-        if self.is_kubernetes_mode:
-            return self._kubernetes_runtime().deploy()
         log_json(
             "INFO",
-            f"Skipping Kubernetes deploy for {self.runtime_label} adapter",
+            f"Skipping deploy for {self.runtime_label} adapter",
             task_id=self.context.task_id,
         )
         return {
@@ -114,8 +79,6 @@ class CliAdapterService(GitAdapterService):
         }
 
     def wait_ready(self, timeout: float = 300.0, interval: float = 2.0) -> dict[str, Any]:
-        if self.is_kubernetes_mode:
-            return self._kubernetes_runtime().wait_ready(timeout=timeout, interval=interval)
         return {
             "action": "wait_ready",
             "task_id": self.context.task_id,
@@ -333,14 +296,11 @@ class CliAdapterService(GitAdapterService):
         if not prompt:
             raise RuntimeError(f"Cannot start {self.runtime_label} session without a prompt")
 
-        start_kwargs: dict[str, Any] = {
-            "context": self.context,
-            "worktree": working_dir,
-            "prompt": prompt,
-        }
-        if self.is_kubernetes_mode:
-            start_kwargs["kubectl_target"] = self._kubectl_target()
-        session_id = self._sessions.start(**start_kwargs)
+        session_id = self._sessions.start(
+            context=self.context,
+            worktree=working_dir,
+            prompt=prompt,
+        )
         self.context.session_id = session_id
 
         log_json(
@@ -373,15 +333,12 @@ class CliAdapterService(GitAdapterService):
             raise RuntimeError("Context must include session_id to add messages")
 
         working_dir = str(self._workspace_path())
-        send_kwargs: dict[str, Any] = {
-            "session_id": session_id,
-            "context": self.context,
-            "worktree": working_dir,
-            "prompt": message,
-        }
-        if self.is_kubernetes_mode:
-            send_kwargs["kubectl_target"] = self._kubectl_target()
-        self._sessions.send(**send_kwargs)
+        self._sessions.send(
+            session_id=session_id,
+            context=self.context,
+            worktree=working_dir,
+            prompt=message,
+        )
         return {
             "action": "add_message",
             "task_id": self.context.task_id,
@@ -418,11 +375,7 @@ class CliAdapterService(GitAdapterService):
             task_id=self.context.task_id,
         )
 
-        if self.is_kubernetes_mode:
-            kubernetes_teardown = self._kubernetes_runtime().teardown()
-            return {**super().close(), **kubernetes_teardown}
-
         return super().close()
 
 
-__all__ = ["CliAdapterService", "KUBERNETES_MODE", "LOCAL_MODE"]
+__all__ = ["CliAdapterService"]

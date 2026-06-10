@@ -18,9 +18,6 @@ def make_settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "host": "127.0.0.1",
         "port": 8001,
-        "default_namespace": "agentis",
-        "app_host": None,
-        "manifest_path": Path("/tmp/opencode.yaml"),
         "worktree_root": Path("/var/www/worktrees"),
         "public_base_url": "http://adapter.internal:8001",
         "agentis_endpoint": "http://agentis.local",

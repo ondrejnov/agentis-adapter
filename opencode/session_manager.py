@@ -21,7 +21,6 @@ class OpenCodeSessionManager(BaseSessionManager):
     """Owns background `opencode run` runs keyed by the OpenCode session_id."""
 
     _AGENT_LABEL = "opencode"
-    _REMOTE_PKILL_PATTERN = "opencode run"
 
     def _make_mapper(
         self,
@@ -50,6 +49,5 @@ class OpenCodeSessionManager(BaseSessionManager):
             resume_session_id=resume_id,
             dangerously_skip_permissions=True,
             env=env,
-            kubectl_target=sess.kubectl_target,
         )
         return OpenCodeRunner(config=config)

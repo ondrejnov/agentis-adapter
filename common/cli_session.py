@@ -1,20 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable
 
 
 _STREAM_READ_CHUNK_SIZE = 64 * 1024
-
-
-@dataclass
-class KubectlExecTarget:
-    """Target for running an agent CLI inside a Kubernetes pod via `kubectl exec`."""
-
-    namespace: str
-    selector: str = "deployment/opencode"
-    container: Optional[str] = "opencode"
-    kubectl: str = "kubectl"
 
 
 def unbounded_line_reader(stream: Any) -> Callable[[], Awaitable[bytes]]:
@@ -49,4 +38,4 @@ def unbounded_line_reader(stream: Any) -> Callable[[], Awaitable[bytes]]:
     return read_line
 
 
-__all__ = ["KubectlExecTarget", "unbounded_line_reader"]
+__all__ = ["unbounded_line_reader"]

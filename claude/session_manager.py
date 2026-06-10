@@ -13,7 +13,6 @@ from __future__ import annotations
 from typing import Optional
 
 from common.session_manager import BaseSessionManager, _AgentSession
-from common.cli_session import KubectlExecTarget
 from claude.activity_mapper import ClaudeActivityMapper
 from claude.client import ClaudeCodeClient, ClaudeRunConfig
 
@@ -26,7 +25,6 @@ __all__ = [
     "_ClaudeSession",
     "ClaudeCodeClient",
     "ClaudeRunConfig",
-    "KubectlExecTarget",
 ]
 
 
@@ -34,7 +32,6 @@ class ClaudeSessionManager(BaseSessionManager):
     """Owns background `claude` runs keyed by the real Claude session_id."""
 
     _AGENT_LABEL = "claude"
-    _REMOTE_PKILL_PATTERN = "claude --print"
 
     def _make_mapper(
         self,
@@ -55,7 +52,7 @@ class ClaudeSessionManager(BaseSessionManager):
     def _build_client(self, sess: _AgentSession, resume_id: Optional[str]) -> ClaudeCodeClient:
         adapter_opts = sess.context.adapter
         env: dict[str, str] = {"IS_SANDBOX": "1"}
-        if sess.kubectl_target is None and self.settings.public_base_url:
+        if self.settings.public_base_url:
             env["AGENTIS_URL"] = self.settings.public_base_url
         config = ClaudeRunConfig(
             cwd=sess.worktree,
@@ -65,6 +62,5 @@ class ClaudeSessionManager(BaseSessionManager):
             resume_session_id=resume_id,
             dangerously_skip_permissions=True,
             env=env,
-            kubectl_target=sess.kubectl_target,
         )
         return ClaudeCodeClient(config=config)

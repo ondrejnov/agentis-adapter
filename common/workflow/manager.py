@@ -22,7 +22,7 @@ from uuid import uuid4
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 from common.config import Settings
 from common.git_adapter import GitAdapterService
-from common.kubernetes.runtime import KubernetesRuntime
+from common.namespaces import namespace_for_context
 from common.models import AgentExecutionContextPayload
 from common.session_manager import BaseSessionManager
 from common.workflow.runtime import KubectlJobRunner, build_job_manifest, job_labels, job_name, safe_step_name
@@ -93,7 +93,7 @@ class WorkflowManager:
         `<project_run_root>/<run_id>/<attempt>/`, aby mohlo běžet víc runů zároveň.
         """
 
-        namespace = KubernetesRuntime.namespace_for_context(context, self.settings)
+        namespace = namespace_for_context(context, self.settings)
         task_label = self._task_label(context)
         with self._lock:
             existing = self._runs.get(context.task_id)
@@ -163,7 +163,7 @@ class WorkflowManager:
     def abort(self, context: AgentExecutionContextPayload) -> dict[str, Any]:
         """Zruší workflow: smaže aktivní Joby podle labels (bez session_id)."""
 
-        namespace = KubernetesRuntime.namespace_for_context(context, self.settings)
+        namespace = namespace_for_context(context, self.settings)
         with self._lock:
             run = self._runs.get(context.task_id)
         if run is not None:

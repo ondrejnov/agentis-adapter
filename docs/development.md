@@ -7,7 +7,7 @@ Tento dokument popisuje, jak funguje Agentis adapter, co v kodu znamena adapter,
 - **Agentis** je ridici aplikace a ticket system. Posila adapteru JSON-RPC pozadavky a prijima zpet udalosti, komentare, activity log a vysledky.
 - **Adapter proces** je dlouho bezici Python proces spusteny prikazem `agentis-adapter --adapter <typ>`. Sam se pripoji do Agentisu pres odchozi WebSocket a neposloucha verejny inbound RPC endpoint.
 - **Adapter service** je trida, ktera umi pripravit prostredi pro jeden konkretni run: git worktree, volitelny deploy, cekani na runtime, start session, pridani zpravy, abort, merge a cleanup.
-- **Runtime** je skutecne prostredi, kde bezi agent. Typicky lokalni CLI proces (`claude`, `opencode run`) nebo CLI spustene uvnitr Kubernetes podu pres `kubectl exec`.
+- **Runtime/environment** je skutecne prostredi, kde bezi agent. Podporovane jsou dva: `local` (CLI proces `claude`/`opencode run` primo na hostu, default) a `workflow` (`context.adapter.runtime = "workflow"`, deklarativni kroky bezici jako Kubernetes Joby).
 - **Session** je dlouhodobejsi konverzacni kontext konkretniho agenta. V Agentisu se persistuje `session_id`, aby dalsi `add_message` navazal na stejnou agenti session.
 - **Run** je jedno zpracovani tasku nebo jedne zpravy v Agentisu. Run nese `run_id`, `task_id`, prompt, metadata projektu a volby adapteru.
 - **Activity log** je prubezny log udalosti agenta normalizovany do formatu, ktery Agentis umi zobrazit jako prubeh prace.
@@ -68,7 +68,7 @@ Spolecne handlery jsou v `common/rpc/jsonrpc.py` ve tride `AgentJsonRpcService`.
 | `approve` | Jednoduche potvrzeni rozhodnuti. |
 | `git_merge` | Rebase/merge task vetve do base branche, push a cleanup. |
 | `abort` | Zastavi bezici session/proces. |
-| `close` | Uklidi session, worktree, branch a pripadne Kubernetes prostredi. |
+| `close` | Uklidi session, worktree a branch. |
 
 Parametry se validuji Pydantic modely v `common/models.py`. Hlavni payload je `AgentExecutionContextPayload`.
 
@@ -120,26 +120,20 @@ Kazdy krok obaluje `_run_adapter_step`, ktery posila `run.adapter_event` se stav
 
 ## Adapter service vrstva
 
-Adaptery jsou trivrstva dedicnost; Kubernetes deploy mechanika je samostatny
-helper mimo strom:
+Adaptery jsou trivrstva dedicnost:
 
 ```
 BaseAdapterService            common/adapter_base.py   (minimalni)
 └── GitAdapterService         common/git_adapter.py    (git/worktree)
-    ├── CliAdapterService     common/cli_adapter.py
-    │   ├── OpenCodeAdapterService
-    │   └── ClaudeCodeAdapterService
-    └── KubernetesAdapterService  common/kubernetes_runtime.py
+    └── CliAdapterService     common/cli_adapter.py
+        ├── OpenCodeAdapterService
+        ├── ClaudeCodeAdapterService
+        └── AgentisCodeAdapterService
 ```
-
-`KubernetesRuntime` (`common/kubernetes/runtime.py`) NENI adapter — je to
-collaborator s Kubernetes deploy mechanikou, ktery si `CliAdapterService`
-(v `kubernetes` modu) i `KubernetesAdapterService` composnou. Zadny adapter si
-deploy nepujcuje od jineho adapteru.
 
 `BaseAdapterService` je zamerne minimalni — prijme kontext, mluvi s Agentisem
 (`AgentisJsonRpcClient`, emitovani adapter eventu, persist session_id) a deklaruje
-lifecycle, ktery konkretni adaptery implementuji. O gitu ani Kubernetes nevi.
+lifecycle, ktery konkretni adaptery implementuji. O gitu nevi.
 
 `GitAdapterService` resi vsechno git:
 
@@ -147,12 +141,6 @@ lifecycle, ktery konkretni adaptery implementuji. O gitu ani Kubernetes nevi.
 - vytvoreni nebo znovupouziti git worktree (`create_worktree`),
 - `git_merge`,
 - `close` a cleanup worktree/branche.
-
-`KubernetesRuntime` resi vsechno Kubernetes:
-
-- odvozeni namespace a ingress/URL,
-- resolveni a `apply`/`delete` manifestu,
-- `deploy`, `wait_ready`, `teardown`.
 
 Adapter service musi implementovat tyto metody:
 
@@ -167,8 +155,7 @@ CLI adaptery pouzivaji spolecnou implementaci `common/cli_adapter.py::CliAdapter
 
 `CliAdapterService` dela:
 
-- lokalni mod bez Kubernetes deploye,
-- volitelny Kubernetes mod, kde se deleguje na `KubernetesRuntime`,
+- `deploy`/`wait_ready` jako no-op (CLI bezi lokalne, neni co nasazovat),
 - sestaveni prvniho promptu z `user_prompt`, `description`, `comments` nebo `title`,
 - start a resume session pres `BaseSessionManager`,
 - abort a close.
@@ -176,7 +163,7 @@ CLI adaptery pouzivaji spolecnou implementaci `common/cli_adapter.py::CliAdapter
 Konkretni adaptery jsou velmi tenke:
 
 - `opencode/adapter.py::OpenCodeAdapterService` nastavuje `runtime_label = "opencode"`.
-- `claude/adapter.py::ClaudeCodeAdapterService` nastavuje `runtime_label = "claude"` a default run mode z `settings.claude_run_mode`.
+- `claude/adapter.py::ClaudeCodeAdapterService` nastavuje `runtime_label = "claude"`.
 
 ## Session manager
 
@@ -202,7 +189,6 @@ flowchart TD
 `BaseSessionManager` je agnosticky k agentovi. Konkretni session manager musi dodat:
 
 - `_AGENT_LABEL`, napr. `opencode` nebo `claude`,
-- `_REMOTE_PKILL_PATTERN` pro zabiti procesu v Kubernetes podu,
 - `_make_mapper(...)`, ktery vytvori activity mapper,
 - `_build_client(...)`, ktery vytvori wrapper nad konkretnim CLI.
 
@@ -210,7 +196,7 @@ flowchart TD
 
 `send` navazuje na existujici session a spousti novy CLI run s resume parametrem.
 
-`abort` zabije lokalni process group nebo pri Kubernetes modu nejdriv ukonci lokalni `kubectl exec` stream a pak vola `pkill` uvnitr podu.
+`abort` zabije celou lokalni process group CLI procesu.
 
 ## CLI klient a mapper
 
@@ -253,24 +239,18 @@ Task scope:
 Project scope:
 
 - namespace je `project-<project_slug>`,
-- pouziva se manifest `opencode-project.yaml`,
 - worktree a branch cleanup se preskakuje.
 
-## Kubernetes runtime
+## Workflow runtime
 
-`common/kubernetes/runtime.py::KubernetesRuntime` je helper s Kubernetes deploy
-mechanikou. Composnou si ho `common/kubernetes_runtime.py::KubernetesAdapterService`
-(adapter pro OpenCode web runtime) i `CliAdapterService` v Kubernetes modu.
-
-Zodpovednosti:
-
-- resolvuje manifest z `.agentis/deploy.yaml`, `settings.manifest_path` nebo `context.adapter.manifest`,
-- nahrazuje placeholdery pres `common/kubernetes/manifest_parser.py`,
-- vola `kubectl apply`,
-- ceka na URL OpenCode runtime,
-- vytvari `opencode.json` z template, pokud `requires_agentis_init = True`.
-
-CLI adaptery v defaultnim lokalnim modu Kubernetes nepouziji. Pri `context.adapter.runtime = "kubernetes"` deleguji `deploy`, `wait_ready` a teardown na `KubernetesRuntime` a samotne CLI spousti pres `kubectl exec` v podu.
+Pri `context.adapter.runtime = "workflow"` neresi run zadnou CLI session.
+`common/workflow/manager.py::WorkflowManager` nacte workflow YAML
+(`.agentis/ci.yaml`, pro project scope `.agentis/project.yaml`), zmrazi ho a na
+pozadi spousti jednotlive kroky jako Kubernetes Joby pres
+`common/workflow/runtime.py::KubectlJobRunner` (`kubectl apply`/`wait`/`logs`).
+Namespace Jobu se odvozuje z kontextu pres `common/namespaces.py::namespace_for_context`.
+Po uspesnem dokonceni se aplikuji `outputs` (agent_comment, session_id, url,
+text, artifact, var) do Agentisu.
 
 ## Dokonceni session
 
@@ -288,7 +268,7 @@ Po dobehnuti CLI runu `BaseSessionManager`:
 - prida IDE link, pokud `context.ide` existuje,
 - commitne zmeny v task worktree,
 - zalozi nebo najde GitHub PR,
-- spusti `run-dev.sh` lokalne nebo pres `kubectl exec`,
+- spusti `run-dev.sh` lokalne,
 - prida attachment na dev server.
 
 ## Jak pridat novy CLI adapter
@@ -315,8 +295,7 @@ Checklist:
 5. Pridej activity mapper s metodami `consume(event) -> bool` a `snapshot() -> list[dict]`.
 6. Pridej `myagent/api.py` s `_DISPATCH`, `_configure_services` a `create_app`.
 7. Zaregistruj adapter v `app/cli.py::_ADAPTER_MODULES`.
-8. Pokud adapter podporuje Kubernetes runtime, nastav `_REMOTE_PKILL_PATTERN` a pouzij `kubectl_target` v klientovi.
-9. Dopln testy pro JSON-RPC `start`, `add_message`, `abort` a zakladni mapovani activity logu.
+8. Dopln testy pro JSON-RPC `start`, `add_message`, `abort` a zakladni mapovani activity logu.
 
 Skeleton session manageru:
 
@@ -330,7 +309,6 @@ from myagent.client import MyAgentClient, MyAgentRunConfig
 
 class MyAgentSessionManager(BaseSessionManager):
     _AGENT_LABEL = "myagent"
-    _REMOTE_PKILL_PATTERN = "myagent run"
 
     def _make_mapper(
         self,
@@ -350,7 +328,6 @@ class MyAgentSessionManager(BaseSessionManager):
                 model=(adapter_opts.model if adapter_opts and adapter_opts.model else None),
                 agent=(adapter_opts.agent if adapter_opts and adapter_opts.agent else None),
                 resume_session_id=resume_id,
-                kubectl_target=sess.kubectl_target,
                 env={"IS_SANDBOX": "1"},
             )
         )
@@ -454,7 +431,6 @@ Dusledky a odlisnosti:
 - Nikdy neposilej do logu ani odpovedi tokeny. Agentis token je konfiguracni secret.
 - `question_reply` u CLI adapteru neni implementovane. Pokud novy agent umi interaktivni otazky, musi se doplnit az do adapter service a klienta.
 - Pro lokalni CLI spousteni se pouziva `start_new_session=True`; abort zabiji celou process group.
-- Pro Kubernetes CLI mod je nutne zabit i proces uvnitr podu pres `_REMOTE_PKILL_PATTERN`, nejen lokalni `kubectl exec` klient.
 - Activity mapper ma vracet stabilni snapshot cele historie, ne jen delta posledni udalosti.
 - `BaseSessionManager._finish_session_actions` muze commitovat zmeny a spoustet `run-dev.sh`; testuj chovani s `project_github_repo` i bez nej.
 
@@ -469,9 +445,10 @@ Dusledky a odlisnosti:
 | `common/rpc/jsonrpc.py` | Hlavni JSON-RPC business flow. |
 | `common/models.py` | Pydantic payloady pro requesty a run state. |
 | `common/adapter_base.py` | Git/worktree, Agentis eventy, merge a cleanup. |
-| `common/cli_adapter.py` | Spolecny lifecycle pro lokalni nebo `kubectl exec` CLI adaptery. |
+| `common/cli_adapter.py` | Spolecny lifecycle pro lokalni CLI adaptery. |
 | `common/session_manager.py` | Background session lifecycle, streaming, finalizace. |
 | `opencode/*` | OpenCode adapter, runner, session manager a mapper. |
 | `claude/*` | Claude adapter, client, session manager a mapper. |
-| `common/kubernetes_runtime.py` | Kubernetes/OpenCode web runtime a manifest workflow. |
+| `common/workflow/*` | Workflow runtime: manager, KubectlJobRunner a schema. |
+| `common/namespaces.py` | Odvozeni Kubernetes namespace a dev-server URL z kontextu. |
 | `slack/*` | Slack ingestion adapter: socket-mode listener, mention->task service, guards a text helpery. |
