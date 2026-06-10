@@ -1,8 +1,11 @@
 """Kubernetes Job runtime pro workflow režim.
 
-Generuje `batch/v1 Job` manifesty pro jednotlivé workflow kroky a obsluhuje je
+Definuje protokol :class:`WorkflowStepRunner`, přes který `WorkflowManager`
+spouští jednotlivé kroky, a jeho Kubernetes implementaci
+:class:`KubectlJobRunner` — generuje `batch/v1 Job` manifesty a obsluhuje je
 přes `kubectl` subprocess (apply / wait / logs / delete). Žádný Python
-Kubernetes client se nepoužívá.
+Kubernetes client se nepoužívá. Lokální implementace protokolu žije
+v :mod:`common.workflow.local_runtime`.
 """
 
 from __future__ import annotations
@@ -13,7 +16,9 @@ import subprocess
 import threading
 import time
 import unicodedata
-from typing import Any
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
 
 import yaml
 
@@ -22,7 +27,42 @@ from common.workflow.schema import WorkflowFile, WorkflowStep
 
 WORKFLOW_LABEL = "agentis.workflow"
 
+#: Kolik řádek logu se posílá do Agentisu při selhání kroku.
+LOG_TAIL_LINES = 50
+
 _KUBECTL_TIMEOUT_SEC = 60.0
+
+
+@dataclass(frozen=True)
+class StepResult:
+    """Výsledek jednoho workflow kroku; `log_tail` je vyplněný jen při neúspěchu."""
+
+    status: str  # "succeeded" | "failed" | "timeout" | "aborted"
+    log_tail: str = ""
+
+
+class WorkflowStepRunner(Protocol):
+    """Exekuce workflow kroků; orchestraci (pořadí, `if`, outputs) drží WorkflowManager."""
+
+    def prepare(self, workflow: WorkflowFile, *, namespace: str, run_dir: Path) -> None: ...
+
+    def has_active_run(self, namespace: str, task_label: str) -> bool: ...
+
+    def run_step(
+        self,
+        workflow: WorkflowFile,
+        step: WorkflowStep,
+        *,
+        namespace: str,
+        name: str,
+        labels: dict[str, str],
+        env: dict[str, str],
+        timeout: float,
+        abort_event: threading.Event,
+        run_dir: Path,
+    ) -> StepResult: ...
+
+    def abort(self, namespace: str, labels: dict[str, str]) -> str: ...
 
 
 def safe_step_name(name: str) -> str:
@@ -122,6 +162,44 @@ class KubectlJobRunner:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
+    # ------------------------------------------------------------------
+    # WorkflowStepRunner protokol
+    # ------------------------------------------------------------------
+
+    def prepare(self, workflow: WorkflowFile, *, namespace: str, run_dir: Path) -> None:
+        self.ensure_namespace(namespace)
+
+    def has_active_run(self, namespace: str, task_label: str) -> bool:
+        return self.has_active_jobs(namespace, task_label)
+
+    def run_step(
+        self,
+        workflow: WorkflowFile,
+        step: WorkflowStep,
+        *,
+        namespace: str,
+        name: str,
+        labels: dict[str, str],
+        env: dict[str, str],
+        timeout: float,
+        abort_event: threading.Event,
+        run_dir: Path,
+    ) -> StepResult:
+        manifest = build_job_manifest(workflow, step, namespace=namespace, name=name, labels=labels, env=env)
+        self.apply_job(manifest)
+        status = self.wait_for_job(namespace, name, timeout=timeout, abort_event=abort_event)
+        log_tail = ""
+        if status not in {"succeeded", "aborted"}:
+            log_tail = self.job_log_tail(namespace, name, lines=LOG_TAIL_LINES)
+        return StepResult(status=status, log_tail=log_tail)
+
+    def abort(self, namespace: str, labels: dict[str, str]) -> str:
+        return self.delete_jobs_by_labels(namespace, labels)
+
+    # ------------------------------------------------------------------
+    # kubectl primitives
+    # ------------------------------------------------------------------
+
     def _run(self, *args: str, stdin: str | None = None, timeout: float = _KUBECTL_TIMEOUT_SEC) -> str:
         completed = subprocess.run(
             [self.settings.kubectl_command, *args],
@@ -211,8 +289,11 @@ class KubectlJobRunner:
 
 
 __all__ = [
+    "LOG_TAIL_LINES",
     "WORKFLOW_LABEL",
     "KubectlJobRunner",
+    "StepResult",
+    "WorkflowStepRunner",
     "build_bash_wrapper",
     "build_job_manifest",
     "job_labels",

@@ -65,6 +65,7 @@ class Settings:
     namespace_prefix: str = "Task"
     project_run_root: Path = Path("/tmp/agentis")
     kubectl_command: str = "kubectl"
+    workflow_executor: str = "kubernetes"
     agentis_ws_endpoint: str | None = None
     agentis_adapter_id: str | None = None
     websocket_heartbeat_interval: float = 30.0
@@ -124,6 +125,7 @@ def _build_settings() -> Settings:
             _get_env(env, "ADAPTER_PROJECT_RUN_ROOT", "/tmp/agentis") or "/tmp/agentis"
         ).resolve(),
         kubectl_command=_get_env(env, "KUBECTL_COMMAND", "kubectl") or "kubectl",
+        workflow_executor=(_get_env(env, "WORKFLOW_EXECUTOR", "kubernetes") or "kubernetes").strip().lower(),
         agentis_ws_endpoint=_get_env(env, "AGENTIS_WS_ENDPOINT"),
         agentis_adapter_id=_get_env(env, "AGENTIS_ADAPTER_ID"),
         websocket_heartbeat_interval=float(_get_env(env, "AGENTIS_WS_HEARTBEAT_INTERVAL", "30") or "30"),

@@ -7,7 +7,7 @@ Samostatny FastAPI JSON-RPC adapter pro agenta. Projekt nema zadnou databazi a d
 - pasivni WebSocket transport prijima JSON-RPC 2.0 metody `start`, `add_message`, `question`, `approve`, `git_merge`, `abort`, `close` z Agentisu pres odchozi spojeni
 - aktivitu agenta (komentare, dokoncovaci akce, adapter eventy) adapter cte primo z postupneho vystupu `opencode`/`claude` CLI a forwarduje do endpointu z `AGENTIS_ENDPOINT` — agent runtime uz nedela zadne callbacky zpet do adapteru
 - `GET /health` na ASGI aplikaci pro healthcheck (adapter ale neposlucha na zadnem inbound portu)
-- `start` vytvori git branch a worktree podle `task_id` a spusti agenta lokalne (environment `local`); s `context.adapter.runtime = "workflow"` se misto toho spusti deklarativni workflow (kroky jako Kubernetes Joby pres `kubectl`)
+- `start` vytvori git branch a worktree podle `task_id` a spusti agenta lokalne (environment `local`); s `context.adapter.runtime = "workflow"` se misto toho spusti deklarativni workflow (kroky podle executoru jako Kubernetes Joby pres `kubectl`, nebo jako lokalni bash procesy — viz `WORKFLOW_EXECUTOR`)
 
 ## Vyvojarska dokumentace
 
@@ -99,6 +99,7 @@ Script umi:
 - `AGENTIS_WS_RECONNECT_MAX_DELAY` default `30`
 - `AGENTIS_WS_RECONNECT_MAX_ATTEMPTS` default `0` znamena neomezene reconnect pokusy
 - `ADAPTER_NAMESPACE_PREFIX` default `Task`; pouzije se pro namespace workflow Jobu ve tvaru `<prefix>-<task_number>-<prvnich 20 znaku title>`, vysledek se normalizuje pro Kubernetes DNS label
+- `WORKFLOW_EXECUTOR` default `kubernetes`; urcuje, kde bezi kroky workflow runtime (`kubernetes` = Joby pres `kubectl`, `local` = lokalni bash procesy nad worktree); workflow YAML to muze prebit polem `workflow.executor`
 - `ADAPTER_WORKSPACE_ROOT` default root tohoto repozitare
 - `ADAPTER_MAIN_DIR` default hodnota `ADAPTER_WORKSPACE_ROOT`
 - `ADAPTER_PUBLIC_URL` optional verejna nebo clusterova base URL adapteru; pokud chybi, adapter zkusi slozit cluster DNS z `K8S_SERVICE_NAME` a `K8S_NAMESPACE`

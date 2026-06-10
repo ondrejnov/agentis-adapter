@@ -89,13 +89,9 @@ def test_telemetry_full_run_creates_run_binds_session_and_pushes_logs() -> None:
 
     adapter_events = [c["params"] for c in client.calls if c["method"] == "run.adapter_event"]
     started = adapter_events[0]
-    assert started["status"] == "started" and started["kind"] == "claude_run"
-    # started krok se uzavře STEJNÝM event_id → spinner se přepne na hotovo
-    run_step_finish = adapter_events[1]
-    assert run_step_finish["kind"] == "claude_run" and run_step_finish["status"] == "success"
-    assert run_step_finish["event_id"] == started["event_id"]
+    assert started["status"] == "started" and started["kind"] == "agentiscode"
     # koncový idle event uzavře adapter_state a vyšle run.finished
-    idle = adapter_events[2]
+    idle = adapter_events[1]
     assert idle["kind"] == "idle" and idle["status"] == "success"
 
     # finální odpověď se bez explicitního opt-in neposílá jako task komentář

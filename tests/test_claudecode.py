@@ -321,15 +321,15 @@ def test_session_manager_send_resumes_unknown_session_after_adapter_restart(monk
     assert spawned[0][1]["resume_id"] == "sess-1"
 
 
-def test_question_reply_is_not_implemented():
+def test_question_reply_is_silently_ignored():
     adapter = ClaudeCodeAdapterService(
         context=make_context(),
         settings=make_settings(),
         session_manager=MagicMock(spec=ClaudeSessionManager),
     )
 
-    with pytest.raises(NotImplementedError):
-        adapter.question_reply("req-1", [["ano"]])
+    # Claude adapter předávání odpovědí nepodporuje; base implementace ho tiše skipne.
+    assert adapter.question_reply("req-1", [["ano"]]) is None
 
 
 def test_close_aborts_session_and_cleans_worktree(monkeypatch):

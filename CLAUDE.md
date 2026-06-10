@@ -23,7 +23,7 @@
 ## Gotchas
 
 - Agenti beží jen v environmentech `local` (CLI proces na hostu) a `workflow` (`context.adapter.runtime = "workflow"`). Environment `kubernetes` byl odstraněn.
-- Workflow runtime spouští kroky jako Kubernetes Joby přes `kubectl` (`common/workflow/`) a vyžaduje platný kube context.
+- Workflow runtime spouští kroky podle executoru (`workflow.executor` v YAML, jinak env `WORKFLOW_EXECUTOR`, default `kubernetes`): `kubernetes` = Kubernetes Joby přes `kubectl` (vyžaduje platný kube context a `image`), `local` = lokální bash procesy nad worktree (`common/workflow/local_runtime.py`, K8s pole jako `image`/`volumes` se ignorují).
 
 ##  Agentis
 - aplikace komunukuje s ticket systémem Agentis pres json AgentisJsonRpcClient

@@ -163,10 +163,17 @@ class WorkflowStep(BaseModel):
         return value
 
 
+#: Podporované executory workflow kroků: Kubernetes Joby vs. lokální bash procesy.
+WORKFLOW_EXECUTORS = ("kubernetes", "local")
+
+
 class WorkflowSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    image: str
+    #: Kde kroky poběží; bez hodnoty platí default adapteru (`WORKFLOW_EXECUTOR`).
+    executor: Literal["kubernetes", "local"] | None = None
+    #: Container image; povinný jen pro executor `kubernetes` (validuje WorkflowManager).
+    image: str | None = None
     workingDir: str | None = None
     timeoutSeconds: int = 14400
     ttlSecondsAfterFinished: int = 3600
@@ -206,6 +213,7 @@ def load_workflow_file(path: str | Path, values: dict[str, str]) -> WorkflowFile
 __all__ = [
     "WORKFLOW_FILE_RELPATH",
     "PROJECT_WORKFLOW_FILE_RELPATH",
+    "WORKFLOW_EXECUTORS",
     "INTERPOLATION_ALLOWLIST",
     "WorkflowConditionError",
     "WorkflowInterpolationError",

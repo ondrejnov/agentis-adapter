@@ -1,4 +1,4 @@
-"""Testy deklarativního Kubernetes workflow režimu."""
+"""Testy deklarativního workflow režimu (Kubernetes i lokální executor)."""
 
 from __future__ import annotations
 
@@ -14,8 +14,9 @@ from pydantic import ValidationError
 from common.config import Settings
 from common.models import AddMessageParams, AgentExecutionContextPayload, StartParams, AbortParams, QuestionParams
 from common.rpc.jsonrpc import AgentJsonRpcException, AgentJsonRpcService
+from common.workflow.local_runtime import LocalProcessRunner
 from common.workflow.manager import WorkflowBusyError, WorkflowManager
-from common.workflow.runtime import build_bash_wrapper, build_job_manifest, job_labels, job_name
+from common.workflow.runtime import StepResult, build_bash_wrapper, build_job_manifest, job_labels, job_name
 from common.workflow.schema import (
     PROJECT_WORKFLOW_FILE_RELPATH,
     WORKFLOW_FILE_RELPATH,
@@ -119,7 +120,7 @@ workflow:
 """
 
 
-def _settings(tmp_path: Path) -> Settings:
+def _settings(tmp_path: Path, workflow_executor: str = "kubernetes") -> Settings:
     return Settings(
         host="127.0.0.1",
         port=8001,
@@ -128,6 +129,7 @@ def _settings(tmp_path: Path) -> Settings:
         agentis_endpoint=None,
         agentis_token=None,
         project_run_root=tmp_path / "tmp-agentis",
+        workflow_executor=workflow_executor,
     )
 
 
@@ -304,39 +306,59 @@ def test_job_manifest_generation(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Workflow manager (fake kubectl runner)
+# Workflow manager (fake step runner)
 # ---------------------------------------------------------------------------
 
 
 class FakeRunner:
+    """Fake implementace WorkflowStepRunner protokolu — zaznamenává spuštěné kroky."""
+
     def __init__(self) -> None:
-        self.applied: list[dict[str, Any]] = []
+        self.steps: list[dict[str, Any]] = []
         self.deleted: list[tuple[str, dict[str, str]]] = []
-        self.namespaces: list[str] = []
+        self.prepared: list[str] = []
         self.results: list[str] = []
         self.release = threading.Event()
         self.release.set()
         self.log_tail = "boom log"
+        self.active = False
 
-    def ensure_namespace(self, namespace: str) -> None:
-        self.namespaces.append(namespace)
+    def prepare(self, workflow, *, namespace: str, run_dir: Path) -> None:
+        self.prepared.append(namespace)
 
-    def apply_job(self, manifest: dict[str, Any]) -> None:
-        self.applied.append(manifest)
+    def has_active_run(self, namespace: str, task_label: str) -> bool:
+        return self.active
 
-    def wait_for_job(self, namespace: str, name: str, *, timeout: float, abort_event=None, interval: float = 0.0) -> str:
+    def run_step(
+        self,
+        workflow,
+        step,
+        *,
+        namespace: str,
+        name: str,
+        labels: dict[str, str],
+        env: dict[str, str],
+        timeout: float,
+        abort_event: threading.Event,
+        run_dir: Path,
+    ) -> StepResult:
+        self.steps.append(
+            {
+                "step": step.name,
+                "name": name,
+                "namespace": namespace,
+                "labels": dict(labels),
+                "env": dict(env),
+                "timeout": timeout,
+            }
+        )
         self.release.wait(timeout=5.0)
-        return self.results.pop(0) if self.results else "succeeded"
+        status = self.results.pop(0) if self.results else "succeeded"
+        return StepResult(status=status, log_tail="" if status == "succeeded" else self.log_tail)
 
-    def job_log_tail(self, namespace: str, name: str, *, lines: int = 50) -> str:
-        return self.log_tail
-
-    def delete_jobs_by_labels(self, namespace: str, labels: dict[str, str]) -> str:
+    def abort(self, namespace: str, labels: dict[str, str]) -> str:
         self.deleted.append((namespace, labels))
         return "job deleted"
-
-    def has_active_jobs(self, namespace: str, task_label: str) -> bool:
-        return False
 
 
 def _manager(tmp_path: Path, runner: FakeRunner) -> tuple[WorkflowManager, list[tuple[str, dict[str, Any]]]]:
@@ -400,12 +422,11 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
     ]
     assert any(method == "run.adapter_event" and params["kind"] == "idle" and params["status"] == "success" for method, params in calls)
 
-    # prompt ani token nejsou v žádném Job manifestu
-    assert len(runner.applied) == 2
-    for manifest in runner.applied:
-        dumped = json.dumps(manifest)
-        assert "udelej X" not in dumped
-        env = {item["name"]: item["value"] for item in manifest["spec"]["template"]["spec"]["containers"][0]["env"]}
+    # prompt ani token nejdou do prostředí kroků — jen cesta k prompt souboru
+    assert len(runner.steps) == 2
+    for record in runner.steps:
+        env = record["env"]
+        assert "udelej X" not in json.dumps(env)
         assert env["AGENTIS_PROMPT_FILE"] == str(prompt_file)
         assert env["AGENTIS_RUN_ID"] == "run-12345678"
         assert env["AGENTIS_MODEL"] == "openai/gpt-5"
@@ -433,13 +454,12 @@ def test_conditional_step_is_skipped_and_vars_flow_into_env(tmp_path: Path) -> N
 
     assert manager._runs[context.task_id].status == "success"
 
-    # prostřední krok se nespustil jako Job
-    step_indexes = [manifest["metadata"]["labels"]["agentis.step_index"] for manifest in runner.applied]
+    # prostřední krok se nespustil
+    step_indexes = [record["labels"]["agentis.step_index"] for record in runner.steps]
     assert step_indexes == ["0", "2"]
 
     # proměnná z prvního kroku je env pro kroky po něm
-    env = {item["name"]: item["value"] for item in runner.applied[1]["spec"]["template"]["spec"]["containers"][0]["env"]}
-    assert env["ENV_READY"] == "true"
+    assert runner.steps[1]["env"]["ENV_READY"] == "true"
 
     # přeskočení se reportuje jako workflow_step se statusem skipped
     skip_events = [
@@ -475,7 +495,7 @@ def test_conditional_step_runs_when_condition_holds(tmp_path: Path) -> None:
     manager.start_workflow(context, str(worktree), "udelej X")
     _wait_done(manager, context.task_id)
 
-    step_indexes = [manifest["metadata"]["labels"]["agentis.step_index"] for manifest in runner.applied]
+    step_indexes = [record["labels"]["agentis.step_index"] for record in runner.steps]
     assert step_indexes == ["0", "1", "2"]
 
 
@@ -515,9 +535,9 @@ def test_project_scope_uses_project_yaml_and_run_dir_outside_project(tmp_path: P
     assert comment_calls[0]["status"] == 5
     assert any(method == "run.store_session_id" for method, _ in calls)
 
-    # Job dostane cesty do run dir, workdir zůstává projektový adresář
-    assert len(runner.applied) == 1
-    env = {item["name"]: item["value"] for item in runner.applied[0]["spec"]["template"]["spec"]["containers"][0]["env"]}
+    # krok dostane cesty do run dir, workdir zůstává projektový adresář
+    assert len(runner.steps) == 1
+    env = runner.steps[0]["env"]
     assert env["AGENTIS_RUN_DIR"] == str(run_dir)
     assert env["AGENTIS_PROMPT_FILE"] == str(run_dir / "prompt.md")
     assert env["RUN_DIR"] == str(run_dir)
@@ -546,7 +566,7 @@ def test_failed_step_stops_workflow_and_reports_log_tail(tmp_path: Path) -> None
     manager.start_workflow(context, str(worktree), "udelej X")
     _wait_done(manager, context.task_id)
 
-    assert len(runner.applied) == 1  # druhý krok se už nespustil
+    assert len(runner.steps) == 1  # druhý krok se už nespustil
     failed_events = [
         params
         for method, params in calls
@@ -569,6 +589,221 @@ def test_abort_deletes_jobs_by_labels_without_session_id(tmp_path: Path) -> None
     namespace, labels = runner.deleted[0]
     assert labels == {"agentis.task_id": "task-77", "agentis.run_id": "run-12345678"}
     assert namespace
+
+
+# ---------------------------------------------------------------------------
+# Local executor (LocalProcessRunner, skutečné bash procesy)
+# ---------------------------------------------------------------------------
+
+
+LOCAL_WORKFLOW_YAML = """
+version: 1
+workflow:
+  executor: local
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 30
+  steps:
+    - name: Run agent
+      run: |
+        [ -z "${AGENTIS_TOKEN:-}" ]
+        mkdir -p .agentis/outputs
+        printf 'Hotovo lokálně: %s' "$(cat "$AGENTIS_PROMPT_FILE")" > .agentis/outputs/final-comment.md
+        printf 'ses_local' > .agentis/outputs/session-id
+      outputs:
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/final-comment.md
+          status: 4
+        - type: session_id
+          valueFrom: .agentis/outputs/session-id
+"""
+
+
+LOCAL_NO_EXECUTOR_YAML = """
+version: 1
+workflow:
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 30
+  steps:
+    - name: Echo
+      run: |
+        mkdir -p .agentis/outputs
+        printf 'ok' > .agentis/outputs/final-comment.md
+      outputs:
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/final-comment.md
+          status: 4
+"""
+
+
+LOCAL_FAILING_WORKFLOW_YAML = """
+version: 1
+workflow:
+  executor: local
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 30
+  steps:
+    - name: Boom
+      run: |
+        echo "neco se pokazilo"
+        exit 7
+    - name: Never
+      run: echo nikdy
+"""
+
+
+LOCAL_SLEEPING_WORKFLOW_YAML = """
+version: 1
+workflow:
+  executor: local
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 30
+  steps:
+    - name: Sleep
+      timeoutSeconds: {timeout}
+      run: sleep 30
+"""
+
+
+def _write_workflow_yaml(worktree: Path, yaml_text: str) -> None:
+    path = worktree / WORKFLOW_FILE_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml_text, encoding="utf-8")
+
+
+def _local_manager(
+    tmp_path: Path, workflow_executor: str = "kubernetes"
+) -> tuple[WorkflowManager, list[tuple[str, dict[str, Any]]]]:
+    manager = WorkflowManager(_settings(tmp_path, workflow_executor=workflow_executor))
+    calls: list[tuple[str, dict[str, Any]]] = []
+    manager._agentis_call = lambda method, params: calls.append((method, params))  # type: ignore[method-assign]
+    return manager, calls
+
+
+def test_local_executor_runs_steps_as_processes_and_applies_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # token adapter procesu nesmí prosáknout do prostředí kroků (krok si to sám kontroluje)
+    monkeypatch.setenv("AGENTIS_TOKEN", "super-secret")
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, LOCAL_WORKFLOW_YAML)
+    manager, calls = _local_manager(tmp_path)
+    context = _context()
+
+    result = manager.start_workflow(context, str(worktree), "udelej X")
+    assert result["executor"] == "local"
+    _wait_done(manager, context.task_id)
+
+    run = manager._runs[context.task_id]
+    assert run.status == "success"
+    assert isinstance(run.runner, LocalProcessRunner)
+
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert len(comment_calls) == 1
+    assert comment_calls[0]["body"] == "Hotovo lokálně: udelej X"
+    assert any(method == "run.store_session_id" for method, _ in calls)
+
+    # každý krok má log soubor v run dir
+    logs = list((run.run_dir / "logs").glob("*.log"))
+    assert len(logs) == 1
+
+
+def test_local_executor_from_settings_default_without_image(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, LOCAL_NO_EXECUTOR_YAML)
+    manager, calls = _local_manager(tmp_path, workflow_executor="local")
+    context = _context()
+
+    result = manager.start_workflow(context, str(worktree), "udelej X")
+    assert result["executor"] == "local"
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "success"
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert comment_calls[0]["body"] == "ok"
+
+
+def test_local_executor_failed_step_stops_workflow_and_reports_log_tail(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, LOCAL_FAILING_WORKFLOW_YAML)
+    manager, calls = _local_manager(tmp_path)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    run = manager._runs[context.task_id]
+    assert run.status == "failed"
+    failed_events = [
+        params
+        for method, params in calls
+        if method == "run.adapter_event" and params["kind"] == "workflow_step" and params["status"] == "failed"
+    ]
+    assert len(failed_events) == 1
+    assert failed_events[0]["data"]["result"] == "failed"
+    assert "neco se pokazilo" in failed_events[0]["data"]["log_tail"]
+    # druhý krok se už nespustil
+    assert len(list((run.run_dir / "logs").glob("*.log"))) == 1
+    assert not any(method == "task.add_agent_comment" for method, _ in calls)
+
+
+def test_local_executor_step_timeout(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, LOCAL_SLEEPING_WORKFLOW_YAML.format(timeout=1))
+    manager, calls = _local_manager(tmp_path)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id, timeout=15.0)
+
+    assert manager._runs[context.task_id].status == "failed"
+    failed_events = [
+        params
+        for method, params in calls
+        if method == "run.adapter_event" and params["kind"] == "workflow_step" and params["status"] == "failed"
+    ]
+    assert failed_events[0]["data"]["result"] == "timeout"
+
+
+def test_local_executor_abort_kills_running_process(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, LOCAL_SLEEPING_WORKFLOW_YAML.format(timeout=30))
+    manager, _calls = _local_manager(tmp_path)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    run = manager._runs[context.task_id]
+
+    # počkej, až krok skutečně běží jako proces
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not run.runner.has_active_run(run.namespace, "task-77"):
+        time.sleep(0.05)
+    assert run.runner.has_active_run(run.namespace, "task-77")
+
+    result = manager.abort(context)
+    assert result["action"] == "abort"
+    _wait_done(manager, context.task_id)
+
+    assert run.status == "aborted"
+    assert not run.runner.has_active_run(run.namespace, "task-77")
+
+
+def test_kubernetes_executor_requires_image(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, LOCAL_NO_EXECUTOR_YAML)  # bez image, executor default = kubernetes
+    manager, _calls = _manager(tmp_path, FakeRunner())
+
+    with pytest.raises(ValueError, match="image"):
+        manager.start_workflow(_context(), str(worktree), "udelej X")
+
+
+def test_workflow_schema_rejects_unknown_executor(tmp_path: Path) -> None:
+    path = tmp_path / "ci.yaml"
+    path.write_text(
+        "version: 1\nworkflow:\n  executor: docker\n  steps:\n    - name: a\n      run: echo\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError):
+        load_workflow_file(path, _values(tmp_path))
 
 
 # ---------------------------------------------------------------------------
@@ -640,10 +875,9 @@ def test_jsonrpc_add_message_reruns_ci_workflow_with_resume_session(tmp_path: Pa
     assert run.prompt_file == worktree / ".agentis" / "runs" / run.attempt_id / "prompt.md"
     assert run.prompt_file.read_text(encoding="utf-8") == "oprav to"
 
-    # session id z předchozího běhu jde do Jobu, aby agent mohl navázat (--resume)
-    for manifest in runner.applied:
-        env = {item["name"]: item["value"] for item in manifest["spec"]["template"]["spec"]["containers"][0]["env"]}
-        assert env["AGENTIS_SESSION_ID"] == "ses_42"
+    # session id z předchozího běhu jde do kroků, aby agent mohl navázat (--resume)
+    for record in runner.steps:
+        assert record["env"]["AGENTIS_SESSION_ID"] == "ses_42"
 
 
 def test_jsonrpc_add_message_project_scope_skips_worktree_and_resumes_session(tmp_path: Path) -> None:
@@ -670,8 +904,8 @@ def test_jsonrpc_add_message_project_scope_skips_worktree_and_resumes_session(tm
     assert run.prompt_file.read_text(encoding="utf-8") == "oprav to"
     assert not (project_dir / ".agentis" / "runs").exists()
 
-    assert len(runner.applied) == 1
-    env = {item["name"]: item["value"] for item in runner.applied[0]["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert len(runner.steps) == 1
+    env = runner.steps[0]["env"]
     assert env["AGENTIS_SESSION_ID"] == "ses_42"
     assert env["WORKDIR"] == str(project_dir)
 

@@ -1,9 +1,10 @@
 """Background orchestrace deklarativního workflow režimu.
 
 `WorkflowManager` drží běžící workflow runy per task, spouští jednotlivé kroky
-jako Kubernetes Joby přes :class:`KubectlJobRunner` a po úspěšném dokončení
-celého workflow aplikuje `outputs` do Agentisu. `start` / `add_message` vrací
-rychle — workflow běží v daemon threadu.
+přes :class:`WorkflowStepRunner` (Kubernetes Joby přes :class:`KubectlJobRunner`,
+nebo lokální bash procesy přes :class:`LocalProcessRunner` — podle executoru)
+a po úspěšném dokončení celého workflow aplikuje `outputs` do Agentisu.
+`start` / `add_message` vrací rychle — workflow běží v daemon threadu.
 """
 
 from __future__ import annotations
@@ -25,9 +26,11 @@ from common.git_adapter import GitAdapterService
 from common.namespaces import namespace_for_context
 from common.models import AgentExecutionContextPayload
 from common.session_manager import BaseSessionManager
-from common.workflow.runtime import KubectlJobRunner, build_job_manifest, job_labels, job_name, safe_step_name
+from common.workflow.local_runtime import LocalProcessRunner
+from common.workflow.runtime import KubectlJobRunner, WorkflowStepRunner, job_labels, job_name, safe_step_name
 from common.workflow.schema import (
     PROJECT_WORKFLOW_FILE_RELPATH,
+    WORKFLOW_EXECUTORS,
     WORKFLOW_FILE_RELPATH,
     WorkflowFile,
     WorkflowOutput,
@@ -35,8 +38,6 @@ from common.workflow.schema import (
     evaluate_condition,
     load_workflow_file,
 )
-
-_LOG_TAIL_LINES = 50
 
 
 class WorkflowBusyError(RuntimeError):
@@ -54,6 +55,8 @@ class _WorkflowRun:
     output_root: Path
     prompt_file: Path
     context_file: Path
+    executor: str
+    runner: WorkflowStepRunner
     abort_event: threading.Event = field(default_factory=threading.Event)
     thread: Optional[threading.Thread] = None
     status: str = "running"
@@ -70,11 +73,24 @@ class _WorkflowRun:
 class WorkflowManager:
     """Owns background workflow runs keyed by task_id."""
 
-    def __init__(self, settings: Settings, runner: KubectlJobRunner | None = None) -> None:
+    def __init__(self, settings: Settings, runner: WorkflowStepRunner | None = None) -> None:
         self.settings = settings
-        self._runner = runner or KubectlJobRunner(settings)
+        #: Explicitní runner (testy) má přednost před výběrem podle executoru.
+        self._runner_override = runner
+        self._runners: dict[str, WorkflowStepRunner] = {}
         self._runs: dict[str, _WorkflowRun] = {}
         self._lock = threading.Lock()
+
+    def _runner_for(self, executor: str) -> WorkflowStepRunner:
+        if self._runner_override is not None:
+            return self._runner_override
+        if executor not in WORKFLOW_EXECUTORS:
+            raise ValueError(f"Unknown workflow executor {executor!r}; expected one of {WORKFLOW_EXECUTORS}")
+        runner = self._runners.get(executor)
+        if runner is None:
+            runner = LocalProcessRunner(self.settings) if executor == "local" else KubectlJobRunner(self.settings)
+            self._runners[executor] = runner
+        return runner
 
     # ------------------------------------------------------------------
     # Public API
@@ -99,8 +115,6 @@ class WorkflowManager:
             existing = self._runs.get(context.task_id)
             if existing is not None and existing.active:
                 raise WorkflowBusyError(f"Workflow for task {context.task_id} is already running")
-        if self._runner.has_active_jobs(namespace, task_label):
-            raise WorkflowBusyError(f"Workflow jobs for task {context.task_id} are still active in {namespace}")
 
         worktree_path = Path(worktree)
         # Hex timestamp s pevnou šířkou: lexikografické řazení názvů jobů odpovídá pořadí spuštění.
@@ -118,15 +132,22 @@ class WorkflowManager:
             run_dir = self.settings.project_run_root / context.run_id / attempt_id
         else:
             run_dir = worktree_path / ".agentis" / "runs" / attempt_id
+
+        values = self._interpolation_values(context, worktree_path, namespace, run_dir=run_dir)
+        workflow = load_workflow_file(workflow_path, values)
+        executor = (workflow.workflow.executor or self.settings.workflow_executor).strip().lower()
+        runner = self._runner_for(executor)
+        if executor == "kubernetes":
+            self._require_images(workflow, workflow_relpath)
+        if runner.has_active_run(namespace, task_label):
+            raise WorkflowBusyError(f"Workflow jobs for task {context.task_id} are still active in {namespace}")
+
         run_dir.mkdir(parents=True, exist_ok=True)
         prompt_file = run_dir / "prompt.md"
         prompt_file.write_text(prompt, encoding="utf-8")
         context_file = run_dir / "context.json"
         context_dump = context.model_dump(mode="json")
         context_file.write_text(json.dumps(context_dump, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        values = self._interpolation_values(context, worktree_path, namespace, run_dir=run_dir)
-        workflow = load_workflow_file(workflow_path, values)
 
         run = _WorkflowRun(
             context=context,
@@ -138,6 +159,8 @@ class WorkflowManager:
             output_root=run_dir if is_project_scope else worktree_path,
             prompt_file=prompt_file,
             context_file=context_file,
+            executor=executor,
+            runner=runner,
         )
         with self._lock:
             self._runs[context.task_id] = run
@@ -156,12 +179,13 @@ class WorkflowManager:
             "task_id": context.task_id,
             "attempt": attempt_id,
             "namespace": namespace,
+            "executor": executor,
             "workflow_file": workflow_relpath,
             "steps": [step.name for step in workflow.workflow.steps],
         }
 
     def abort(self, context: AgentExecutionContextPayload) -> dict[str, Any]:
-        """Zruší workflow: smaže aktivní Joby podle labels (bez session_id)."""
+        """Zruší workflow: zastaví aktivní kroky podle labels (bez session_id)."""
 
         namespace = namespace_for_context(context, self.settings)
         with self._lock:
@@ -174,7 +198,8 @@ class WorkflowManager:
             "agentis.task_id": self._task_label(context),
             "agentis.run_id": self._run_label(context),
         }
-        deleted = self._runner.delete_jobs_by_labels(namespace, labels)
+        runner = run.runner if run is not None else self._runner_for(self.settings.workflow_executor)
+        deleted = runner.abort(namespace, labels)
         self._emit_adapter_event(
             context,
             kind="workflow_abort",
@@ -193,6 +218,18 @@ class WorkflowManager:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _require_images(workflow: WorkflowFile, workflow_relpath: str) -> None:
+        """Executor `kubernetes` potřebuje image pro každý krok; lokální executor je ignoruje."""
+
+        spec = workflow.workflow
+        missing = [step.name for step in spec.steps if not (step.image or spec.image)]
+        if missing:
+            raise ValueError(
+                f"Workflow executor 'kubernetes' vyžaduje 'image' v {workflow_relpath} "
+                f"(chybí pro kroky: {', '.join(missing)})"
+            )
 
     @staticmethod
     def _task_label(context: AgentExecutionContextPayload) -> str:
@@ -267,7 +304,7 @@ class WorkflowManager:
 
     def _run_workflow(self, run: _WorkflowRun) -> None:
         env = self._runtime_env(run)
-        self._runner.ensure_namespace(run.namespace)
+        run.runner.prepare(run.workflow, namespace=run.namespace, run_dir=run.run_dir)
         workflow_event_id = f"workflow:{run.context.run_id}:{run.attempt_id}"
         self._emit_adapter_event(
             run.context,
@@ -275,7 +312,7 @@ class WorkflowManager:
             status="started",
             event_id=workflow_event_id,
             message="Workflow bylo spuštěno.",
-            data={"attempt": run.attempt_id, "namespace": run.namespace},
+            data={"attempt": run.attempt_id, "namespace": run.namespace, "executor": run.executor},
         )
 
         for index, step in enumerate(run.workflow.workflow.steps):
@@ -304,14 +341,6 @@ class WorkflowManager:
                 step_name=step.name,
             )
             name = job_name(run.context.run_id, run.attempt_id, index, step.name)
-            manifest = build_job_manifest(
-                run.workflow,
-                step,
-                namespace=run.namespace,
-                name=name,
-                labels=labels,
-                env=env,
-            )
             self._emit_adapter_event(
                 run.context,
                 kind="workflow_step",
@@ -322,26 +351,29 @@ class WorkflowManager:
             )
 
             timeout = step.timeoutSeconds if step.timeoutSeconds is not None else run.workflow.workflow.timeoutSeconds
-            self._runner.apply_job(manifest)
-            result = self._runner.wait_for_job(
-                run.namespace,
-                name,
+            result = run.runner.run_step(
+                run.workflow,
+                step,
+                namespace=run.namespace,
+                name=name,
+                labels=labels,
+                env=env,
                 timeout=float(timeout),
                 abort_event=run.abort_event,
+                run_dir=run.run_dir,
             )
-            if result == "aborted":
+            if result.status == "aborted":
                 run.status = "aborted"
                 return
-            if result != "succeeded":
+            if result.status != "succeeded":
                 run.status = "failed"
-                log_tail = self._runner.job_log_tail(run.namespace, name, lines=_LOG_TAIL_LINES)
                 self._emit_adapter_event(
                     run.context,
                     kind="workflow_step",
                     status="failed",
                     event_id=step_event_id,
-                    message=f"Krok selhal ({result}): {step.name}",
-                    data={"step": step.name, "job": name, "result": result, "log_tail": log_tail},
+                    message=f"Krok selhal ({result.status}): {step.name}",
+                    data={"step": step.name, "job": name, "result": result.status, "log_tail": result.log_tail},
                 )
                 self._emit_adapter_event(
                     run.context,
@@ -349,7 +381,7 @@ class WorkflowManager:
                     status="failed",
                     event_id=workflow_event_id,
                     message="Workflow selhalo.",
-                    data={"failed_step": step.name, "result": result},
+                    data={"failed_step": step.name, "result": result.status},
                 )
                 return
 

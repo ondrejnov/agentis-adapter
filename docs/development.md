@@ -7,7 +7,7 @@ Tento dokument popisuje, jak funguje Agentis adapter, co v kodu znamena adapter,
 - **Agentis** je ridici aplikace a ticket system. Posila adapteru JSON-RPC pozadavky a prijima zpet udalosti, komentare, activity log a vysledky.
 - **Adapter proces** je dlouho bezici Python proces spusteny prikazem `agentis-adapter --adapter <typ>`. Sam se pripoji do Agentisu pres odchozi WebSocket a neposloucha verejny inbound RPC endpoint.
 - **Adapter service** je trida, ktera umi pripravit prostredi pro jeden konkretni run: git worktree, volitelny deploy, cekani na runtime, start session, pridani zpravy, abort, merge a cleanup.
-- **Runtime/environment** je skutecne prostredi, kde bezi agent. Podporovane jsou dva: `local` (CLI proces `claude`/`opencode run` primo na hostu, default) a `workflow` (`context.adapter.runtime = "workflow"`, deklarativni kroky bezici jako Kubernetes Joby).
+- **Runtime/environment** je skutecne prostredi, kde bezi agent. Podporovane jsou dva: `local` (CLI proces `claude`/`opencode run` primo na hostu, default) a `workflow` (`context.adapter.runtime = "workflow"`, deklarativni kroky bezici podle executoru jako Kubernetes Joby, nebo jako lokalni bash procesy).
 - **Session** je dlouhodobejsi konverzacni kontext konkretniho agenta. V Agentisu se persistuje `session_id`, aby dalsi `add_message` navazal na stejnou agenti session.
 - **Run** je jedno zpracovani tasku nebo jedne zpravy v Agentisu. Run nese `run_id`, `task_id`, prompt, metadata projektu a volby adapteru.
 - **Activity log** je prubezny log udalosti agenta normalizovany do formatu, ktery Agentis umi zobrazit jako prubeh prace.
@@ -246,9 +246,20 @@ Project scope:
 Pri `context.adapter.runtime = "workflow"` neresi run zadnou CLI session.
 `common/workflow/manager.py::WorkflowManager` nacte workflow YAML
 (`.agentis/ci.yaml`, pro project scope `.agentis/project.yaml`), zmrazi ho a na
-pozadi spousti jednotlive kroky jako Kubernetes Joby pres
-`common/workflow/runtime.py::KubectlJobRunner` (`kubectl apply`/`wait`/`logs`).
-Namespace Jobu se odvozuje z kontextu pres `common/namespaces.py::namespace_for_context`.
+pozadi spousti jednotlive kroky pres `WorkflowStepRunner` protokol. Kde kroky
+bezi, urcuje **executor**: `workflow.executor` ve workflow YAML, jinak env
+promenna `WORKFLOW_EXECUTOR` (default `kubernetes`).
+
+- `kubernetes` — kroky bezi jako Kubernetes Joby pres
+  `common/workflow/runtime.py::KubectlJobRunner` (`kubectl apply`/`wait`/`logs`);
+  vyzaduje platny kube context a `image` ve workflow YAML. Namespace Jobu se
+  odvozuje z kontextu pres `common/namespaces.py::namespace_for_context`.
+- `local` — kroky bezi jako lokalni bash procesy nad worktree pres
+  `common/workflow/local_runtime.py::LocalProcessRunner`; bez Kubernetes.
+  Pole `image`, `volumes`, `volumeMounts`, `imagePullSecrets` a `resources`
+  se ignoruji, logy kroku jdou do `<run_dir>/logs/`, `AGENTIS_TOKEN` adapter
+  procesu se do prostredi kroku nepropisuje.
+
 Po uspesnem dokonceni se aplikuji `outputs` (agent_comment, session_id, url,
 text, artifact, var) do Agentisu.
 
@@ -449,6 +460,6 @@ Dusledky a odlisnosti:
 | `common/session_manager.py` | Background session lifecycle, streaming, finalizace. |
 | `opencode/*` | OpenCode adapter, runner, session manager a mapper. |
 | `claude/*` | Claude adapter, client, session manager a mapper. |
-| `common/workflow/*` | Workflow runtime: manager, KubectlJobRunner a schema. |
+| `common/workflow/*` | Workflow runtime: manager, KubectlJobRunner, LocalProcessRunner a schema. |
 | `common/namespaces.py` | Odvozeni Kubernetes namespace a dev-server URL z kontextu. |
 | `slack/*` | Slack ingestion adapter: socket-mode listener, mention->task service, guards a text helpery. |

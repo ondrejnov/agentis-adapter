@@ -102,4 +102,9 @@ RUN npm install prettier -g
 RUN npm install -g @anthropic-ai/claude-code@2.1.170
 RUN npm install -g opencode-ai@1.16.2 opencode-linux-x64-baseline@1.16.2
 
+# kubectl pro workflow kroky (apply DevServer CR pro agentis-kubernetes-operator)
+RUN KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" \
+    && curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+    && chmod +x /usr/local/bin/kubectl
+
 CMD ["opencode", "web", "--hostname", "0.0.0.0"]
