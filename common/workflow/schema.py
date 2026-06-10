@@ -9,11 +9,12 @@ workflow runu — pozdější změny ve worktree běžící workflow neovlivní.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 WORKFLOW_FILE_RELPATH = ".agentis/workflows/ci.yaml"
 
@@ -65,10 +66,59 @@ def _coerce_env(value: dict[str, Any]) -> dict[str, str]:
     return {key: str(item) for key, item in value.items()}
 
 
+#: Jména workflow proměnných musí být env-safe — injektují se do prostředí dalších kroků.
+_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+#: Podmínka kroku: `VAR`, `!VAR`, `VAR == hodnota`, `VAR != 'hodnota'`.
+_CONDITION_RE = re.compile(
+    r"^\s*(?P<neg>!)?\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:\s*(?P<op>==|!=)\s*(?P<value>'[^']*'|\"[^\"]*\"|[^\s'\"]+))?\s*$"
+)
+
+#: Hodnoty považované za nepravdivé v holém `VAR` / `!VAR` testu (case-insensitive).
+_FALSY_VALUES = {"", "0", "false", "no"}
+
+
+class WorkflowConditionError(ValueError):
+    pass
+
+
+def parse_condition(expression: str) -> re.Match[str]:
+    """Zvaliduje syntaxi `if` podmínky a vrátí match s groupami neg/name/op/value."""
+
+    match = _CONDITION_RE.match(expression)
+    if match is None:
+        raise WorkflowConditionError(
+            f"Invalid workflow condition {expression!r}; expected VAR, !VAR, VAR == value or VAR != value"
+        )
+    if match.group("neg") and match.group("op"):
+        raise WorkflowConditionError(f"Invalid workflow condition {expression!r}; cannot combine '!' with comparison")
+    return match
+
+
+def evaluate_condition(expression: str, variables: Mapping[str, str]) -> bool:
+    """Vyhodnotí `if` podmínku kroku nad proměnnými z předchozích kroků.
+
+    Neznámá proměnná se chová jako prázdný string, holý test bere
+    ``""``/``0``/``false``/``no`` jako nepravdu.
+    """
+
+    match = parse_condition(expression)
+    actual = (variables.get(match.group("name")) or "").strip()
+    op = match.group("op")
+    if op is None:
+        truthy = actual.lower() not in _FALSY_VALUES
+        return not truthy if match.group("neg") else truthy
+    expected = match.group("value")
+    if expected[0] in {"'", '"'}:
+        expected = expected[1:-1]
+    return actual == expected if op == "==" else actual != expected
+
+
 class WorkflowOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["agent_comment", "session_id", "url", "text", "artifact"]
+    type: Literal["agent_comment", "session_id", "url", "text", "artifact", "var"]
     label: str | None = None
     bodyFrom: str | None = None
     valueFrom: str | None = None
@@ -76,12 +126,22 @@ class WorkflowOutput(BaseModel):
     path: str | None = None
     name: str | None = None
 
+    @model_validator(mode="after")
+    def validate_var_output(self) -> WorkflowOutput:
+        if self.type == "var":
+            if not self.name or not _VAR_NAME_RE.match(self.name):
+                raise ValueError("var output requires an env-safe 'name' ([A-Za-z_][A-Za-z0-9_]*)")
+            if not self.valueFrom:
+                raise ValueError("var output requires 'valueFrom'")
+        return self
+
 
 class WorkflowStep(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     name: str
     run: str
+    if_: str | None = Field(default=None, alias="if")
     image: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     workingDir: str | None = None
@@ -94,6 +154,13 @@ class WorkflowStep(BaseModel):
     @classmethod
     def coerce_env(cls, value: Any) -> Any:
         return _coerce_env(value) if isinstance(value, dict) else value
+
+    @field_validator("if_")
+    @classmethod
+    def validate_condition_syntax(cls, value: str | None) -> str | None:
+        if value is not None:
+            parse_condition(value)
+        return value
 
 
 class WorkflowSpec(BaseModel):
@@ -140,11 +207,14 @@ __all__ = [
     "WORKFLOW_FILE_RELPATH",
     "PROJECT_WORKFLOW_FILE_RELPATH",
     "INTERPOLATION_ALLOWLIST",
+    "WorkflowConditionError",
     "WorkflowInterpolationError",
     "WorkflowOutput",
     "WorkflowStep",
     "WorkflowSpec",
     "WorkflowFile",
+    "evaluate_condition",
     "interpolate_tokens",
     "load_workflow_file",
+    "parse_condition",
 ]

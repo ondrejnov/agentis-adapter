@@ -31,6 +31,8 @@ from common.workflow.schema import (
     WORKFLOW_FILE_RELPATH,
     WorkflowFile,
     WorkflowOutput,
+    WorkflowStep,
+    evaluate_condition,
     load_workflow_file,
 )
 
@@ -55,6 +57,10 @@ class _WorkflowRun:
     abort_event: threading.Event = field(default_factory=threading.Event)
     thread: Optional[threading.Thread] = None
     status: str = "running"
+    #: Proměnné nasbírané z `var` outputs dokončených kroků; vstup pro `if` podmínky.
+    vars: dict[str, str] = field(default_factory=dict)
+    #: Indexy kroků přeskočených kvůli `if` — jejich outputs se na konci neaplikují.
+    skipped_steps: set[int] = field(default_factory=set)
 
     @property
     def active(self) -> bool:
@@ -277,6 +283,19 @@ class WorkflowManager:
                 run.status = "aborted"
                 return
 
+            step_event_id = f"workflow_step:{run.context.run_id}:{run.attempt_id}:{index}"
+            if step.if_ is not None and not evaluate_condition(step.if_, run.vars):
+                run.skipped_steps.add(index)
+                self._emit_adapter_event(
+                    run.context,
+                    kind="workflow_step",
+                    status="success",
+                    event_id=step_event_id,
+                    message=f"Krok přeskočen (if: {step.if_}): {step.name}",
+                    data={"step": step.name, "skipped": True, "condition": step.if_, "vars": dict(run.vars)},
+                )
+                continue
+
             labels = job_labels(
                 task_id=run.context.task_id,
                 run_id=run.context.run_id,
@@ -293,7 +312,6 @@ class WorkflowManager:
                 labels=labels,
                 env=env,
             )
-            step_event_id = f"workflow_step:{run.context.run_id}:{run.attempt_id}:{index}"
             self._emit_adapter_event(
                 run.context,
                 kind="workflow_step",
@@ -344,6 +362,12 @@ class WorkflowManager:
                 data={"step": step.name, "job": name},
             )
 
+            # `var` outputs jsou k dispozici hned: pro `if` podmínky i jako env dalších kroků.
+            new_vars = self._collect_step_vars(run, step)
+            if new_vars:
+                run.vars.update(new_vars)
+                env.update(new_vars)
+
         # Outputs se aplikují až po úspěšném dokončení celého workflow.
         self._apply_outputs(run)
         run.status = "success"
@@ -373,9 +397,20 @@ class WorkflowManager:
         except OSError:
             return None
 
+    def _collect_step_vars(self, run: _WorkflowRun, step: WorkflowStep) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for output in step.outputs:
+            if output.type != "var" or not output.name:
+                continue
+            value = self._read_output_file(run, output.valueFrom)
+            values[output.name] = (value or "").strip()
+        return values
+
     def _apply_outputs(self, run: _WorkflowRun) -> None:
         outputs: list[WorkflowOutput] = []
-        for step in run.workflow.workflow.steps:
+        for index, step in enumerate(run.workflow.workflow.steps):
+            if index in run.skipped_steps:
+                continue
             outputs.extend(step.outputs)
 
         comment_body: str | None = None

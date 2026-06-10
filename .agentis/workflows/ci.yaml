@@ -46,13 +46,29 @@ workflow:
         if [ -f "$MAIN_DIR/.env" ]; then
           cp "$MAIN_DIR/.env" .env
         fi
+    - name: Check environment
+      run: |
+        mkdir -p .agentis/outputs
+        if [ -n "${AGENTIS_SESSION_ID:-}" ] && [ -x .venv/bin/python ]; then
+          printf 'true' > .agentis/outputs/env-ready
+        else
+          printf 'false' > .agentis/outputs/env-ready
+        fi
+      outputs:
+        - type: var
+          name: ENV_READY
+          valueFrom: .agentis/outputs/env-ready
     - name: Create virtualenv
+      if: ENV_READY != 'true'
       run: python3.13 -m venv .venv
     - name: Lock dependencies
+      if: ENV_READY != 'true'
       run: poetry lock --no-update --no-interaction --no-ansi
     - name: Install dependencies
+      if: ENV_READY != 'true'
       run: poetry install --no-interaction --no-ansi
     - name: Build code-review graph
+      if: ENV_READY != 'true'
       run: code-review-graph build
     - name: Run agent
       run: |

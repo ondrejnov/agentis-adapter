@@ -19,8 +19,10 @@ from common.workflow.runtime import build_bash_wrapper, build_job_manifest, job_
 from common.workflow.schema import (
     PROJECT_WORKFLOW_FILE_RELPATH,
     WORKFLOW_FILE_RELPATH,
+    WorkflowConditionError,
     WorkflowFile,
     WorkflowInterpolationError,
+    evaluate_condition,
     interpolate_tokens,
     load_workflow_file,
 )
@@ -85,6 +87,35 @@ workflow:
           status: 5
         - type: session_id
           valueFrom: outputs/session-id
+"""
+
+
+CONDITIONAL_WORKFLOW_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 120
+  steps:
+    - name: Check environment
+      run: check-env
+      outputs:
+        - type: var
+          name: ENV_READY
+          valueFrom: .agentis/outputs/env-ready
+    - name: Install dependencies
+      if: ENV_READY != 'true'
+      run: poetry install
+      outputs:
+        - type: url
+          label: Install Log
+          valueFrom: .agentis/outputs/install-log-url
+    - name: Run agent
+      run: agentiscode < "$AGENTIS_PROMPT_FILE"
+      outputs:
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/final-comment.md
+          status: 4
 """
 
 
@@ -166,6 +197,57 @@ def test_workflow_schema_rejects_unknown_keys(tmp_path: Path) -> None:
     )
     with pytest.raises(ValidationError):
         load_workflow_file(path, _values(tmp_path))
+
+
+def test_workflow_schema_parses_if_and_var_outputs(tmp_path: Path) -> None:
+    path = tmp_path / "ci.yaml"
+    path.write_text(CONDITIONAL_WORKFLOW_YAML, encoding="utf-8")
+    workflow = load_workflow_file(path, _values(tmp_path))
+
+    steps = workflow.workflow.steps
+    assert steps[0].if_ is None
+    assert steps[0].outputs[0].type == "var"
+    assert steps[0].outputs[0].name == "ENV_READY"
+    assert steps[1].if_ == "ENV_READY != 'true'"
+
+
+def test_workflow_schema_rejects_invalid_condition_and_var_output(tmp_path: Path) -> None:
+    path = tmp_path / "ci.yaml"
+    path.write_text(
+        "version: 1\nworkflow:\n  image: x\n  steps:\n    - name: a\n      if: 'A && B'\n      run: echo\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError):
+        load_workflow_file(path, _values(tmp_path))
+
+    path.write_text(
+        "version: 1\nworkflow:\n  image: x\n  steps:\n"
+        "    - name: a\n      run: echo\n      outputs:\n        - type: var\n          valueFrom: out\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError):
+        load_workflow_file(path, _values(tmp_path))
+
+
+def test_evaluate_condition_truthiness_negation_and_comparison() -> None:
+    assert evaluate_condition("READY", {"READY": "1"})
+    assert evaluate_condition("READY", {"READY": "yes"})
+    assert not evaluate_condition("READY", {"READY": "false"})
+    assert not evaluate_condition("READY", {"READY": "0"})
+    assert not evaluate_condition("READY", {})
+    assert evaluate_condition("!READY", {})
+    assert not evaluate_condition("!READY", {"READY": "true"})
+    assert evaluate_condition("MODE == 'fast'", {"MODE": "fast"})
+    assert evaluate_condition('MODE == "a b"', {"MODE": "a b"})
+    assert evaluate_condition("MODE == fast", {"MODE": "fast"})
+    assert evaluate_condition("MODE != 'fast'", {"MODE": "slow"})
+    assert not evaluate_condition("MODE != 'fast'", {"MODE": "fast"})
+    # mezery kolem hodnoty ze souboru ořezává manager, ale i tak: neznámá proměnná == prázdno
+    assert evaluate_condition("MODE != 'fast'", {})
+    with pytest.raises(WorkflowConditionError):
+        evaluate_condition("A && B", {})
+    with pytest.raises(WorkflowConditionError):
+        evaluate_condition("!A == 'x'", {})
 
 
 def test_interpolation_replaces_allowlisted_tokens_and_rejects_unknown() -> None:
@@ -331,6 +413,73 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
         assert env["AGENTIS_RUN_ID"] == "run-12345678"
         assert env["AGENTIS_MODEL"] == "openai/gpt-5"
         assert "AGENTIS_TOKEN" not in env
+
+
+def test_conditional_step_is_skipped_and_vars_flow_into_env(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    path = worktree / WORKFLOW_FILE_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(CONDITIONAL_WORKFLOW_YAML, encoding="utf-8")
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "env-ready").write_text("true\n", encoding="utf-8")
+    (outputs_dir / "final-comment.md").write_text("Hotovo.", encoding="utf-8")
+    # pozůstatek z minulého běhu — output přeskočeného kroku se nesmí aplikovat
+    (outputs_dir / "install-log-url").write_text("https://example.org/stale", encoding="utf-8")
+
+    runner = FakeRunner()
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "success"
+
+    # prostřední krok se nespustil jako Job
+    step_indexes = [manifest["metadata"]["labels"]["agentis.step_index"] for manifest in runner.applied]
+    assert step_indexes == ["0", "2"]
+
+    # proměnná z prvního kroku je env pro kroky po něm
+    env = {item["name"]: item["value"] for item in runner.applied[1]["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["ENV_READY"] == "true"
+
+    # přeskočení se reportuje jako úspěšný workflow_step se skipped flagem
+    skip_events = [
+        params
+        for method, params in calls
+        if method == "run.adapter_event" and params["kind"] == "workflow_step" and params["data"].get("skipped")
+    ]
+    assert len(skip_events) == 1
+    assert skip_events[0]["status"] == "success"
+    assert skip_events[0]["data"]["step"] == "Install dependencies"
+    assert skip_events[0]["data"]["condition"] == "ENV_READY != 'true'"
+
+    # outputs přeskočeného kroku se neaplikují, ostatní ano
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert len(comment_calls) == 1
+    assert comment_calls[0]["body"] == "Hotovo."
+    assert comment_calls[0]["attachments"] == []
+
+
+def test_conditional_step_runs_when_condition_holds(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    path = worktree / WORKFLOW_FILE_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(CONDITIONAL_WORKFLOW_YAML, encoding="utf-8")
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "env-ready").write_text("false", encoding="utf-8")
+
+    runner = FakeRunner()
+    manager, _calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    step_indexes = [manifest["metadata"]["labels"]["agentis.step_index"] for manifest in runner.applied]
+    assert step_indexes == ["0", "1", "2"]
 
 
 def test_project_scope_uses_project_yaml_and_run_dir_outside_project(tmp_path: Path) -> None:
