@@ -5,7 +5,7 @@ workflow:
     - name: registry
   workingDir: "[%WORKDIR%]"
   timeoutSeconds: 3600
-  ttlSecondsAfterFinished: 3600
+  ttlSecondsAfterFinished: 300
   deleteNamespace: true
   envFiles:
     - /root/.config/agentis/agentis.env
