@@ -6,6 +6,7 @@ workflow:
   workingDir: "[%WORKDIR%]"
   timeoutSeconds: 3600
   ttlSecondsAfterFinished: 3600
+  deleteNamespace: true
   envFiles:
     - /root/.config/agentis/agentis.env
   env:

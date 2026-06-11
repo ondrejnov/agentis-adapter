@@ -182,6 +182,9 @@ class WorkflowSpec(BaseModel):
     executor: Literal["kubernetes", "local"] | None = None
     #: Container image; povinný jen pro executor `kubernetes` (validuje WorkflowManager).
     image: str | None = None
+    #: Po úspěšném doběhnutí workflow smaže celý namespace; platí jen pro executor
+    #: `kubernetes` (lokální executor žádné namespacy nevytváří a flag ignoruje).
+    deleteNamespace: bool = False
     workingDir: str | None = None
     timeoutSeconds: int = 14400
     ttlSecondsAfterFinished: int = 3600

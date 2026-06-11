@@ -111,6 +111,9 @@ class LocalProcessRunner:
                 killed += 1
         return f"killed {killed} process(es)"
 
+    def delete_namespace(self, namespace: str) -> None:
+        """Lokální executor žádné namespacy nevytváří — mazání je no-op."""
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

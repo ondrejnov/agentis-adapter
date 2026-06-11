@@ -6,6 +6,8 @@ workflow:
   workingDir: "[%MAIN_DIR%]"
   timeoutSeconds: 600
   ttlSecondsAfterFinished: 3600
+  # Po úspěšném úklidu smaže i Kubernetes namespace tasku (jen executor kubernetes).
+  deleteNamespace: true
   envFiles:
     - /root/.config/agentis/agentis.env
   env:

@@ -422,6 +422,7 @@ class WorkflowManager:
 
         # Outputs se aplikují až po úspěšném dokončení celého workflow.
         self._apply_outputs(run)
+        self._cleanup_namespace(run)
         run.status = "success"
         self._emit_adapter_event(
             run.context,
@@ -431,6 +432,28 @@ class WorkflowManager:
             message="Workflow doběhlo.",
             data={"attempt": run.attempt_id},
         )
+
+    def _cleanup_namespace(self, run: _WorkflowRun) -> None:
+        """Smaže namespace po úspěšném workflow s `deleteNamespace: true`.
+
+        Jen pro executor `kubernetes` — lokální executor namespace nevytváří.
+        Selhání úklidu workflow neshodí, jen se nahlásí do Agentisu.
+        """
+
+        if not run.workflow.workflow.deleteNamespace or run.executor != "kubernetes":
+            return
+        try:
+            run.runner.delete_namespace(run.namespace)
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"[workflow] delete namespace {run.namespace} failed: {exc!r}\n")
+            self._emit_adapter_event(
+                run.context,
+                kind="workflow_cleanup",
+                status="failed",
+                event_id=f"workflow_cleanup:{run.context.run_id}:{run.attempt_id}",
+                message=f"Smazání namespace {run.namespace} selhalo.",
+                data={"namespace": run.namespace, "error": str(exc)},
+            )
 
     # ------------------------------------------------------------------
     # Outputs

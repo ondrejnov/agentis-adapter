@@ -317,6 +317,7 @@ class FakeRunner:
     def __init__(self) -> None:
         self.steps: list[dict[str, Any]] = []
         self.deleted: list[tuple[str, dict[str, str]]] = []
+        self.deleted_namespaces: list[str] = []
         self.prepared: list[str] = []
         self.results: list[str] = []
         self.release = threading.Event()
@@ -360,6 +361,9 @@ class FakeRunner:
     def abort(self, namespace: str, labels: dict[str, str]) -> str:
         self.deleted.append((namespace, labels))
         return "job deleted"
+
+    def delete_namespace(self, namespace: str) -> None:
+        self.deleted_namespaces.append(namespace)
 
 
 def _manager(tmp_path: Path, runner: FakeRunner) -> tuple[WorkflowManager, list[tuple[str, dict[str, Any]]]]:
@@ -625,6 +629,69 @@ def test_named_workflow_without_file_fails_with_clear_error(tmp_path: Path) -> N
     assert not (manager.settings.project_run_root / context.run_id).exists()
 
 
+CLEANUP_WORKFLOW_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%MAIN_DIR%]"
+  timeoutSeconds: 120
+  deleteNamespace: true
+  steps:
+    - name: Remove worktree and task branch
+      run: echo uklizeno
+"""
+
+
+def _write_cleanup_workflow(worktree: Path) -> Path:
+    path = worktree / workflow_file_relpath("close")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(CLEANUP_WORKFLOW_YAML, encoding="utf-8")
+    return path
+
+
+def test_delete_namespace_runs_after_successful_kubernetes_workflow(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_cleanup_workflow(worktree)
+    runner = FakeRunner()
+    manager, _calls = _manager(tmp_path, runner)
+    context = _context(adapter={"runtime": "workflow", "workflow": "close"})
+
+    result = manager.start_workflow(context, str(worktree), "Uklidit prostředí.")
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "success"
+    assert runner.deleted_namespaces == [result["namespace"]]
+
+
+def test_delete_namespace_skipped_on_failure(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_cleanup_workflow(worktree)
+    runner = FakeRunner()
+    runner.results = ["failed"]
+    manager, _calls = _manager(tmp_path, runner)
+    context = _context(adapter={"runtime": "workflow", "workflow": "close"})
+
+    manager.start_workflow(context, str(worktree), "Uklidit prostředí.")
+    _wait_done(manager, context.task_id)
+
+    assert runner.deleted_namespaces == []
+
+
+def test_delete_namespace_ignored_by_local_executor(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_cleanup_workflow(worktree)
+    runner = FakeRunner()
+    manager = WorkflowManager(_settings(tmp_path, workflow_executor="local"), runner=runner)
+    manager._agentis_call = lambda method, params: None  # type: ignore[method-assign]
+    context = _context(adapter={"runtime": "workflow", "workflow": "close"})
+
+    manager.start_workflow(context, str(worktree), "Uklidit prostředí.")
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "success"
+    assert runner.deleted_namespaces == []
+
+
 def test_repo_action_workflows_parse(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     for name in ("merge", "close"):
@@ -632,6 +699,8 @@ def test_repo_action_workflows_parse(tmp_path: Path) -> None:
         assert workflow.workflow.steps
         statuses = [output.status for step in workflow.workflow.steps for output in step.outputs if output.type == "agent_comment"]
         assert statuses, f"workflow {name} musí postnout agent_comment"
+    close = load_workflow_file(repo_root / workflow_file_relpath("close"), _values(tmp_path))
+    assert close.workflow.deleteNamespace, "close workflow má po úspěchu smazat Kubernetes namespace"
 
 
 def test_failed_step_stops_workflow_and_reports_log_tail(tmp_path: Path) -> None:

@@ -64,6 +64,8 @@ class WorkflowStepRunner(Protocol):
 
     def abort(self, namespace: str, labels: dict[str, str]) -> str: ...
 
+    def delete_namespace(self, namespace: str) -> None: ...
+
 
 def safe_step_name(name: str) -> str:
     ascii_value = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
@@ -199,6 +201,10 @@ class KubectlJobRunner:
 
     def abort(self, namespace: str, labels: dict[str, str]) -> str:
         return self.delete_jobs_by_labels(namespace, labels)
+
+    def delete_namespace(self, namespace: str) -> None:
+        # --wait=false: poslední Job workflow běžel v mazaném namespace; na finalizery nečekáme.
+        self._run("delete", "namespace", namespace, "--ignore-not-found", "--wait=false")
 
     # ------------------------------------------------------------------
     # kubectl primitives
