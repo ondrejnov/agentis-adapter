@@ -421,8 +421,8 @@ class AgentJsonRpcService:
             },
         }
 
-    def question(self, params: QuestionParams) -> dict[str, Any] | None:
-        return
+    def question(self, params: QuestionParams) -> dict[str, Any]:
+        return {}
         if self._is_workflow_runtime(params.context):
             raise AgentJsonRpcException(400, "Workflow runtime nepodporuje question/approve IPC do Jobu")
 
