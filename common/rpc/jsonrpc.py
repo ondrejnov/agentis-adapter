@@ -19,6 +19,7 @@ from common.models import (
 )
 from common.adapter_base import BaseAdapterService
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
+from common.attachments import build_attachments_block, materialize_attachments, next_attachment_index
 from common.rpc.session_registry import SessionContextRegistry
 from common.workflow.manager import WorkflowBusyError, WorkflowManager
 
@@ -78,11 +79,39 @@ class AgentJsonRpcService:
                 chunks.append(text.strip())
         return "\n\n".join(chunks) or context.title
 
+    @staticmethod
+    def _prompt_with_attachments(
+        prompt: str,
+        context: AgentExecutionContextPayload,
+        worktree: str,
+        message_attachments: list[Any] | None,
+    ) -> str:
+        """Materializuje přílohy do worktree a doplní do promptu sekci ``<attachments>``.
+
+        Při startu jde o task přílohy z kontextu (deterministické názvy od 1, stejně
+        jako CLI runtime); u follow-up zprávy jen o přílohy zprávy s indexem
+        navazujícím na už materializované soubory.
+        """
+        if message_attachments is None:
+            materialized = materialize_attachments(worktree, context.attachments, task_id=context.task_id)
+        else:
+            materialized = materialize_attachments(
+                worktree,
+                message_attachments,
+                task_id=context.task_id,
+                start_index=next_attachment_index(worktree),
+            )
+        block = build_attachments_block(materialized)
+        if not block:
+            return prompt
+        return f"{prompt}\n\n{block}" if prompt.strip() else block
+
     def _start_workflow_run(
         self,
         run: RunStatePayload,
         context: AgentExecutionContextPayload,
         prompt: str,
+        message_attachments: list[Any] | None = None,
     ) -> dict[str, Any]:
         """Spustí workflow na pozadí a rychle vrátí odpověď (bez session_id)."""
         adapter_steps: list[dict[str, Any]] = []
@@ -102,6 +131,7 @@ class AgentJsonRpcService:
                     worktree = working_dir
             if worktree is None:
                 worktree = str(adapter._workspace_path())
+            prompt = self._prompt_with_attachments(prompt, context, worktree, message_attachments)
             workflow_step = self._run_adapter_step(
                 adapter,
                 kind="workflow_start",
@@ -292,7 +322,7 @@ class AgentJsonRpcService:
                     },
                 )
             )
-            return self._start_workflow_run(run, context, params.message)
+            return self._start_workflow_run(run, context, params.message, message_attachments=params.attachments)
 
         if params.context.session_id:
             self.session_registry.register(params.context.session_id, params.context)
@@ -351,7 +381,9 @@ class AgentJsonRpcService:
                 kind="start_session",
                 started_message="Přidávám zprávu OpenCode session.",
                 success_message="Zpráva do session byla založena.",
-                callback=lambda: adapter.add_message(params.message, pod_url=pod_url),
+                callback=lambda: adapter.add_message(
+                    params.message, pod_url=pod_url, attachments=params.attachments or None
+                ),
             )
             adapter_steps.append(session_step)
             snapshot_key = session_step.get("snapshot_key")

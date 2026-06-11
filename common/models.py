@@ -161,6 +161,8 @@ class AddMessageParams(BaseModel):
     context: AgentExecutionContextPayload
     message: str
     role: Literal["user", "agent", "system"] = "user"
+    #: Přílohy feedback zprávy (backend je posílá mimo context.attachments).
+    attachments: list[AgentAttachmentPayload] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_run_id_matches_context(self) -> AddMessageParams:

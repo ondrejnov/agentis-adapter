@@ -177,6 +177,41 @@ def test_start_session_materializes_image_attachments_for_cli_prompt(monkeypatch
     assert "mime: image/png" in prompt
 
 
+def test_add_message_materializes_message_attachments_for_cli_prompt(tmp_path: Path):
+    manager = MagicMock(spec=ClaudeSessionManager)
+    manager.get_snapshot_key.return_value = "snap-send"
+
+    context = make_context(session_id="ses_abc")
+    adapter = ClaudeCodeAdapterService(
+        context=context,
+        settings=make_settings(worktree_root=tmp_path),
+        session_manager=manager,
+    )
+    attachments_dir = tmp_path / "task-1" / ".agentis" / "attachments"
+    attachments_dir.mkdir(parents=True)
+    (attachments_dir / "001-screenshot.png").write_bytes(b"old")
+
+    adapter.add_message(
+        "oprav to",
+        attachments=[
+            AgentAttachmentPayload(
+                path="note.txt",
+                filename="note.txt",
+                mime="text/plain",
+                content_base64="bm92eSBvYnNhaA==",
+            )
+        ],
+    )
+
+    # příloha zprávy nepřepisuje soubory z dřívější materializace
+    assert (attachments_dir / "001-screenshot.png").read_bytes() == b"old"
+    assert (attachments_dir / "002-note.txt").read_bytes() == b"novy obsah"
+    prompt = manager.send.call_args.kwargs["prompt"]
+    assert prompt.startswith("oprav to")
+    assert "<attachments>" in prompt
+    assert "path: .agentis/attachments/002-note.txt" in prompt
+
+
 def test_add_message_requires_session_id():
     adapter = ClaudeCodeAdapterService(
         context=make_context(),

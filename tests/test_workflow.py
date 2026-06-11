@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import threading
 import time
@@ -1124,6 +1125,72 @@ def test_jsonrpc_add_message_project_scope_skips_worktree_and_resumes_session(tm
     env = runner.steps[0]["env"]
     assert env["AGENTIS_SESSION_ID"] == "ses_42"
     assert env["WORKDIR"] == str(project_dir)
+
+
+def test_jsonrpc_start_workflow_materializes_attachments_into_prompt(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+    runner = FakeRunner()
+    service, manager, _calls = _service(tmp_path, runner)
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode("ascii")
+    context = _context(
+        user_prompt="udelej X",
+        attachments=[
+            {
+                "path": "/tmp/screenshot.png",
+                "filename": "screenshot.png",
+                "mime": "image/png",
+                "content_base64": png,
+            }
+        ],
+    )
+
+    service.start(StartParams(context=context))
+    _wait_done(manager, context.task_id)
+
+    attachment_path = worktree / ".agentis" / "attachments" / "001-screenshot.png"
+    assert attachment_path.read_bytes() == b"\x89PNG\r\n\x1a\n"
+    prompt = manager._runs[context.task_id].prompt_file.read_text(encoding="utf-8")
+    assert prompt.startswith("udelej X")
+    assert "<attachments>" in prompt
+    assert "path: .agentis/attachments/001-screenshot.png" in prompt
+
+
+def test_jsonrpc_add_message_materializes_message_attachments_without_overwrite(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+    attachments_dir = worktree / ".agentis" / "attachments"
+    attachments_dir.mkdir(parents=True)
+    (attachments_dir / "001-old.png").write_bytes(b"old")
+    runner = FakeRunner()
+    service, manager, _calls = _service(tmp_path, runner)
+    context = _context(session_id="ses_42")
+    payload = base64.b64encode(b"new data").decode("ascii")
+
+    service.add_message(
+        AddMessageParams(
+            run_id=context.run_id,
+            context=context,
+            message="oprav to",
+            attachments=[
+                {
+                    "path": "/tmp/note.txt",
+                    "filename": "note.txt",
+                    "mime": "text/plain",
+                    "content_base64": payload,
+                }
+            ],
+        )
+    )
+    _wait_done(manager, context.task_id)
+
+    # přílohy z dřívějšího běhu zůstávají, nové dostanou navazující index
+    assert (attachments_dir / "001-old.png").read_bytes() == b"old"
+    assert (attachments_dir / "002-note.txt").read_bytes() == b"new data"
+    prompt = manager._runs[context.task_id].prompt_file.read_text(encoding="utf-8")
+    assert prompt.startswith("oprav to")
+    assert "<attachments>" in prompt
+    assert "path: .agentis/attachments/002-note.txt" in prompt
 
 
 def test_jsonrpc_question_is_unsupported_in_workflow_mode(tmp_path: Path) -> None:

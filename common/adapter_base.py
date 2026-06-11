@@ -173,7 +173,12 @@ class BaseAdapterService:
     def start_session(self, pod_url: str | None = None, fork_from_session_id: str | None = None) -> dict[str, Any]:
         raise NotImplementedError
 
-    def add_message(self, message: str, pod_url: str | None = None) -> dict[str, Any]:
+    def add_message(
+        self,
+        message: str,
+        pod_url: str | None = None,
+        attachments: list[Any] | None = None,
+    ) -> dict[str, Any]:
         raise NotImplementedError
 
     def question_reply(

@@ -322,7 +322,7 @@ def test_jsonrpc_happy_path_flow_runs_adapter_without_dry_run():
                 "snapshot_key": "snap-start",
             }
 
-        def add_message(self, message: str, pod_url: str) -> dict[str, str]:
+        def add_message(self, message: str, pod_url: str, attachments: list[Any] | None = None) -> dict[str, str]:
             return {"action": "add_message", "message": message, "pod_url": pod_url, "snapshot_key": "snap-feedback"}
 
         def question_reply(self, request_id: str, answers: list[list[str]], pod_url: str) -> dict[str, Any]:
@@ -670,7 +670,7 @@ def test_add_message_registers_session_context():
         def wait_ready(self) -> dict[str, str]:
             return {"action": "wait_ready", "status": "ready", "url": "http://pod"}
 
-        def add_message(self, message: str, pod_url: str) -> dict[str, str]:
+        def add_message(self, message: str, pod_url: str, attachments: list[Any] | None = None) -> dict[str, str]:
             return {"action": "add_message", "message": message, "pod_url": pod_url, "snapshot_key": "snap-feedback"}
 
     service = AgentJsonRpcService(
