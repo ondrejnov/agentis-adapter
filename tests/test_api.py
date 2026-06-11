@@ -461,16 +461,8 @@ def test_jsonrpc_happy_path_flow_runs_adapter_without_dry_run():
         },
     )
     assert question_response.status_code == 200
-    question_payload = question_response.json()["result"]
-    assert question_payload["run"]["events"][0]["kind"] == "question"
-    assert [step["action"] for step in question_payload["adapter"]["steps"]] == [
-        "create_worktree",
-        "deploy",
-        "wait_ready",
-        "question_reply",
-    ]
-    assert question_payload["adapter"]["steps"][-1]["request_id"] == "que_123"
-    assert question_payload["adapter"]["steps"][-1]["answers"] == [["Ano"], ["Custom odpoved"]]
+    # question je vypnutá – vrací prázdný výsledek bez spuštění adapteru.
+    assert question_response.json()["result"] == {}
 
     approve_response = client.post(
         "/api",

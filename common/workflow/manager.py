@@ -30,7 +30,7 @@ from common.artifacts.source_snapshot import (
 from common.config import Settings
 from common.git_adapter import GitAdapterService
 from common.namespaces import namespace_for_context
-from common.models import AgentExecutionContextPayload
+from common.models import AgentExecutionContextPayload, task_header_env
 from common.status import get_status_registry
 from common.workflow.local_runtime import LocalProcessRunner
 from common.workflow.runtime import KubectlJobRunner, WorkflowStepRunner, job_labels, job_name, safe_step_name
@@ -336,6 +336,7 @@ class WorkflowManager:
     def _runtime_env(self, run: _WorkflowRun) -> dict[str, str]:
         values = self._interpolation_values(run.context, run.worktree, run.namespace, run_dir=run.run_dir)
         env = dict(values)
+        env.update(task_header_env(run.context.headers))
         env.update(
             {
                 "AGENTIS_RUN_ID": run.context.run_id,

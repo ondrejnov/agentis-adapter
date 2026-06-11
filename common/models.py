@@ -1,10 +1,38 @@
 from __future__ import annotations
 
+import json
+import re
 from datetime import datetime, timezone
 from pathlib import PurePath
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+_HEADER_ENV_SANITIZE_RE = re.compile(r"[^A-Z0-9]+")
+
+
+def task_header_env(headers: dict[str, Any] | None) -> dict[str, str]:
+    """Převede hlavičky tasku na env proměnné ``TASK_HEADER_<KEY>``.
+
+    Klíč se normalizuje na uppercase, nealfanumerické znaky na ``_``;
+    hlavičky s prázdným klíčem po normalizaci se přeskočí. Skalární
+    hodnoty se serializují přes ``str``, složené struktury jako JSON.
+    """
+    env: dict[str, str] = {}
+    for key, value in (headers or {}).items():
+        name = _HEADER_ENV_SANITIZE_RE.sub("_", str(key).upper()).strip("_")
+        if not name:
+            continue
+        if value is None:
+            serialized = ""
+        elif isinstance(value, str):
+            serialized = value
+        elif isinstance(value, (dict, list)):
+            serialized = json.dumps(value, ensure_ascii=False)
+        else:
+            serialized = str(value)
+        env[f"TASK_HEADER_{name}"] = serialized
+    return env
 
 
 class TaskStatus:
@@ -108,6 +136,7 @@ class AgentExecutionContextPayload(BaseModel):
     task_number: int | None = None
     task_priority: int | None = None
     parent_task_id: int | None = None
+    headers: dict[str, Any] | None = None
     project_id: str | int | None = None
     project_title: str | None = None
     project_slug: str = "agentis"

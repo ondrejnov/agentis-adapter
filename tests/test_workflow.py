@@ -451,6 +451,41 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
         assert "AGENTIS_TOKEN" not in env
 
 
+def test_task_headers_are_injected_as_env(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "final-comment.md").write_text("Hotovo.", encoding="utf-8")
+
+    runner = FakeRunner()
+    manager, _calls = _manager(tmp_path, runner)
+    context = _context(
+        headers={
+            "X-Trace-Id": "abc-123",
+            "priority": 7,
+            "meta": {"a": 1},
+            "": "ignored",
+        }
+    )
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "success"
+    for record in runner.steps:
+        env = record["env"]
+        assert env["TASK_HEADER_X_TRACE_ID"] == "abc-123"
+        assert env["TASK_HEADER_PRIORITY"] == "7"
+        assert env["TASK_HEADER_META"] == '{"a": 1}'
+        assert not any(key == "TASK_HEADER_" for key in env)
+
+    # headers jsou i v context.json pro agenta
+    attempt = runner.steps[0]["env"]["AGENTIS_RUN_DIR"].rsplit("/", 1)[-1]
+    context_file = worktree / ".agentis" / "runs" / attempt / "context.json"
+    assert json.loads(context_file.read_text(encoding="utf-8"))["headers"]["X-Trace-Id"] == "abc-123"
+
+
 def test_workflow_outputs_add_directory_link_and_changes_diff(monkeypatch, tmp_path: Path) -> None:
     from common.artifacts import source_snapshot
 
@@ -1205,7 +1240,7 @@ def test_jsonrpc_add_message_materializes_message_attachments_without_overwrite(
     assert "path: .agentis/attachments/002-note.txt" in prompt
 
 
-def test_jsonrpc_question_is_unsupported_in_workflow_mode(tmp_path: Path) -> None:
+def test_jsonrpc_question_is_disabled_and_returns_empty(tmp_path: Path) -> None:
     service, _manager, _calls = _service(tmp_path, FakeRunner())
     params = QuestionParams(
         run_id="run-12345678",
@@ -1213,9 +1248,8 @@ def test_jsonrpc_question_is_unsupported_in_workflow_mode(tmp_path: Path) -> Non
         request_id="q1",
         answers=[["ano"]],
     )
-    with pytest.raises(AgentJsonRpcException) as excinfo:
-        service.question(params)
-    assert excinfo.value.code == 400
+    # question() je vypnutá – vrací prázdný dict bez vedlejších efektů.
+    assert service.question(params) == {}
 
 
 def test_jsonrpc_abort_in_workflow_mode_works_without_session_id(tmp_path: Path) -> None:
