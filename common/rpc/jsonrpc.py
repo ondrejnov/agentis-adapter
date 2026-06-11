@@ -117,7 +117,6 @@ class AgentJsonRpcService:
 
     def start(self, params: StartParams) -> dict[str, Any]:
         context = params.context
-        print(context)
         run = RunStatePayload(run_id=context.run_id, context=context)
         run.events.append(
             RunEventPayload(
