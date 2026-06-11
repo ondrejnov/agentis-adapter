@@ -270,16 +270,53 @@ def test_project_scope_namespace_uses_project_slug():
     assert dev_server_url == "http://app-project-agentis-core.dev.agentis.cz"
 
 
-def test_completion_actions_dispatch_named_workflows_via_start():
+def test_completion_actions_dispatch_named_workflows_via_start(tmp_path):
     from common.session_manager import BaseSessionManager
 
-    actions = BaseSessionManager._completion_actions()
+    workflow_path = tmp_path / ".agentis" / "workflows" / "default.yaml"
+    workflow_path.parent.mkdir(parents=True)
+    workflow_path.write_text(
+        "version: 1\n"
+        "workflow:\n"
+        "  followups:\n"
+        "    - title: Git merge\n"
+        "      prompt: Sloučit změny z task větve do hlavní větve.\n"
+        "      workflow: merge\n"
+        "    - title: Zavřít prostředí\n"
+        "      prompt: Uklidit prostředí, worktree a task větev.\n"
+        "      workflow: close\n"
+        "  image: registry.example/agent:1.0\n"
+        "  steps:\n"
+        "    - name: Run agent\n"
+        "      run: agentiscode\n",
+        encoding="utf-8",
+    )
+
+    actions = BaseSessionManager._completion_actions(worktree=tmp_path)
 
     # Followup akce nejsou samostatné RPC metody — dispatchují `start` s názvem workflow v kontextu.
+    # Nabídka se konfiguruje v `workflow.followups` sekci workflow YAML ve worktree.
     assert [(action["adapter_method"], action["workflow"]) for action in actions] == [
         ("start", "merge"),
         ("start", "close"),
     ]
+    assert all(action["continue_previous_run"] is False for action in actions)
+
+
+def test_completion_actions_without_followups_section_offer_nothing(tmp_path):
+    from common.session_manager import BaseSessionManager
+
+    # bez worktree ani workflow souboru se žádné akce nenabízí
+    assert BaseSessionManager._completion_actions() == []
+    assert BaseSessionManager._completion_actions(worktree=tmp_path) == []
+
+    workflow_path = tmp_path / ".agentis" / "workflows" / "default.yaml"
+    workflow_path.parent.mkdir(parents=True)
+    workflow_path.write_text(
+        "version: 1\nworkflow:\n  steps:\n    - name: Run agent\n      run: agentiscode\n",
+        encoding="utf-8",
+    )
+    assert BaseSessionManager._completion_actions(worktree=tmp_path) == []
 
 
 def strip_event_id(params: dict[str, Any]) -> dict[str, Any]:

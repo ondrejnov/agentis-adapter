@@ -34,6 +34,13 @@ from common.workflow.schema import (
 WORKFLOW_YAML = """
 version: 1
 workflow:
+  followups:
+    - title: Git merge
+      prompt: Sloučit změny z task větve do hlavní větve.
+      workflow: merge
+    - title: Zavřít prostředí
+      prompt: Uklidit prostředí, worktree a task větev.
+      workflow: close
   image: registry.example/agent:1.0
   workingDir: "[%WORKDIR%]"
   timeoutSeconds: 120
@@ -425,6 +432,11 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
     assert comment["status"] == 4
     assert comment["attachments"] == [
         {"label": "Pull Request", "value": "https://github.com/org/repo/pull/1", "type": "url"}
+    ]
+    # followup akce jdou z `workflow.followups` sekce YAML, ne z Pythonu
+    assert [(action["adapter_method"], action["workflow"]) for action in comment["actions"]] == [
+        ("start", "merge"),
+        ("start", "close"),
     ]
     assert any(method == "run.adapter_event" and params["kind"] == "idle" and params["status"] == "success" for method, params in calls)
 

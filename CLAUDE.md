@@ -25,6 +25,7 @@
 - Agenti beží jen v environmentech `local` (CLI proces na hostu) a `workflow` (`context.adapter.runtime = "workflow"`). Environment `kubernetes` byl odstraněn.
 - Workflow runtime spouští kroky podle executoru (`workflow.executor` v YAML, jinak env `WORKFLOW_EXECUTOR`, default `kubernetes`): `kubernetes` = Kubernetes Joby přes `kubectl` (vyžaduje platný kube context a `image`), `local` = lokální bash procesy nad worktree (`common/workflow/local_runtime.py`, K8s pole jako `image`/`volumes` se ignorují).
 - Followup akce (git merge, úklid worktree a branche) nejsou samostatné RPC metody. `start` s `context.adapter.workflow = "<name>"` spustí pojmenované workflow `.agentis/workflows/<name>.yaml` (`merge.yaml`, `close.yaml`); run soubory pojmenovaných workflow jdou mimo worktree do `<project_run_root>/<run_id>/<attempt>/`, protože akce může worktree sama smazat.
+- Nabídka followup akcí v completion komentáři se konfiguruje v `workflow.followups` sekci workflow YAML (`default.yaml`), nikde v Pythonu; workflow bez sekce (`project.yaml`, `merge.yaml`, `close.yaml`) žádné akce nenabízí. Lokální sessions čtou sekci best-effort přes `load_workflow_followups()` (`common/workflow/schema.py`).
 
 ##  Agentis
 - aplikace komunukuje s ticket systémem Agentis pres json AgentisJsonRpcClient

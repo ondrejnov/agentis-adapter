@@ -31,7 +31,6 @@ from common.config import Settings
 from common.git_adapter import GitAdapterService
 from common.namespaces import namespace_for_context
 from common.models import AgentExecutionContextPayload
-from common.session_manager import BaseSessionManager
 from common.status import get_status_registry
 from common.workflow.local_runtime import LocalProcessRunner
 from common.workflow.runtime import KubectlJobRunner, WorkflowStepRunner, job_labels, job_name, safe_step_name
@@ -597,8 +596,9 @@ class WorkflowManager:
             )
 
         if comment_body:
-            # Followup akce (pojmenované workflow) už další completion akce nenabízí.
-            actions = [] if self._workflow_name(run.context) else BaseSessionManager._completion_actions(run.context)
+            # Followup akce se konfigurují v `workflow.followups` sekci workflow YAML;
+            # pojmenovaná workflow (merge/close) sekci nemají, takže další akce nenabízí.
+            actions = [followup.to_action() for followup in run.workflow.workflow.followups]
             self._agentis_call(
                 method="task.add_agent_comment",
                 params={

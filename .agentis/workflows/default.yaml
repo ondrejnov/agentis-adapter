@@ -1,5 +1,14 @@
 version: 1
 workflow:
+  # Followup akce nabídnuté v completion komentáři; každá dispatchne `start`
+  # s pojmenovaným workflow `.agentis/workflows/<workflow>.yaml`.
+  followups:
+    - title: Git merge
+      prompt: Sloučit změny z task větve do hlavní větve.
+      workflow: merge
+    - title: Zavřít prostředí
+      prompt: Uklidit prostředí, worktree a task větev.
+      workflow: close
   image: rg.nl-ams.scw.cloud/reactis/opencode:1.3
   imagePullSecrets:
     - name: registry

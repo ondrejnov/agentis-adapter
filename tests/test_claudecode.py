@@ -763,7 +763,7 @@ def test_session_manager_stream_adds_completion_attachments_and_actions(monkeypa
         "artifacts": [],
         "status": 7,
         "comment_type": "primary",
-        "actions": ClaudeSessionManager._completion_actions(context),
+        "actions": ClaudeSessionManager._completion_actions(context, sess.worktree),
     }
 
 

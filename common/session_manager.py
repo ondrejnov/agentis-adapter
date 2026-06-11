@@ -409,7 +409,7 @@ class BaseSessionManager:
                         "artifacts": collect_expected_artifacts(sess.context, sess.worktree),
                         "status": completion_task_status(sess.context),
                         "comment_type": "primary",
-                        "actions": self._completion_actions(sess.context),
+                        "actions": self._completion_actions(sess.context, sess.worktree),
                     },
                 )
 
@@ -459,27 +459,33 @@ class BaseSessionManager:
         return ""
 
     @staticmethod
-    def _completion_actions(context: AgentExecutionContextPayload | None = None) -> list[dict[str, Any]]:
-        if context is not None and GitAdapterService.is_project_scope(context):
+    def _completion_actions(
+        context: AgentExecutionContextPayload | None = None,
+        worktree: str | Path | None = None,
+    ) -> list[dict[str, Any]]:
+        """Followup akce z `workflow.followups` sekce workflow YAML ve worktree.
+
+        Followup akce nejsou samostatné RPC metody — `start` dostane v kontextu
+        `adapter.workflow` a adapter spustí `.agentis/workflows/<workflow>.yaml`.
+        Nabídka se konfiguruje ve workflow souboru (default.yaml / project.yaml).
+        """
+
+        # Lazy import — `common.workflow.__init__` importuje manager, který importuje
+        # tento modul; import na úrovni modulu by vytvořil kruhový import.
+        from common.workflow.schema import (
+            PROJECT_WORKFLOW_FILE_RELPATH,
+            WORKFLOW_FILE_RELPATH,
+            load_workflow_followups,
+        )
+
+        if worktree is None:
             return []
-        # Followup akce nejsou samostatné RPC metody — `start` dostane v kontextu
-        # `adapter.workflow` a adapter spustí `.agentis/workflows/<workflow>.yaml`.
-        return [
-            {
-                "title": "Git merge",
-                "prompt": "Sloučit změny z task větve do hlavní větve.",
-                "adapter_method": "start",
-                "workflow": "merge",
-                "continue_previous_run": False,
-            },
-            {
-                "title": "Zavřít prostředí",
-                "prompt": "Uklidit prostředí, worktree a task větev.",
-                "adapter_method": "start",
-                "workflow": "close",
-                "continue_previous_run": False,
-            },
-        ]
+        relpath = (
+            PROJECT_WORKFLOW_FILE_RELPATH
+            if context is not None and GitAdapterService.is_project_scope(context)
+            else WORKFLOW_FILE_RELPATH
+        )
+        return [followup.to_action() for followup in load_workflow_followups(Path(worktree) / relpath)]
 
     @staticmethod
     def _normalize_adapter_event_status(status: str) -> str:

@@ -234,7 +234,7 @@ class AgentisCodeSessionManager:
                     "artifacts": collect_expected_artifacts(sess.context, sess.worktree),
                     "status": completion_task_status(sess.context),
                     "comment_type": "primary",
-                    "actions": self._completion_actions(sess.context),
+                    "actions": self._completion_actions(sess.context, sess.worktree),
                 }
                 self._agentis_call(method="task.add_agent_comment", params=params)
         finally:

@@ -172,7 +172,7 @@ def test_session_manager_posts_completion_comment_with_attachments(monkeypatch, 
                 "artifacts": [{"path": "build.log"}],
                 "status": 7,
                 "comment_type": "primary",
-                "actions": AgentisCodeSessionManager._completion_actions(context),
+                "actions": AgentisCodeSessionManager._completion_actions(context, sess.worktree),
             },
         },
         {

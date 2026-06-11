@@ -9,6 +9,7 @@ workflow runu — pozdější změny ve worktree běžící workflow neovlivní.
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
@@ -144,6 +145,31 @@ class WorkflowOutput(BaseModel):
         return self
 
 
+class WorkflowFollowup(BaseModel):
+    """Followup akce nabídnutá v completion komentáři po doběhnutí workflow.
+
+    Nejsou to samostatné RPC metody — akce dispatchne `start` s názvem workflow
+    v kontextu (`context.adapter.workflow`) a adapter spustí
+    `.agentis/workflows/<workflow>.yaml`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    prompt: str = ""
+    workflow: str
+    continue_previous_run: bool = False
+
+    def to_action(self) -> dict[str, Any]:
+        return {
+            "title": self.title,
+            "prompt": self.prompt,
+            "adapter_method": "start",
+            "workflow": self.workflow,
+            "continue_previous_run": self.continue_previous_run,
+        }
+
+
 class WorkflowStep(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -193,6 +219,8 @@ class WorkflowSpec(BaseModel):
     volumeMounts: list[dict[str, Any]] = Field(default_factory=list)
     imagePullSecrets: list[dict[str, Any]] = Field(default_factory=list)
     steps: list[WorkflowStep] = Field(min_length=1)
+    #: Followup akce nabídnuté po doběhnutí workflow; bez sekce se žádné nenabízí.
+    followups: list[WorkflowFollowup] = Field(default_factory=list)
 
     @field_validator("env", mode="before")
     @classmethod
@@ -221,6 +249,30 @@ def load_workflow_file(path: str | Path, values: dict[str, str]) -> WorkflowFile
     return WorkflowFile.model_validate(interpolate_tokens(raw, values))
 
 
+def load_workflow_followups(path: str | Path) -> list[WorkflowFollowup]:
+    """Best-effort načte jen `workflow.followups` sekci workflow souboru.
+
+    Pro completion komentáře lokálních sessions, kde se workflow nespouští
+    (a plná validace spec by vyžadovala interpolaci a K8s pole). Chybějící
+    soubor nebo nevalidní obsah znamená žádné followup akce — dokončení runu
+    nesmí spadnout na rozbité konfiguraci, ta se projeví až při startu workflow.
+    """
+
+    workflow_path = Path(path)
+    if not workflow_path.is_file():
+        return []
+    try:
+        raw = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+        spec = raw.get("workflow") if isinstance(raw, dict) else None
+        items = spec.get("followups") if isinstance(spec, dict) else None
+        if not isinstance(items, list):
+            return []
+        return [WorkflowFollowup.model_validate(item) for item in items]
+    except Exception as exc:  # noqa: BLE001
+        sys.stderr.write(f"[workflow] invalid followups in {workflow_path}: {exc!r}\n")
+        return []
+
+
 __all__ = [
     "WORKFLOW_DIR_RELPATH",
     "WORKFLOW_FILE_RELPATH",
@@ -229,6 +281,7 @@ __all__ = [
     "WORKFLOW_EXECUTORS",
     "INTERPOLATION_ALLOWLIST",
     "WorkflowConditionError",
+    "WorkflowFollowup",
     "WorkflowInterpolationError",
     "WorkflowOutput",
     "WorkflowStep",
@@ -237,5 +290,6 @@ __all__ = [
     "evaluate_condition",
     "interpolate_tokens",
     "load_workflow_file",
+    "load_workflow_followups",
     "parse_condition",
 ]
