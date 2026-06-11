@@ -40,6 +40,7 @@ from common.artifacts.source_snapshot import (
 )
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 from common.integrations.github_pr import GithubPrError, GithubPrResult, GithubPrService
+from common.status import activity_from_event, get_status_registry
 
 
 _AGENT_SESSION_START_TIMEOUT_SEC = 300.0
@@ -102,6 +103,7 @@ class BaseSessionManager:
         )
         sess.snapshot_key = build_snapshot_key(self._AGENT_LABEL, context.run_id, context.task_id, pending_key)
         snapshot_sources_best_effort(worktree, sess.snapshot_key, label=f"{self._AGENT_LABEL}-start")
+        get_status_registry().run_update(context.run_id, worktree=worktree)
         with self._lock:
             self._sessions[pending_key] = sess
 
@@ -149,6 +151,7 @@ class BaseSessionManager:
             self._AGENT_LABEL, context.run_id, context.task_id, session_id, uuid4().hex
         )
         snapshot_sources_best_effort(worktree, sess.snapshot_key, label=f"{self._AGENT_LABEL}-send")
+        get_status_registry().run_update(context.run_id, worktree=worktree, session_id=session_id)
 
         mode = self._mode_from_context(context)
         mapper = self._make_mapper(
@@ -243,6 +246,7 @@ class BaseSessionManager:
             sess.agent_session_id = session_id
             self._sessions[session_id] = sess
         sess.ready_event.set()
+        get_status_registry().run_update(sess.context.run_id, session_id=session_id)
         if is_new_session:
             self._emit_session_created(sess, session_id)
 
@@ -316,6 +320,7 @@ class BaseSessionManager:
             session_ref = sess.session_id or sess.pending_key
             sess.start_error = str(exc)
             sess.ready_event.set()
+            get_status_registry().run_finished(sess.context.run_id, "failed")
             sys.stderr.write(f"[{self._AGENT_LABEL}-session] {session_ref} crashed: {exc!r}\n")
             self._emit_adapter_event(
                 sess.context,
@@ -353,6 +358,10 @@ class BaseSessionManager:
                 if event.type == "error" and not sess.ready_event.is_set():
                     sess.start_error = event.data.get("message") or "CLI agent failed"
                     sess.ready_event.set()
+
+                activity = activity_from_event(event.type, getattr(event, "data", None))
+                if activity:
+                    get_status_registry().run_activity(sess.context.run_id, activity)
 
                 changed = mapper.consume(event)
 
@@ -417,6 +426,18 @@ class BaseSessionManager:
                     "usage": client.last_usage,
                 },
             )
+
+            # Běžíme ve `finally` — při propagující výjimce je run failed bez ohledu
+            # na abort_event/start_error.
+            if sys.exc_info()[0] is not None:
+                final_status = "failed"
+            elif sess.abort_event.is_set():
+                final_status = "aborted"
+            elif sess.start_error:
+                final_status = "failed"
+            else:
+                final_status = "success"
+            get_status_registry().run_finished(sess.context.run_id, final_status)
 
     @staticmethod
     def _extract_final_text(messages: list[dict[str, Any]]) -> str:
@@ -678,6 +699,8 @@ class BaseSessionManager:
     ) -> None:
         if context is None or not context.run_id:
             return
+        if message:
+            get_status_registry().run_activity(context.run_id, message)
         self._agentis_call(
             method="run.adapter_event",
             params={

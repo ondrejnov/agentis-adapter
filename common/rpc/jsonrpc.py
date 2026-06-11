@@ -21,6 +21,7 @@ from common.adapter_base import BaseAdapterService
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 from common.attachments import build_attachments_block, materialize_attachments, next_attachment_index
 from common.rpc.session_registry import SessionContextRegistry
+from common.status import get_status_registry
 from common.workflow.manager import WorkflowBusyError, WorkflowManager
 
 
@@ -142,9 +143,11 @@ class AgentJsonRpcService:
             adapter_steps.append(workflow_step)
         except WorkflowBusyError as exc:
             run.status = "failed"
+            get_status_registry().run_finished(run.run_id, "failed")
             raise AgentJsonRpcException(409, str(exc)) from exc
         except Exception as exc:
             run.status = "failed"
+            get_status_registry().run_finished(run.run_id, "failed")
             raise AgentJsonRpcException(500, f"Adapter error: {exc}") from exc
         return {
             "run": run.safe_dump(),
@@ -156,6 +159,11 @@ class AgentJsonRpcService:
 
     def start(self, params: StartParams) -> dict[str, Any]:
         context = params.context
+        get_status_registry().run_received(
+            context,
+            kind="workflow" if self._is_workflow_runtime(context) else "agent",
+            method="start",
+        )
         run = RunStatePayload(run_id=context.run_id, context=context)
         run.events.append(
             RunEventPayload(
@@ -235,6 +243,7 @@ class AgentJsonRpcService:
                     self.session_registry.set_snapshot_key(session_id, snapshot_key)
         except Exception as exc:
             run.status = "failed"
+            get_status_registry().run_finished(run.run_id, "failed")
             raise AgentJsonRpcException(500, f"Adapter error: {exc}") from exc
         return {
             "run": run.safe_dump(),
@@ -295,6 +304,11 @@ class AgentJsonRpcService:
         message: str | None = None,
         data: dict[str, Any] | None = None,
     ) -> None:
+        context = getattr(adapter, "context", None)
+        run_id = getattr(context, "run_id", "") if context is not None else ""
+        if run_id and message:
+            get_status_registry().run_activity(run_id, message)
+
         reporter = getattr(adapter, "post_agentis_event", None)
         if not callable(reporter):
             return
@@ -309,6 +323,11 @@ class AgentJsonRpcService:
             return
 
     def add_message(self, params: AddMessageParams) -> dict[str, Any]:
+        get_status_registry().run_received(
+            params.context,
+            kind="workflow" if self._is_workflow_runtime(params.context) else "agent",
+            method="add_message",
+        )
         if self._is_workflow_runtime(params.context):
             context = params.context
             run = RunStatePayload(run_id=context.run_id, context=context)
@@ -328,6 +347,7 @@ class AgentJsonRpcService:
             self.session_registry.register(params.context.session_id, params.context)
             session_id = params.context.session_id
         else:
+            get_status_registry().run_finished(params.context.run_id, "failed")
             raise AgentJsonRpcException(400, "Context must include session_id to add messages")
 
         context = params.context
@@ -391,6 +411,7 @@ class AgentJsonRpcService:
                 self.session_registry.set_snapshot_key(session_id, snapshot_key)
         except Exception as exc:
             run.status = "failed"
+            get_status_registry().run_finished(run.run_id, "failed")
             raise AgentJsonRpcException(500, f"Adapter error: {exc}") from exc
         return {
             "run": run.safe_dump(),
@@ -482,6 +503,7 @@ class AgentJsonRpcService:
 
     def abort(self, params: AbortParams) -> dict[str, Any]:
         context = params.context
+        get_status_registry().abort_received()
         if self._is_workflow_runtime(context):
             run = RunStatePayload(run_id=context.run_id, context=context)
             try:

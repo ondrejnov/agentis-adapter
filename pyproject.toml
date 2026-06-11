@@ -9,6 +9,7 @@ packages = [
     { include = "agentiscode" },
     { include = "opencode" },
     { include = "claude" },
+    { include = "tui" },
 ]
 include = [
     { path = "opencode_api.json", format = ["sdist", "wheel"] },
@@ -16,6 +17,7 @@ include = [
 
 [tool.poetry.scripts]
 agentis-adapter = "app.cli:main"
+agentis-top = "tui.app:main"
 agentiscode = "agentiscode.cli:main"
 
 [tool.poetry.dependencies]
@@ -28,6 +30,7 @@ websockets = "^15.0.1"
 slack-bolt = "^1.21.2"
 pyyaml = "^6.0.3"
 python-dotenv = "^1.2.2"
+textual = "^8.2.7"
 
 [tool.poetry.group.dev.dependencies]
 httpx = "^0.28.1"

@@ -32,6 +32,7 @@ from common.git_adapter import GitAdapterService
 from common.namespaces import namespace_for_context
 from common.models import AgentExecutionContextPayload
 from common.session_manager import BaseSessionManager
+from common.status import get_status_registry
 from common.workflow.local_runtime import LocalProcessRunner
 from common.workflow.runtime import KubectlJobRunner, WorkflowStepRunner, job_labels, job_name, safe_step_name
 from common.workflow.schema import (
@@ -191,6 +192,13 @@ class WorkflowManager:
         )
         with self._lock:
             self._runs[context.task_id] = run
+
+        get_status_registry().run_update(
+            context.run_id,
+            kind="workflow",
+            worktree=str(worktree_path),
+            workflow=workflow_name,
+        )
 
         thread = threading.Thread(
             target=self._thread_main,
@@ -352,8 +360,10 @@ class WorkflowManager:
     def _thread_main(self, run: _WorkflowRun) -> None:
         try:
             self._run_workflow(run)
+            get_status_registry().run_finished(run.context.run_id, run.status)
         except Exception as exc:  # noqa: BLE001
             run.status = "failed"
+            get_status_registry().run_finished(run.context.run_id, "failed")
             sys.stderr.write(f"[workflow] run {run.context.run_id} crashed: {exc!r}\n")
             self._emit_adapter_event(
                 run.context,
@@ -655,6 +665,8 @@ class WorkflowManager:
     ) -> None:
         if not context.run_id:
             return
+        if message:
+            get_status_registry().run_activity(context.run_id, message)
         self._agentis_call(
             method="run.adapter_event",
             params={

@@ -11,6 +11,7 @@ from typing import Any
 from common.config import Settings
 from common.rpc.dispatcher import JsonRpcRoute, dispatch_jsonrpc_payload, error_response
 from common.shutdown import drain_running_work
+from common.status import get_status_registry
 
 
 logger = logging.getLogger(__name__)
@@ -71,8 +72,10 @@ class PassiveWebSocketClient:
             if self._shutdown_event.is_set():
                 return
             attempts += 1
+            get_status_registry().ws_connecting(self.settings.agentis_ws_endpoint, attempts)
             try:
                 await self._run_once()
+                get_status_registry().ws_disconnected(self.settings.agentis_ws_endpoint)
                 if self._shutdown_event.is_set():
                     return
                 attempts = 0
@@ -80,6 +83,7 @@ class PassiveWebSocketClient:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                get_status_registry().ws_disconnected(self.settings.agentis_ws_endpoint, self._error_summary(exc))
                 logger.warning(
                     "Passive WebSocket disconnected adapter_id=%s error=%s",
                     self.settings.agentis_adapter_id,
@@ -112,6 +116,7 @@ class PassiveWebSocketClient:
             max_size=self.settings.websocket_max_message_size,
         ) as websocket:
             logger.info("Passive WebSocket connected adapter_id=%s", self.settings.agentis_adapter_id)
+            get_status_registry().ws_connected(self.settings.agentis_ws_endpoint)
             shutdown_task = asyncio.ensure_future(self._shutdown_event.wait())
             try:
                 while True:

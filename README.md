@@ -36,6 +36,17 @@ agentis-adapter --adapter opencode --id dev-opencode
 agentis-adapter --adapter claude --id dev-claude
 ```
 
+### TUI dashboard `agentis-top`
+
+Adapter pri startu spusti i lokalni read-only status server (`ADAPTER_HOST:ADAPTER_PORT`, default `0.0.0.0:8001`) s endpointy `/status`, `/log` a `/runs/<run_id>/log`. Nad nim bezi terminalovy dashboard:
+
+```bash
+poetry run agentis-top                # default http://127.0.0.1:8001
+poetry run agentis-top --url http://10.0.0.5:8001 --interval 2
+```
+
+Dashboard ukazuje stav WebSocket pripojeni k Agentisu, bezici uloha (kdy prisly, jak dlouho bezi, posledni aktivitu), log vybraneho runu nebo globalni log adapteru (`g` prepina, `f` follow, `q` konec) a souhrnne statistiky od startu adapteru. Je ciste read-only — do adapteru nijak nezasahuje a jeho pripadna nedostupnost (obsazeny port) adapter neshodi.
+
 ### Pasivni WebSocket transport
 
 Adapter se k Agentisu pripojuje odchozim WebSocket spojenim — to je jediny zpusob, jak adapter prijima externi JSON-RPC. Diky tomu nemusi byt adapter dostupny z internetu (zadny inbound port, ingress ani tunel). Nakonfiguruj endpoint, identitu adapteru a token:

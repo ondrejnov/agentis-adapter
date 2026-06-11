@@ -17,6 +17,7 @@ from uuid import uuid4
 from common.config import Settings
 from common.models import AgentExecutionContextPayload
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
+from common.status import get_status_registry
 
 
 def log_json(level: str, message: str, **fields) -> None:
@@ -28,6 +29,7 @@ def log_json(level: str, message: str, **fields) -> None:
     }
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     sys.stdout.flush()
+    get_status_registry().log(level, message, fields)
 
 
 class BaseAdapterService:
