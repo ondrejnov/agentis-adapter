@@ -22,6 +22,7 @@ from common.workflow.schema import (
     PROJECT_WORKFLOW_FILE_RELPATH,
     WORKFLOW_FILE_RELPATH,
     WorkflowConditionError,
+    WorkflowExtendsError,
     WorkflowFile,
     WorkflowInterpolationError,
     evaluate_condition,
@@ -235,6 +236,135 @@ def test_workflow_schema_rejects_invalid_condition_and_var_output(tmp_path: Path
     )
     with pytest.raises(ValidationError):
         load_workflow_file(path, _values(tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# Dědičnost přes `extends`
+# ---------------------------------------------------------------------------
+
+
+BASE_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 600
+  envFiles:
+    - /root/.config/agentis/agentis.env
+  env:
+    HOME: /root
+    SHARED: base
+  imagePullSecrets:
+    - name: registry
+  volumeMounts:
+    - name: www
+      mountPath: /var/www
+    - name: config
+      mountPath: /root/.config
+      readOnly: true
+  followups:
+    - title: Nesmí se dědit
+      workflow: merge
+volumes:
+  - name: www
+    hostPath:
+      path: /var/www
+  - name: config
+    hostPath:
+      path: /root/.config
+"""
+
+CHILD_YAML = """
+version: 1
+extends: _base
+workflow:
+  timeoutSeconds: 60
+  envFiles:
+    - /root/.config/agentis/agentis.env
+    - /etc/child.env
+  env:
+    SHARED: child
+    EXTRA: "1"
+  volumeMounts:
+    - name: config
+      mountPath: /root/.config
+    - name: cache
+      mountPath: /root/.cache
+  steps:
+    - name: Run agent
+      run: agentiscode
+volumes:
+  - name: cache
+    hostPath:
+      path: /root/.cache
+"""
+
+
+def _write_extends_pair(tmp_path: Path, child_yaml: str = CHILD_YAML, base_yaml: str = BASE_YAML) -> Path:
+    workflows = tmp_path / ".agentis/workflows"
+    workflows.mkdir(parents=True, exist_ok=True)
+    (workflows / "_base.yaml").write_text(base_yaml, encoding="utf-8")
+    child_path = workflows / "child.yaml"
+    child_path.write_text(child_yaml, encoding="utf-8")
+    return child_path
+
+
+def test_extends_merges_scalars_env_and_lists(tmp_path: Path) -> None:
+    child_path = _write_extends_pair(tmp_path)
+    workflow = load_workflow_file(child_path, _values(tmp_path))
+    spec = workflow.workflow
+
+    assert spec.image == "registry.example/agent:1.0"  # skalár zděděný z base
+    assert spec.timeoutSeconds == 60  # skalár přepsaný potomkem
+    assert spec.workingDir == str(tmp_path)  # interpolace běží až po merge
+    assert spec.env == {"HOME": "/root", "SHARED": "child", "EXTRA": "1"}
+    assert spec.envFiles == ["/root/.config/agentis/agentis.env", "/etc/child.env"]  # dedupe + append
+    assert spec.imagePullSecrets == [{"name": "registry"}]
+    # volumeMounts: stejné `name` potomek přepisuje na místě, nové se přidává na konec
+    assert spec.volumeMounts == [
+        {"name": "www", "mountPath": "/var/www"},
+        {"name": "config", "mountPath": "/root/.config"},
+        {"name": "cache", "mountPath": "/root/.cache"},
+    ]
+    assert [volume["name"] for volume in workflow.volumes] == ["www", "config", "cache"]
+
+
+def test_extends_never_inherits_steps_and_followups(tmp_path: Path) -> None:
+    child_path = _write_extends_pair(tmp_path)
+    workflow = load_workflow_file(child_path, _values(tmp_path))
+
+    assert [step.name for step in workflow.workflow.steps] == ["Run agent"]
+    assert workflow.workflow.followups == []  # followups z base se nedědí
+
+
+def test_extends_base_is_not_runnable_standalone(tmp_path: Path) -> None:
+    _write_extends_pair(tmp_path)
+    with pytest.raises(ValidationError):  # base nemá steps
+        load_workflow_file(tmp_path / ".agentis/workflows/_base.yaml", _values(tmp_path))
+
+
+def test_extends_missing_target_raises_file_not_found_with_path(tmp_path: Path) -> None:
+    child_path = _write_extends_pair(tmp_path)
+    (tmp_path / ".agentis/workflows/_base.yaml").unlink()
+    with pytest.raises(FileNotFoundError, match=r"_base\.yaml"):
+        load_workflow_file(child_path, _values(tmp_path))
+
+
+def test_extends_rejects_chaining_and_self_reference(tmp_path: Path) -> None:
+    child_path = _write_extends_pair(tmp_path, base_yaml="extends: child\n" + BASE_YAML.lstrip())
+    with pytest.raises(WorkflowExtendsError, match="chained 'extends'"):
+        load_workflow_file(child_path, _values(tmp_path))
+
+    child_path.write_text(CHILD_YAML.replace("extends: _base", "extends: child"), encoding="utf-8")
+    with pytest.raises(WorkflowExtendsError, match="extend itself"):
+        load_workflow_file(child_path, _values(tmp_path))
+
+
+def test_workflow_without_extends_is_unchanged(tmp_path: Path) -> None:
+    _write_workflow(tmp_path)
+    workflow = load_workflow_file(tmp_path / WORKFLOW_FILE_RELPATH, _values(tmp_path))
+    assert workflow.extends is None
+    assert [step.name for step in workflow.workflow.steps] == ["Run agent", "Create pull request"]
 
 
 def test_evaluate_condition_truthiness_negation_and_comparison() -> None:
@@ -801,6 +931,11 @@ def test_repo_action_workflows_parse(tmp_path: Path) -> None:
         assert statuses, f"workflow {name} musí postnout agent_comment"
     close = load_workflow_file(repo_root / workflow_file_relpath("close"), _values(tmp_path))
     assert close.workflow.deleteNamespace, "close workflow má po úspěchu smazat Kubernetes namespace"
+    merge = load_workflow_file(repo_root / workflow_file_relpath("merge"), _values(tmp_path))
+    assert merge.workflow.image, "merge workflow dědí image z _base.yaml"
+    mount_names = [mount["name"] for mount in merge.workflow.volumeMounts]
+    assert "www" in mount_names and "gitconfig" in mount_names, "merge workflow dědí volumeMounts z _base.yaml"
+    assert {volume["name"] for volume in merge.volumes} >= set(mount_names), "každý mount má zděděný volume"
 
 
 def test_failed_step_stops_workflow_and_reports_log_tail(tmp_path: Path) -> None:

@@ -232,20 +232,107 @@ class WorkflowFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     version: Literal[1]
+    #: Jméno rodičovského souboru v `.agentis/workflows/` (bez `.yaml`), ze kterého
+    #: soubor dědí konfiguraci. Vyřeší ho `load_workflow_file()` před validací.
+    extends: str | None = None
     workflow: WorkflowSpec
     volumes: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class WorkflowExtendsError(ValueError):
+    pass
+
+
+#: Pole `workflow` spec, která se z rodiče NIKDY nedědí — potomek je musí definovat sám.
+_NON_INHERITED_SPEC_FIELDS = ("steps", "followups")
+
+#: Seznamová pole `workflow` spec slučovaná položkově (rodič + potomek, viz `_merge_list`).
+_MERGED_SPEC_LIST_FIELDS = ("envFiles", "volumeMounts", "imagePullSecrets")
+
+
+def _merge_list(parent: list[Any], child: list[Any]) -> list[Any]:
+    """Sloučí seznamová pole rodiče a potomka: konkatenace s přepisem podle `name`.
+
+    Položky-mapy se stejným `name` (volumes, volumeMounts, imagePullSecrets)
+    potomek přepisuje na místě — konkatenace by vyrobila duplicitní jména
+    v Job manifestu. Ostatní položky se přidávají na konec, přesné duplikáty
+    (typicky stejný řádek v `envFiles`) se vynechají.
+    """
+
+    merged = list(parent)
+    index_by_name = {
+        item["name"]: index for index, item in enumerate(merged) if isinstance(item, dict) and "name" in item
+    }
+    for item in child:
+        if isinstance(item, dict) and item.get("name") in index_by_name:
+            merged[index_by_name[item["name"]]] = item
+        elif item not in merged:
+            merged.append(item)
+    return merged
+
+
+def _merge_workflow_raw(parent: dict[str, Any], child: dict[str, Any]) -> dict[str, Any]:
+    """Sloučí surové YAML mapy rodiče a potomka podle dědičné sémantiky.
+
+    Skaláry přepisuje potomek, `env` se merguje po klíčích (potomek vyhrává),
+    seznamy infrastruktury (`volumes`, `envFiles`, `volumeMounts`,
+    `imagePullSecrets`) se slučují přes `_merge_list`, `steps` a `followups`
+    se nedědí nikdy. Merge běží nad surovými daty před validací a interpolací,
+    aby se defaulty schématu neprosadily místo hodnot rodiče.
+    """
+
+    merged = {key: value for key, value in parent.items() if key != "workflow"}
+    merged.update({key: value for key, value in child.items() if key not in {"workflow", "extends"}})
+    merged["volumes"] = _merge_list(parent.get("volumes") or [], child.get("volumes") or [])
+
+    parent_spec = dict(parent.get("workflow") or {})
+    child_spec = dict(child.get("workflow") or {})
+    for field in _NON_INHERITED_SPEC_FIELDS:
+        parent_spec.pop(field, None)
+    spec = {**parent_spec, **child_spec}
+    spec["env"] = {**(parent_spec.get("env") or {}), **(child_spec.get("env") or {})}
+    for field in _MERGED_SPEC_LIST_FIELDS:
+        spec[field] = _merge_list(parent_spec.get(field) or [], child_spec.get(field) or [])
+    merged["workflow"] = spec
+    return merged
+
+
+def _read_workflow_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Workflow file not found: {path}")
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Workflow file {path} must contain a YAML mapping")
+    return raw
+
+
+def _resolve_extends(workflow_path: Path, raw: dict[str, Any]) -> dict[str, Any]:
+    """Vyřeší top-level `extends: <name>` — jedna úroveň dědičnosti, bez řetězení."""
+
+    extends = raw.get("extends")
+    if extends is None:
+        return raw
+    if not isinstance(extends, str) or not extends:
+        raise WorkflowExtendsError(f"Workflow file {workflow_path}: 'extends' must be a workflow name string")
+    parent_path = workflow_path.parent / f"{extends}.yaml"
+    if parent_path.resolve() == workflow_path.resolve():
+        raise WorkflowExtendsError(f"Workflow file {workflow_path} cannot extend itself")
+    if not parent_path.is_file():
+        raise FileNotFoundError(f"Workflow extends target not found: {parent_path} (extends: {extends})")
+    parent_raw = _read_workflow_yaml(parent_path)
+    if parent_raw.get("extends") is not None:
+        raise WorkflowExtendsError(
+            f"Workflow file {workflow_path}: chained 'extends' is not supported "
+            f"({parent_path} itself declares 'extends')"
+        )
+    return _merge_workflow_raw(parent_raw, raw)
+
+
 def load_workflow_file(path: str | Path, values: dict[str, str]) -> WorkflowFile:
-    """Načte default.yaml, interpoluje tokeny a zvaliduje schema."""
+    """Načte workflow YAML, vyřeší `extends`, interpoluje tokeny a zvaliduje schema."""
 
     workflow_path = Path(path)
-    if not workflow_path.is_file():
-        raise FileNotFoundError(f"Workflow file not found: {workflow_path}")
-
-    raw = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        raise ValueError(f"Workflow file {workflow_path} must contain a YAML mapping")
+    raw = _resolve_extends(workflow_path, _read_workflow_yaml(workflow_path))
     return WorkflowFile.model_validate(interpolate_tokens(raw, values))
 
 
@@ -281,6 +368,7 @@ __all__ = [
     "WORKFLOW_EXECUTORS",
     "INTERPOLATION_ALLOWLIST",
     "WorkflowConditionError",
+    "WorkflowExtendsError",
     "WorkflowFollowup",
     "WorkflowInterpolationError",
     "WorkflowOutput",

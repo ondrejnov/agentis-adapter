@@ -36,8 +36,9 @@ Workflow YAML leží ve worktree v `.agentis/workflows/`:
 | `default.yaml` | Běžný task run (worktree + git větev); jediný s `followups` |
 | `project.yaml` | `context.adapter.scope == "project"` — běží přímo v adresáři projektu, bez worktree a git operací |
 | `<name>.yaml` (`merge.yaml`, `close.yaml`, …) | Pojmenované workflow z `context.adapter.workflow`; typicky followup akce |
+| `_base.yaml` | Sdílený základ pro `extends` (viz Dědičnost níže); nemá `steps`, samostatně se spustit nedá |
 
-Soubor se načte, interpoluje a **zmrazí jednou na začátku runu** — pozdější změny ve worktree běžící workflow neovlivní. Chybějící soubor pro pojmenované workflow nebo project scope je chyba startu.
+Soubor se načte, vyřeší se `extends`, interpoluje a **zmrazí jednou na začátku runu** — pozdější změny ve worktree běžící workflow neovlivní. Chybějící soubor pro pojmenované workflow nebo project scope je chyba startu.
 
 ### Run soubory
 
@@ -64,6 +65,7 @@ Oba executory spouští `run` skript kroku přes stejný bash wrapper: `set -euo
 
 ```yaml
 version: 1                      # povinné, vždy 1
+extends: _base                  # volitelné: dědičnost z jiného souboru (viz níže)
 workflow:
   executor: local               # volitelné: kubernetes | local; default dle adapteru
   image: registry/image:tag     # povinné pro executor kubernetes
@@ -94,6 +96,21 @@ volumes: [...]                  # K8s volumes (jen kubernetes)
 ```
 
 Schema je striktní (`extra="forbid"`) — neznámé klíče jsou chyba.
+
+### Dědičnost (`extends`)
+
+Top-level pole `extends: <name>` načte před validací soubor `.agentis/workflows/<name>.yaml` jako rodiče a smerguje ho s potomkem — typicky `extends: _base`, aby image, env a volumes nebyly zkopírované v každém workflow. Rodičovský soubor nemusí mít `steps`, takže se samostatně spustit nedá (start na něm selže na validaci). Podporovaná je **jediná úroveň** dědičnosti: rodič s vlastním `extends` (řetězení i cyklus) je chyba `WorkflowExtendsError`; chybějící cílový soubor je `FileNotFoundError` s cestou.
+
+Merge probíhá nad surovým YAML (defaulty schématu nepřebijí hodnoty rodiče) a **interpolace `[%TOKEN%]` běží až po merge** — tokeny v base se vyhodnotí v kontextu runu potomka. Sémantika po polích:
+
+| Pole | Sémantika |
+| --- | --- |
+| skaláry (`image`, `workingDir`, `timeoutSeconds`, `deleteNamespace`, …) | potomek přepisuje rodiče; bez hodnoty v potomkovi platí rodič |
+| `env` | merge po klíčích, potomek vyhrává |
+| `envFiles`, `volumeMounts`, `imagePullSecrets`, `volumes` | konkatenace rodič + potomek; položka-mapa se stejným `name` se přepíše na místě, přesný duplikát se vynechá |
+| `steps`, `followups` | **nedědí se nikdy** — potomek je musí definovat sám |
+
+Konkatenace seznamů (místo přepisu) je zvolená záměrně: potomci typicky jen *přidávají* mounty navíc a přepis by je nutil kopírovat celý base blok, čímž by dědičnost ztratila smysl. Přepis podle `name` zároveň brání duplicitním jménům volumes v Job manifestu a umožňuje cílené přepsání jedné položky (např. zrušit `readOnly`). `steps` se nedědí, protože kroky jsou podstata workflow — „zdědit a upravit“ seznam kroků se nedá vyjádřit srozumitelně.
 
 ### Interpolace tokenů
 
@@ -177,8 +194,11 @@ Z tokenů jsou k dispozici `[%WORKDIR%]` (cwd agenta) a `[%MAIN_DIR%]` (hlavní 
 
 ## Dodávaná workflow
 
+Workflow `default.yaml`, `project.yaml`, `merge.yaml` a `close.yaml` dědí přes `extends: _base` sdílenou infrastrukturu (image, `imagePullSecrets`, `envFiles`, společné env a volumes) z `_base.yaml` a definují jen vlastní kroky a odchylky.
+
 | Soubor | Účel |
 | --- | --- |
+| `_base.yaml` | Sdílený základ pro dědičnost; samostatně nespustitelný (nemá `steps`) |
 | `default.yaml` | Plný task run: příprava `.env` a virtualenvu (podmíněně přes `ENV_READY`), spuštění agenta (`agentiscode`, adapter podle modelu), commit, push + pull request; nabízí followups „Git merge“ a „Zavřít prostředí“ |
 | `project.yaml` | Run nad celým projektem bez gitu — jen spuštění agenta s outputs `agent_comment` + `session_id` |
 | `merge.yaml` | Rebase task větve na base (konflikty řeší AI resolver), fast-forward base větve, push, úklid worktree a větve |
@@ -189,6 +209,8 @@ Z tokenů jsou k dispozici `[%WORKDIR%]` (cwd agenta) a `[%MAIN_DIR%]` (hlavní 
 
 - **`Workflow executor 'kubernetes' vyžaduje 'image'`** — krok nemá `image` ani workflow default; doplnit, nebo přepnout `executor: local`.
 - **`Workflow file not found`** — ve worktree chybí `.agentis/workflows/<soubor>.yaml` (u project scope `project.yaml`, u followup akce soubor pojmenovaného workflow).
+- **`Workflow extends target not found`** — `extends` ukazuje na neexistující soubor v `.agentis/workflows/`.
+- **`chained 'extends' is not supported`** — rodičovský soubor má vlastní `extends`; dědičnost má jen jednu úroveň.
 - **`Unknown workflow token [%X%]`** — token mimo allowlist; viz tabulka výše.
 - **Workflow „busy“** — per task běží jen jeden run; počkat na doběhnutí nebo zavolat `abort`.
 - **Output se nepropsal** — soubor neexistuje, je prázdný, krok byl přeskočen přes `if`, workflow neskončilo úspěchem, nebo cesta vede mimo output root.

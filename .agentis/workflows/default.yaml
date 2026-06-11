@@ -1,4 +1,5 @@
 version: 1
+extends: _base
 workflow:
   # Followup akce nabídnuté v completion komentáři; každá dispatchne `start`
   # s pojmenovaným workflow `.agentis/workflows/<workflow>.yaml`.
@@ -9,46 +10,19 @@ workflow:
     - title: Zavřít prostředí
       prompt: Uklidit prostředí, worktree a task větev.
       workflow: close
-  image: rg.nl-ams.scw.cloud/reactis/opencode:1.3
-  imagePullSecrets:
-    - name: registry
-  workingDir: "[%WORKDIR%]"
-  timeoutSeconds: 14400
-  ttlSecondsAfterFinished: 300
-  envFiles:
-    - /root/.config/agentis/agentis.env
   env:
-    HOME: /root
     TASK_NUMBER: "[%TASK_NUMBER%]"
     TASK_TITLE: "[%TASK_TITLE%]"
-    BRANCH: "[%BRANCH%]"
-    BASE_BRANCH: "[%BASE_BRANCH%]"
     GITHUB_REPO: "[%GITHUB_REPO%]"
-    MAIN_DIR: "[%MAIN_DIR%]"
     AGENT_BROWSER_SCREENSHOT_DIR: "[%WORKDIR%]/.screenshots"
     IS_SANDBOX: 1
     PYTHONPATH: "[%WORKDIR%]/backend"
     PATH: "[%WORKDIR%]/.venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   volumeMounts:
-    - name: www
-      mountPath: /var/www
     - name: npm-cache
       mountPath: /root/.npm
     - name: poetry-cache
       mountPath: /root/.cache/pypoetry
-    - name: gitconfig
-      mountPath: /root/.gitconfig
-      readOnly: true
-    - name: gh-config
-      mountPath: /root/.config/gh
-      readOnly: true
-    - name: agentis-config
-      mountPath: /root/.config/agentis
-      readOnly: true
-    - name: opencode-config
-      mountPath: /root/.config/opencode
-    - name: opencode-share
-      mountPath: /root/.local/share/opencode
     - name: claudecodejson
       mountPath: /root/.claude.json
     - name: claudecode
@@ -150,9 +124,6 @@ workflow:
           type: url
           valueFrom: .agentis/outputs/pull-request-url
 volumes:
-  - name: www
-    hostPath:
-      path: /var/www
   - name: npm-cache
     hostPath:
       path: /root/.npm
@@ -164,25 +135,6 @@ volumes:
   - name: gitnexus
     hostPath:
       path: /root/.gitnexus
-      type: DirectoryOrCreate
-  - name: gitconfig
-    hostPath:
-      path: /root/.gitconfig
-      type: FileOrCreate
-  - name: gh-config
-    hostPath:
-      path: /root/.config/gh
-      type: DirectoryOrCreate
-  - name: agentis-config
-    hostPath:
-      path: /root/.config/agentis/
-  - name: opencode-config
-    hostPath:
-      path: /root/.config/opencode
-      type: DirectoryOrCreate
-  - name: opencode-share
-    hostPath:
-      path: /root/.local/share/opencode
       type: DirectoryOrCreate
   - name: claudecode
     hostPath:
