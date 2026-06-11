@@ -463,13 +463,11 @@ class WorkflowManager:
         if not relpath:
             return None
         path = (run.output_root / relpath).resolve()
-        print(path)
         if run.output_root.resolve() not in path.parents:
             return None
         if not path.is_file():
             return None
         try:
-            print(path.read_text(encoding="utf-8"))
             return path.read_text(encoding="utf-8")
         except OSError:
             return None
