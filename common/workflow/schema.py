@@ -78,10 +78,12 @@ def _coerce_env(value: dict[str, Any]) -> dict[str, str]:
 #: Jména workflow proměnných musí být env-safe — injektují se do prostředí dalších kroků.
 _VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-#: Podmínka kroku: `VAR`, `!VAR`, `VAR == hodnota`, `VAR != 'hodnota'`.
-_CONDITION_RE = re.compile(
-    r"^\s*(?P<neg>!)?\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
-    r"(?:\s*(?P<op>==|!=)\s*(?P<value>'[^']*'|\"[^\"]*\"|[^\s'\"]+))?\s*$"
+#: Term podmínky: `VAR`, `!VAR`, `VAR == hodnota`, `VAR != 'hodnota'`. Neukotvený —
+#: `parse_condition()` jím skenuje výraz mezi spojkami `&&` / `||`. Hodnota bez
+#: uvozovek smí obsahovat osamocené `&` / `|`, ale ne spojky `&&` / `||`.
+_CONDITION_TERM_RE = re.compile(
+    r"\s*(?P<neg>!)?\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:\s*(?P<op>==|!=)\s*(?P<value>'[^']*'|\"[^\"]*\"|(?:[^\s'\"&|]|&(?!&)|\|(?!\|))+))?\s*"
 )
 
 #: Hodnoty považované za nepravdivé v holém `VAR` / `!VAR` testu (case-insensitive).
@@ -92,36 +94,79 @@ class WorkflowConditionError(ValueError):
     pass
 
 
-def parse_condition(expression: str) -> re.Match[str]:
-    """Zvaliduje syntaxi `if` podmínky a vrátí match s groupami neg/name/op/value."""
+class ConditionTerm(BaseModel):
+    """Jeden term `if` podmínky: holý test (`VAR`, `!VAR`) nebo porovnání."""
 
-    match = _CONDITION_RE.match(expression)
-    if match is None:
-        raise WorkflowConditionError(
-            f"Invalid workflow condition {expression!r}; expected VAR, !VAR, VAR == value or VAR != value"
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    negated: bool = False
+    op: Literal["==", "!="] | None = None
+    value: str | None = None
+
+
+def parse_condition(expression: str) -> list[list[ConditionTerm]]:
+    """Zvaliduje syntaxi `if` podmínky a vrátí OR-seznam AND-skupin termů.
+
+    Gramatika: termy `VAR`, `!VAR`, `VAR == hodnota`, `VAR != 'hodnota'`
+    spojené `&&` a `||`; `&&` má přednost před `||`, závorky nejsou.
+    Negace `!` platí jen na holý term, ne na porovnání.
+    """
+
+    groups: list[list[ConditionTerm]] = [[]]
+    pos = 0
+    while True:
+        match = _CONDITION_TERM_RE.match(expression, pos)
+        if match is None:
+            raise WorkflowConditionError(
+                f"Invalid workflow condition {expression!r}; expected VAR, !VAR, "
+                f"VAR == value or VAR != value joined with '&&' / '||'"
+            )
+        if match.group("neg") and match.group("op"):
+            raise WorkflowConditionError(
+                f"Invalid workflow condition {expression!r}; cannot combine '!' with comparison"
+            )
+        groups[-1].append(
+            ConditionTerm(
+                name=match.group("name"),
+                negated=bool(match.group("neg")),
+                op=match.group("op"),
+                value=match.group("value"),
+            )
         )
-    if match.group("neg") and match.group("op"):
-        raise WorkflowConditionError(f"Invalid workflow condition {expression!r}; cannot combine '!' with comparison")
-    return match
+        pos = match.end()
+        if pos == len(expression):
+            return groups
+        if expression.startswith("&&", pos):
+            pos += 2
+        elif expression.startswith("||", pos):
+            groups.append([])
+            pos += 2
+        else:
+            raise WorkflowConditionError(
+                f"Invalid workflow condition {expression!r}; unexpected {expression[pos:]!r} at position {pos}"
+            )
+
+
+def _evaluate_term(term: ConditionTerm, variables: Mapping[str, str]) -> bool:
+    actual = (variables.get(term.name) or "").strip()
+    if term.op is None:
+        truthy = actual.lower() not in _FALSY_VALUES
+        return not truthy if term.negated else truthy
+    expected = term.value or ""
+    if expected[:1] in {"'", '"'}:
+        expected = expected[1:-1]
+    return actual == expected if term.op == "==" else actual != expected
 
 
 def evaluate_condition(expression: str, variables: Mapping[str, str]) -> bool:
-    """Vyhodnotí `if` podmínku kroku nad proměnnými z předchozích kroků.
+    """Vyhodnotí `if` podmínku kroku nad workflow proměnnými.
 
-    Neznámá proměnná se chová jako prázdný string, holý test bere
-    ``""``/``0``/``false``/``no`` jako nepravdu.
+    `A && B || C` se vyhodnotí jako `(A && B) || C`. Neznámá proměnná se chová
+    jako prázdný string, holý test bere ``""``/``0``/``false``/``no`` jako nepravdu.
     """
 
-    match = parse_condition(expression)
-    actual = (variables.get(match.group("name")) or "").strip()
-    op = match.group("op")
-    if op is None:
-        truthy = actual.lower() not in _FALSY_VALUES
-        return not truthy if match.group("neg") else truthy
-    expected = match.group("value")
-    if expected[0] in {"'", '"'}:
-        expected = expected[1:-1]
-    return actual == expected if op == "==" else actual != expected
+    return any(all(_evaluate_term(term, variables) for term in group) for group in parse_condition(expression))
 
 
 class WorkflowOutput(BaseModel):
@@ -153,12 +198,21 @@ class WorkflowFollowup(BaseModel):
     `.agentis/workflows/<workflow>.yaml`.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     title: str
     prompt: str = ""
     workflow: str
     continue_previous_run: bool = False
+    #: Podmínka nad `var` outputs runu; followup bez podmínky se nabízí vždy.
+    if_: str | None = Field(default=None, alias="if")
+
+    @field_validator("if_")
+    @classmethod
+    def validate_condition_syntax(cls, value: str | None) -> str | None:
+        if value is not None:
+            parse_condition(value)
+        return value
 
     def to_action(self) -> dict[str, Any]:
         return {
@@ -349,6 +403,10 @@ def load_workflow_followups(path: str | Path) -> list[WorkflowFollowup]:
     (a plná validace spec by vyžadovala interpolaci a K8s pole). Chybějící
     soubor nebo nevalidní obsah znamená žádné followup akce — dokončení runu
     nesmí spadnout na rozbité konfiguraci, ta se projeví až při startu workflow.
+
+    Podmíněné followups (`if`) se přeskakují: lokální sessions nemají `var`
+    outputs runu, nad kterými by se podmínka dala vyhodnotit, a akce
+    s nevyhodnotitelnou podmínkou se konzervativně nenabízí.
     """
 
     workflow_path = Path(path)
@@ -360,7 +418,8 @@ def load_workflow_followups(path: str | Path) -> list[WorkflowFollowup]:
         items = spec.get("followups") if isinstance(spec, dict) else None
         if not isinstance(items, list):
             return []
-        return [WorkflowFollowup.model_validate(item) for item in items]
+        followups = [WorkflowFollowup.model_validate(item) for item in items]
+        return [followup for followup in followups if followup.if_ is None]
     except Exception as exc:  # noqa: BLE001
         sys.stderr.write(f"[workflow] invalid followups in {workflow_path}: {exc!r}\n")
         return []
@@ -373,6 +432,7 @@ __all__ = [
     "workflow_file_relpath",
     "WORKFLOW_EXECUTORS",
     "INTERPOLATION_ALLOWLIST",
+    "ConditionTerm",
     "WorkflowConditionError",
     "WorkflowExtendsError",
     "WorkflowFollowup",

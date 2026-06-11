@@ -140,7 +140,16 @@ Kromě `workflow.env` / `step.env` dostane každý krok od adapteru:
 
 ### Podmínky `if`
 
-Krok s `if` se spustí jen při splnění podmínky nad proměnnými z `var` outputs předchozích kroků. Syntaxe: `VAR`, `!VAR`, `VAR == hodnota`, `VAR != 'hodnota'`. Neznámá proměnná se chová jako prázdný string; holý test bere `""`/`0`/`false`/`no` (case-insensitive) jako nepravdu. Outputs přeskočeného kroku se na konci neaplikují.
+Krok s `if` se spustí jen při splnění podmínky. Proměnnými podmínky jsou:
+
+- `var` outputs předchozích kroků,
+- built-in hodnoty runu — všechny interpolační tokeny z tabulky výše (`GITHUB_REPO`, `BRANCH`, `BASE_BRANCH`, `TASK_NUMBER`, …); stejná jména dostávají kroky i jako env proměnné.
+
+Při kolizi jmen vyhrává `var` output kroku nad built-in hodnotou (krok tak může built-in hodnotu pro zbytek workflow přepsat).
+
+Gramatika: termy `VAR`, `!VAR`, `VAR == hodnota`, `VAR != 'hodnota'` spojené `&&` a `||`. `&&` má přednost před `||` — `A && B || C` se vyhodnotí jako `(A && B) || C`; závorky nejsou. Negace `!` platí jen na jednotlivý holý term, ne na porovnání ani skupinu. Hodnota porovnání s mezerami nebo se spojkou `&&` / `||` musí být v uvozovkách (`MODE == 'a && b'`).
+
+Neznámá proměnná se chová jako prázdný string; holý test `VAR` bere `""`/`0`/`false`/`no` (case-insensitive) jako nepravdu. Syntaxe podmínek se validuje už při načtení workflow souboru. Přeskočení kroku se hlásí jako event `workflow_step` se statusem `skipped` a podmínkou v datech; outputs přeskočeného kroku se na konci neaplikují.
 
 ```yaml
 - name: Check environment
@@ -154,6 +163,9 @@ Krok s `if` se spustí jen při splnění podmínky nad proměnnými z `var` out
 - name: Create virtualenv
   if: ENV_READY != 'true'
   run: python3.13 -m venv .venv
+- name: Create pull request
+  if: GITHUB_REPO && ENV_READY != 'true'
+  run: gh pr create ...
 ```
 
 ### Outputs
@@ -187,12 +199,15 @@ Sekce `workflow.followups` definuje akce nabídnuté v completion komentáři po
 ```yaml
 followups:
   - title: Git merge
+    if: PR_CREATED                 # volitelné — podmínka nad `var` outputs runu
     prompt: Sloučit změny z task větve do hlavní větve.
     workflow: merge
     continue_previous_run: false   # volitelné
 ```
 
-Workflow bez sekce (`project.yaml`, `merge.yaml`, `close.yaml`) žádné akce nenabízí. Lokální CLI sessions čtou sekci best-effort přes `load_workflow_followups()` — nevalidní soubor znamená jen žádné akce, dokončení runu na něm nespadne.
+Volitelné `if` podmíní nabídku akce výsledkem konkrétního runu: vyhodnocuje se nad `var` outputs runu stejnou gramatikou jako `if` kroků (viz výše), ale **bez built-in hodnot** — k dispozici jsou jen proměnné z `var` outputs úspěšně doběhlých kroků. Followup bez podmínky se nabízí vždy. Syntaxe se validuje při načtení workflow souboru. V `default.yaml` tak „Git merge" závisí na `PR_CREATED` (krok „Create pull request" čte `.agentis/outputs/pull-request-url` i jako var) — run bez commitů a PR akci nenabídne, „Zavřít prostředí" se nabízí vždy.
+
+Workflow bez sekce (`project.yaml`, `merge.yaml`, `close.yaml`) žádné akce nenabízí. Lokální CLI sessions čtou sekci best-effort přes `load_workflow_followups()` — nevalidní soubor znamená jen žádné akce, dokončení runu na něm nespadne. Lokální sessions navíc nemají žádné `var` outputs runu, takže podmíněné followups (`if`) se v nich konzervativně přeskakují — akce s nevyhodnotitelnou podmínkou se nenabízí.
 
 ### Prostředí lokálních sessions (`local-env.yaml`)
 
@@ -212,7 +227,7 @@ Workflow `default.yaml`, `project.yaml`, `merge.yaml` a `close.yaml` dědí pře
 | Soubor | Účel |
 | --- | --- |
 | `_base.yaml` | Sdílený základ pro dědičnost; samostatně nespustitelný (nemá `steps`) |
-| `default.yaml` | Plný task run: příprava `.env` a virtualenvu (podmíněně přes `ENV_READY`), spuštění agenta (`agentiscode`, adapter podle modelu), commit, push + pull request; nabízí followups „Git merge“ a „Zavřít prostředí“ |
+| `default.yaml` | Plný task run: příprava `.env` a virtualenvu (podmíněně přes `ENV_READY`), spuštění agenta (`agentiscode`, adapter podle modelu), commit, push + pull request (jen s nastaveným repozitářem — `if: GITHUB_REPO`); nabízí followups „Git merge“ a „Zavřít prostředí“ |
 | `project.yaml` | Run nad celým projektem bez gitu — jen spuštění agenta s outputs `agent_comment` + `session_id` |
 | `merge.yaml` | Rebase task větve na base (konflikty řeší AI resolver), fast-forward base větve, push, úklid worktree a větve; při selhání pošle failure komentář (`always` krok) |
 | `close.yaml` | Úklid worktree a task větve bez merge; `deleteNamespace: true` |

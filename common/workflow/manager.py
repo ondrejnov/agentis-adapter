@@ -382,6 +382,9 @@ class WorkflowManager:
         if run.snapshot_key:
             snapshot_sources_best_effort(run.worktree, run.snapshot_key, label="workflow-start")
         env = self._runtime_env(run)
+        #: Built-in hodnoty (INTERPOLATION_ALLOWLIST) dostupné v `if` podmínkách;
+        #: `var` output stejného jména z kroku built-in hodnotu přepisuje.
+        builtin_vars = self._interpolation_values(run.context, run.worktree, run.namespace, run_dir=run.run_dir)
         run.runner.prepare(run.workflow, namespace=run.namespace, run_dir=run.run_dir)
         workflow_event_id = f"workflow:{run.context.run_id}:{run.attempt_id}"
         self._emit_adapter_event(
@@ -412,7 +415,7 @@ class WorkflowManager:
                     data={"step": step.name, "skipped": True, "failed_step": failed_step},
                 )
                 continue
-            if step.if_ is not None and not evaluate_condition(step.if_, run.vars):
+            if step.if_ is not None and not evaluate_condition(step.if_, {**builtin_vars, **run.vars}):
                 run.skipped_steps.add(index)
                 self._emit_adapter_event(
                     run.context,
@@ -651,11 +654,16 @@ class WorkflowManager:
             # Followup akce se konfigurují v `workflow.followups` sekci workflow YAML;
             # pojmenovaná workflow (merge/close) sekci nemají, takže další akce nenabízí.
             # U failure komentáře se akce nenabízí vůbec — merge/close rozdělané práce
-            # po selhaném runu nedává smysl.
+            # po selhaném runu nedává smysl. Followup s `if` se nabídne jen při splnění
+            # podmínky nad `var` outputs runu; bez podmínky se nabízí vždy.
             actions = (
                 []
                 if run.status == "failed"
-                else [followup.to_action() for followup in run.workflow.workflow.followups]
+                else [
+                    followup.to_action()
+                    for followup in run.workflow.workflow.followups
+                    if followup.if_ is None or evaluate_condition(followup.if_, run.vars)
+                ]
             )
             self._agentis_call(
                 method="task.add_agent_comment",

@@ -28,6 +28,7 @@ from common.workflow.schema import (
     evaluate_condition,
     interpolate_tokens,
     load_workflow_file,
+    load_workflow_followups,
     workflow_file_relpath,
 )
 
@@ -208,6 +209,17 @@ def test_workflow_schema_rejects_unknown_keys(tmp_path: Path) -> None:
         load_workflow_file(path, _values(tmp_path))
 
 
+def test_workflow_schema_accepts_logical_condition(tmp_path: Path) -> None:
+    path = tmp_path / "ci.yaml"
+    path.write_text(
+        "version: 1\nworkflow:\n  image: x\n  steps:\n"
+        "    - name: a\n      if: GITHUB_REPO && ENV_READY != 'true' || FORCE\n      run: echo\n",
+        encoding="utf-8",
+    )
+    workflow = load_workflow_file(path, _values(tmp_path))
+    assert workflow.workflow.steps[0].if_ == "GITHUB_REPO && ENV_READY != 'true' || FORCE"
+
+
 def test_workflow_schema_parses_if_and_var_outputs(tmp_path: Path) -> None:
     path = tmp_path / "ci.yaml"
     path.write_text(CONDITIONAL_WORKFLOW_YAML, encoding="utf-8")
@@ -223,7 +235,7 @@ def test_workflow_schema_parses_if_and_var_outputs(tmp_path: Path) -> None:
 def test_workflow_schema_rejects_invalid_condition_and_var_output(tmp_path: Path) -> None:
     path = tmp_path / "ci.yaml"
     path.write_text(
-        "version: 1\nworkflow:\n  image: x\n  steps:\n    - name: a\n      if: 'A && B'\n      run: echo\n",
+        "version: 1\nworkflow:\n  image: x\n  steps:\n    - name: a\n      if: 'A &&'\n      run: echo\n",
         encoding="utf-8",
     )
     with pytest.raises(ValidationError):
@@ -236,6 +248,44 @@ def test_workflow_schema_rejects_invalid_condition_and_var_output(tmp_path: Path
     )
     with pytest.raises(ValidationError):
         load_workflow_file(path, _values(tmp_path))
+
+
+FOLLOWUPS_WITH_CONDITION_YAML = """
+version: 1
+workflow:
+  image: x
+  followups:
+    - title: Git merge
+      if: PR_CREATED
+      workflow: merge
+    - title: Zavřít prostředí
+      workflow: close
+  steps:
+    - name: a
+      run: echo
+"""
+
+
+def test_followup_invalid_condition_fails_full_load_but_followups_loader_swallows(tmp_path: Path) -> None:
+    path = tmp_path / "ci.yaml"
+    path.write_text(FOLLOWUPS_WITH_CONDITION_YAML.replace("PR_CREATED", "PR_CREATED &&"), encoding="utf-8")
+
+    # plné načtení (start workflow) je chyba ...
+    with pytest.raises(ValidationError):
+        load_workflow_file(path, _values(tmp_path))
+    # ... best-effort loader lokálních sessions ji dál polyká
+    assert load_workflow_followups(path) == []
+
+
+def test_load_workflow_followups_skips_conditional_actions(tmp_path: Path) -> None:
+    # lokální sessions nemají `var` outputs runu — followup s `if` se konzervativně nenabízí
+    path = tmp_path / "ci.yaml"
+    path.write_text(FOLLOWUPS_WITH_CONDITION_YAML, encoding="utf-8")
+
+    workflow = load_workflow_file(path, _values(tmp_path))
+    assert [followup.if_ for followup in workflow.workflow.followups] == ["PR_CREATED", None]
+
+    assert [followup.title for followup in load_workflow_followups(path)] == ["Zavřít prostředí"]
 
 
 # ---------------------------------------------------------------------------
@@ -383,9 +433,33 @@ def test_evaluate_condition_truthiness_negation_and_comparison() -> None:
     # mezery kolem hodnoty ze souboru ořezává manager, ale i tak: neznámá proměnná == prázdno
     assert evaluate_condition("MODE != 'fast'", {})
     with pytest.raises(WorkflowConditionError):
-        evaluate_condition("A && B", {})
+        evaluate_condition("A ==", {})
     with pytest.raises(WorkflowConditionError):
         evaluate_condition("!A == 'x'", {})
+
+
+def test_evaluate_condition_logical_operators_and_precedence() -> None:
+    variables = {"A": "1", "B": "yes", "F": "0"}
+    assert evaluate_condition("A && B", variables)
+    assert not evaluate_condition("A && F", variables)
+    assert evaluate_condition("F || A", variables)
+    assert not evaluate_condition("F || MISSING", variables)  # neznámá proměnná = prázdný string
+    # `&&` má přednost před `||`: `A && B || C` ≡ `(A && B) || C`
+    assert evaluate_condition("A && F || B", variables)
+    assert not evaluate_condition("A && F || F", variables)
+    assert evaluate_condition("F || A && B", variables)
+    assert not evaluate_condition("F || A && F", variables)
+    # negace a porovnání jako termy spojek
+    assert evaluate_condition("!F && A", variables)
+    assert evaluate_condition("A == 1 && B != 'no'", variables)
+    assert evaluate_condition("MODE == 'a && b' || F", {"MODE": "a && b"})  # spojka v quoted hodnotě
+    assert evaluate_condition("A&&B", variables)  # spojky fungují i bez mezer
+
+
+def test_parse_condition_rejects_malformed_logical_expressions() -> None:
+    for expression in ("", "A &&", "&& B", "A || ", "A & B", "A | B", "(A) && B", "A !B", "!A == 'x' && B"):
+        with pytest.raises(WorkflowConditionError):
+            evaluate_condition(expression, {})
 
 
 def test_interpolation_replaces_allowlisted_tokens_and_rejects_unknown() -> None:
@@ -726,6 +800,134 @@ def test_conditional_step_runs_when_condition_holds(tmp_path: Path) -> None:
 
     step_indexes = [record["labels"]["agentis.step_index"] for record in runner.steps]
     assert step_indexes == ["0", "1", "2"]
+
+
+BUILTIN_CONDITION_WORKFLOW_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 120
+  steps:
+    - name: Emit branch override
+      run: emit
+      outputs:
+        - type: var
+          name: BRANCH
+          valueFrom: .agentis/outputs/branch-override
+    - name: Create pull request
+      if: GITHUB_REPO
+      run: gh pr create
+    - name: Var output wins over builtin
+      if: BRANCH == 'from-step'
+      run: echo
+"""
+
+
+def _start_builtin_condition_workflow(tmp_path: Path, context: AgentExecutionContextPayload) -> tuple[FakeRunner, list[tuple[str, dict[str, Any]]]]:
+    worktree = tmp_path / "wt"
+    path = worktree / WORKFLOW_FILE_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(BUILTIN_CONDITION_WORKFLOW_YAML, encoding="utf-8")
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "branch-override").write_text("from-step\n", encoding="utf-8")
+
+    runner = FakeRunner()
+    manager, calls = _manager(tmp_path, runner)
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+    assert manager._runs[context.task_id].status == "success"
+    return runner, calls
+
+
+def test_if_condition_skips_step_on_empty_builtin_token(tmp_path: Path) -> None:
+    # bez project_github_repo je built-in GITHUB_REPO prázdný → krok se přeskočí;
+    # `var` output BRANCH z prvního kroku přepíše built-in hodnotu větve
+    runner, calls = _start_builtin_condition_workflow(tmp_path, _context())
+
+    step_indexes = [record["labels"]["agentis.step_index"] for record in runner.steps]
+    assert step_indexes == ["0", "2"]
+
+    skip_events = [
+        params
+        for method, params in calls
+        if method == "run.adapter_event" and params["kind"] == "workflow_step" and params["data"].get("skipped")
+    ]
+    assert len(skip_events) == 1
+    assert skip_events[0]["status"] == "skipped"
+    assert skip_events[0]["data"]["step"] == "Create pull request"
+    assert skip_events[0]["data"]["condition"] == "GITHUB_REPO"
+
+
+def test_if_condition_runs_step_on_nonempty_builtin_token(tmp_path: Path) -> None:
+    runner, _calls = _start_builtin_condition_workflow(tmp_path, _context(project_github_repo="org/repo"))
+
+    step_indexes = [record["labels"]["agentis.step_index"] for record in runner.steps]
+    assert step_indexes == ["0", "1", "2"]
+
+
+CONDITIONAL_FOLLOWUPS_WORKFLOW_YAML = """
+version: 1
+workflow:
+  followups:
+    - title: Git merge
+      if: PR_CREATED
+      workflow: merge
+    - title: Zavřít prostředí
+      workflow: close
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 120
+  steps:
+    - name: Run agent
+      run: agentiscode < "$AGENTIS_PROMPT_FILE"
+      outputs:
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/final-comment.md
+          status: 4
+    - name: Create pull request
+      run: gh pr create
+      outputs:
+        - type: var
+          name: PR_CREATED
+          valueFrom: .agentis/outputs/pull-request-url
+"""
+
+
+def _completion_actions_for_followup_workflow(tmp_path: Path, *, pr_url: str | None) -> list[dict[str, Any]]:
+    worktree = tmp_path / "wt"
+    path = worktree / WORKFLOW_FILE_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(CONDITIONAL_FOLLOWUPS_WORKFLOW_YAML, encoding="utf-8")
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "final-comment.md").write_text("Hotovo.", encoding="utf-8")
+    if pr_url is not None:
+        (outputs_dir / "pull-request-url").write_text(pr_url, encoding="utf-8")
+
+    runner = FakeRunner()
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+    assert manager._runs[context.task_id].status == "success"
+
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert len(comment_calls) == 1
+    return comment_calls[0]["actions"]
+
+
+def test_conditional_followup_offered_when_run_var_is_truthy(tmp_path: Path) -> None:
+    actions = _completion_actions_for_followup_workflow(tmp_path, pr_url="https://github.com/org/repo/pull/1\n")
+    assert [action["title"] for action in actions] == ["Git merge", "Zavřít prostředí"]
+
+
+def test_conditional_followup_skipped_without_run_var_unconditional_stays(tmp_path: Path) -> None:
+    # run nevytvořil PR (var soubor neexistuje → PR_CREATED prázdné) — „Git merge" se
+    # nenabídne, followup bez podmínky zůstává
+    actions = _completion_actions_for_followup_workflow(tmp_path, pr_url=None)
+    assert [action["title"] for action in actions] == ["Zavřít prostředí"]
 
 
 def test_project_scope_uses_project_yaml_and_run_dir_outside_project(tmp_path: Path) -> None:

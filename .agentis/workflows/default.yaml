@@ -5,6 +5,7 @@ workflow:
   # s pojmenovaným workflow `.agentis/workflows/<workflow>.yaml`.
   followups:
     - title: Git merge
+      if: PR_CREATED
       prompt: Sloučit změny z task větve do hlavní větve.
       workflow: merge
     - title: Zavřít prostředí
@@ -94,13 +95,10 @@ workflow:
           valueFrom: .agentis/label-code-tasks-state.json
 
     - name: Create pull request
+      if: GITHUB_REPO
       run: |
         mkdir -p .agentis/outputs
         rm -f .agentis/outputs/pull-request-url
-        if [ -z "$GITHUB_REPO" ]; then
-          echo "Bez GitHub repozitáře, pull request se přeskakuje."
-          exit 0
-        fi
         git fetch origin "$BASE_BRANCH"
         if [ "$(git rev-list --count FETCH_HEAD..HEAD)" -eq 0 ]; then
           echo "Žádné commity oproti ${BASE_BRANCH}, pull request se přeskakuje."
@@ -122,6 +120,9 @@ workflow:
       outputs:
         - label: Pull Request
           type: url
+          valueFrom: .agentis/outputs/pull-request-url
+        - type: var
+          name: PR_CREATED
           valueFrom: .agentis/outputs/pull-request-url
 volumes:
   - name: npm-cache
