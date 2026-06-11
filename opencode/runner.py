@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
 
 from common.cli_session import unbounded_line_reader as _unbounded_line_reader
-from common.local_setup import build_local_setup_shell_command
+from common.workflow.local_env import build_local_env_shell_command
 
 
 PROMPT_FILE_MESSAGE = "Read the attached prompt file and follow its instructions exactly."
@@ -199,7 +199,7 @@ class OpenCodeRunner:
             args = cfg.build_args(PROMPT_FILE_MESSAGE, prompt_file=local_prompt_path)
         else:
             args = cfg.build_args(prompt)
-        local_command = build_local_setup_shell_command([cfg.command, *args])
+        local_command = build_local_env_shell_command([cfg.command, *args], cwd=cfg.cwd)
         print(local_command)
         try:
             proc = await asyncio.create_subprocess_exec(

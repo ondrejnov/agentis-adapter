@@ -1,0 +1,17 @@
+version: 1
+# Prostředí lokálního spuštění agent CLI (náhrada za .agentis/local-setup.sh).
+# Čte se best-effort při každém spawnu agenta v lokální session: venv worktree
+# má na PATH přednost před venv hlavního worktree, studený start venv vytvoří.
+# Hodnoty env expanduje bash ($PATH zachová PATH hosta); kroky běží v subshellu,
+# `exit 0` ukončí jen krok, ne spuštění agenta.
+workflow:
+  env:
+    PATH: "[%WORKDIR%]/.venv/bin:[%MAIN_DIR%]/.venv/bin:$PATH"
+  steps:
+    - name: Ensure virtualenv
+      run: |
+        if [ -x .venv/bin/python ] || [ -x "$MAIN_DIR/.venv/bin/python" ]; then
+          exit 0
+        fi
+        python3.13 -m venv .venv
+        poetry install --no-interaction --no-ansi

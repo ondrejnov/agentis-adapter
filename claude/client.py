@@ -33,7 +33,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
 import asyncio
 
 from common.cli_session import unbounded_line_reader as _unbounded_line_reader
-from common.local_setup import build_local_setup_shell_command
+from common.workflow.local_env import build_local_env_shell_command
 
 
 # Po terminálním `result` eventu necháme claude CLI doběhnout jen krátce; pokud
@@ -200,7 +200,7 @@ class ClaudeCodeClient:
             yield ClaudeEvent("error", {"message": "bash nenalezeno v PATH pro lokální spuštění claude"})
             return
 
-        local_command = build_local_setup_shell_command([cfg.command, *args])
+        local_command = build_local_env_shell_command([cfg.command, *args], cwd=cfg.cwd)
         proc = await asyncio.create_subprocess_exec(
             "bash",
             "-c",

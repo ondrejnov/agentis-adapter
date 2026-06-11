@@ -127,7 +127,7 @@ def test_build_args_resume_session() -> None:
     assert args[args.index("--session") + 1] == "ses_42"
 
 
-def test_stream_wraps_local_opencode_with_local_setup(monkeypatch) -> None:
+def test_stream_execs_local_opencode_directly_without_local_env_workflow(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
@@ -145,11 +145,45 @@ def test_stream_wraps_local_opencode_with_local_setup(monkeypatch) -> None:
 
     assert events == []
     assert captured["args"][:2] == ("bash", "-c")
-    assert ". .agentis/local-setup.sh" in captured["args"][2]
-    assert "exec opencode run 'Do X' --format json" in captured["args"][2]
+    assert captured["args"][2].startswith("exec opencode run 'Do X' --format json")
     assert "--file" not in captured["args"][2]
     assert "--model haiku" in captured["args"][2]
     assert captured["cwd"] == "/work/project"
+
+
+def test_stream_wraps_local_opencode_with_local_env_workflow(monkeypatch, tmp_path) -> None:
+    workflow_path = tmp_path / ".agentis" / "workflows" / "local-env.yaml"
+    workflow_path.parent.mkdir(parents=True)
+    workflow_path.write_text(
+        "version: 1\n"
+        "workflow:\n"
+        "  env:\n"
+        '    PATH: "[%WORKDIR%]/.venv/bin:$PATH"\n'
+        "  steps:\n"
+        "    - name: Ensure virtualenv\n"
+        "      run: ensure-venv\n",
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
+        captured["args"] = args
+        return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+
+    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    async def collect_events() -> list[dict[str, Any]]:
+        client = OpenCodeRunner(config=OpenCodeRunConfig(command="opencode", cwd=str(tmp_path), model="haiku"))
+        return [{"type": event.type, **event.data} async for event in client.stream("Do X")]
+
+    events = asyncio.run(collect_events())
+
+    assert events == []
+    script = captured["args"][2]
+    assert script.startswith("set -euo pipefail")
+    assert f'export PATH="{tmp_path}/.venv/bin:$PATH"' in script
+    assert "(\nensure-venv\n)" in script
+    assert script.endswith("exec opencode run 'Do X' --format json --dangerously-skip-permissions --model haiku")
 
 
 def test_stream_uses_temp_prompt_file_for_long_local_prompt(monkeypatch) -> None:
