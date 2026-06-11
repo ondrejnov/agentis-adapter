@@ -438,6 +438,52 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
         assert "AGENTIS_TOKEN" not in env
 
 
+def test_workflow_outputs_add_directory_link_and_changes_diff(monkeypatch, tmp_path: Path) -> None:
+    from common.artifacts import source_snapshot
+
+    monkeypatch.setattr(source_snapshot, "SNAPSHOT_ROOT", tmp_path / "snapshots")
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+    (worktree / "app.py").write_text("old\n", encoding="utf-8")
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "final-comment.md").write_text("Hotovo.", encoding="utf-8")
+
+    runner = FakeRunner()
+    runner.release.clear()
+    manager, calls = _manager(tmp_path, runner)
+    context = _context(ide="vscode://file/[%WORKDIR%]?windowId=_blank")
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+
+    # počkej, až proběhne start snapshot a první krok se zablokuje ve FakeRunneru
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not runner.steps:
+        time.sleep(0.01)
+    assert runner.steps
+
+    # změna provedená "agentem" během workflow se má objevit v Changes diffu
+    (worktree / "app.py").write_text("new\n", encoding="utf-8")
+    runner.release.set()
+    _wait_done(manager, context.task_id)
+
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert len(comment_calls) == 1
+    attachments = comment_calls[0]["attachments"]
+    assert attachments[0] == {
+        "label": "Directory",
+        "value": f"vscode://file/{worktree}?windowId=_blank",
+        "type": "url",
+    }
+    diff_attachment = attachments[-1]
+    assert diff_attachment["label"] == "Changes diff"
+    assert diff_attachment["type"] == "diff"
+    assert "-old" in diff_attachment["value"]
+    assert "+new" in diff_attachment["value"]
+    # diff soubor zůstává ve worktree jako dřív
+    assert (worktree / source_snapshot.CHANGES_DIFF_NAME).is_file()
+
+
 def test_conditional_step_is_skipped_and_vars_flow_into_env(tmp_path: Path) -> None:
     worktree = tmp_path / "wt"
     path = worktree / WORKFLOW_FILE_RELPATH
@@ -591,7 +637,10 @@ def test_named_workflow_runs_action_yaml_with_run_files_outside_worktree(tmp_pat
     runner = FakeRunner()
     runner.release.clear()
     manager, calls = _manager(tmp_path, runner)
-    context = _context(adapter={"runtime": "workflow", "workflow": "merge"})
+    context = _context(
+        adapter={"runtime": "workflow", "workflow": "merge"},
+        ide="vscode://file/[%WORKDIR%]?windowId=_blank",
+    )
 
     result = manager.start_workflow(context, str(worktree), "Sloučit změny z task větve do hlavní větve.")
     assert result["workflow"] == "merge"
@@ -616,6 +665,9 @@ def test_named_workflow_runs_action_yaml_with_run_files_outside_worktree(tmp_pat
     assert comment_calls[0]["status"] == 5
     # followup akce už další completion akce nenabízí
     assert comment_calls[0]["actions"] == []
+    # pojmenovaná workflow nesnapshotují a neposílají Directory/Changes diff —
+    # akce může worktree sama smazat
+    assert comment_calls[0]["attachments"] == []
 
 
 def test_named_workflow_without_file_fails_with_clear_error(tmp_path: Path) -> None:

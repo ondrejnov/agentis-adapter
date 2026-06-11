@@ -21,6 +21,12 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
+from common.artifacts.source_snapshot import (
+    build_snapshot_key,
+    changes_diff_attachment,
+    snapshot_sources_best_effort,
+    write_changes_diff_best_effort,
+)
 from common.config import Settings
 from common.git_adapter import GitAdapterService
 from common.namespaces import namespace_for_context
@@ -58,6 +64,9 @@ class _WorkflowRun:
     context_file: Path
     executor: str
     runner: WorkflowStepRunner
+    #: Klíč snapshotu zdrojáků pro "Changes diff" attachment; None pro pojmenovaná
+    #: workflow (merge/close), která můžou worktree sama smazat.
+    snapshot_key: Optional[str] = None
     abort_event: threading.Event = field(default_factory=threading.Event)
     thread: Optional[threading.Thread] = None
     status: str = "running"
@@ -174,6 +183,11 @@ class WorkflowManager:
             context_file=context_file,
             executor=executor,
             runner=runner,
+            snapshot_key=(
+                None
+                if workflow_name
+                else build_snapshot_key("workflow", context.run_id, context.task_id, attempt_id)
+            ),
         )
         with self._lock:
             self._runs[context.task_id] = run
@@ -323,6 +337,8 @@ class WorkflowManager:
             )
 
     def _run_workflow(self, run: _WorkflowRun) -> None:
+        if run.snapshot_key:
+            snapshot_sources_best_effort(run.worktree, run.snapshot_key, label="workflow-start")
         env = self._runtime_env(run)
         run.runner.prepare(run.workflow, namespace=run.namespace, run_dir=run.run_dir)
         workflow_event_id = f"workflow:{run.context.run_id}:{run.attempt_id}"
@@ -494,6 +510,16 @@ class WorkflowManager:
         attachments: list[dict[str, Any]] = []
         artifacts: list[dict[str, Any]] = []
 
+        ide = (run.context.ide or "").strip()
+        if ide and run.snapshot_key and not GitAdapterService.is_project_scope(run.context):
+            attachments.append(
+                {
+                    "label": "Directory",
+                    "value": ide.replace("[%WORKDIR%]", str(run.worktree)),
+                    "type": "url",
+                }
+            )
+
         for output in outputs:
             if output.type == "agent_comment":
                 body = self._read_output_file(run, output.bodyFrom)
@@ -518,6 +544,12 @@ class WorkflowManager:
                 artifact = self._collect_artifact(run, output)
                 if artifact is not None:
                     artifacts.append(artifact)
+
+        if run.snapshot_key:
+            diff_result = write_changes_diff_best_effort(run.worktree, run.snapshot_key, label="workflow-finish")
+            diff_attachment = changes_diff_attachment(diff_result)
+            if diff_attachment:
+                attachments.append(diff_attachment)
 
         if session_id:
             run.context.session_id = session_id
