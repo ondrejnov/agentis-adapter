@@ -1,4 +1,4 @@
-"""Deklarativní workflow schema pro `.agentis/workflows/ci.yaml`.
+"""Deklarativní workflow schema pro `.agentis/workflows/default.yaml`.
 
 Workflow režim přesouvá projektově proměnlivou logiku z Python adapteru do
 YAML souboru ve worktree. Tady žije jeho Pydantic schema, načítání přes PyYAML
@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 WORKFLOW_DIR_RELPATH = ".agentis/workflows"
 
-WORKFLOW_FILE_RELPATH = f"{WORKFLOW_DIR_RELPATH}/ci.yaml"
+WORKFLOW_FILE_RELPATH = f"{WORKFLOW_DIR_RELPATH}/default.yaml"
 
 #: Workflow pro scope=project: běží přímo v adresáři projektu, bez worktree a git operací.
 PROJECT_WORKFLOW_FILE_RELPATH = f"{WORKFLOW_DIR_RELPATH}/project.yaml"
@@ -206,7 +206,7 @@ class WorkflowFile(BaseModel):
 
 
 def load_workflow_file(path: str | Path, values: dict[str, str]) -> WorkflowFile:
-    """Načte ci.yaml, interpoluje tokeny a zvaliduje schema."""
+    """Načte default.yaml, interpoluje tokeny a zvaliduje schema."""
 
     workflow_path = Path(path)
     if not workflow_path.is_file():

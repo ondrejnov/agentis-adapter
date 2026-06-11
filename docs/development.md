@@ -247,7 +247,7 @@ Project scope:
 
 Pri `context.adapter.runtime = "workflow"` neresi run zadnou CLI session.
 `common/workflow/manager.py::WorkflowManager` nacte workflow YAML
-(`.agentis/ci.yaml`, pro project scope `.agentis/project.yaml`), zmrazi ho a na
+(`.agentis/default.yaml`, pro project scope `.agentis/project.yaml`), zmrazi ho a na
 pozadi spousti jednotlive kroky pres `WorkflowStepRunner` protokol. Kde kroky
 bezi, urcuje **executor**: `workflow.executor` ve workflow YAML, jinak env
 promenna `WORKFLOW_EXECUTOR` (default `kubernetes`).

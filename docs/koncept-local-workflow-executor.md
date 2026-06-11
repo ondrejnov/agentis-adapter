@@ -7,7 +7,7 @@
 ## Motivace
 
 Workflow režim (`context.adapter.runtime = "workflow"`) dnes spouští kroky z
-`.agentis/workflows/ci.yaml` výhradně jako Kubernetes Joby přes `kubectl`.
+`.agentis/workflows/default.yaml` výhradně jako Kubernetes Joby přes `kubectl`.
 Deklarativní část (sekvenční kroky, `if` podmínky, `var`/`agent_comment`/`artifact`
 outputs, interpolace `[%TOKEN%]`, prompt/context soubory) ale na Kubernetes nijak
 nezávisí — dává smysl umět tytéž kroky spustit jako lokální bash procesy přímo
@@ -124,7 +124,7 @@ obsluhovat K8s i lokální workflow.
 Aktivace workflow režimu jako takového zůstává beze změny přes
 `context.adapter.runtime == "workflow"` — executor jen říká *kde* kroky poběží.
 
-### 4. Mapování polí ci.yaml na lokální běh
+### 4. Mapování polí default.yaml na lokální běh
 
 | Pole | kubernetes | local |
 |---|---|---|

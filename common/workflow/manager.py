@@ -105,7 +105,7 @@ class WorkflowManager:
     ) -> dict[str, Any]:
         """Připraví run, načte a zmrazí workflow YAML a spustí workflow na pozadí.
 
-        Bez pojmenovaného workflow v kontextu se použije `ci.yaml`, pro
+        Bez pojmenovaného workflow v kontextu se použije `default.yaml`, pro
         scope=project `project.yaml`. `context.adapter.workflow` (followup akce
         jako merge/close) vybírá `.agentis/workflows/<name>.yaml`. Run soubory
         (prompt, context, outputs) se pro scope=project a pojmenovaná workflow

@@ -1,8 +1,0 @@
-version: 1
-adapter: opencode
-deploy:
-  worktree:
-    manifest: .agentis/opencode.yaml
-  project:
-    manifest: .agentis/opencode-project.yaml
-    reuse_existing_environment: true
