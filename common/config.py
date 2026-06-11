@@ -69,7 +69,6 @@ def _public_base_url(default_port: int) -> str | None:
 def _build_settings() -> Settings:
     project_root = Path(__file__).parent.parent.resolve()
     load_dotenv(project_root / ".env")
-    print(_get_env("AGENTIS_ENDPOINT", "http://127.0.0.1:8891"))
     port = int(_get_env("ADAPTER_PORT", "8001") or "8001")
     return Settings(
         host=_get_env("ADAPTER_HOST", "0.0.0.0") or "0.0.0.0",
