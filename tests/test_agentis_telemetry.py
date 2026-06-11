@@ -90,8 +90,13 @@ def test_telemetry_full_run_creates_run_binds_session_and_pushes_logs() -> None:
     adapter_events = [c["params"] for c in client.calls if c["method"] == "run.adapter_event"]
     started = adapter_events[0]
     assert started["status"] == "started" and started["kind"] == "agentiscode"
+    # uzavření kroku "běh spuštěn" — stejný kind i event_id jako started,
+    # jinak by karta v UI zůstala viset ve stavu running
+    closed = adapter_events[1]
+    assert closed["kind"] == "agentiscode" and closed["status"] == "success"
+    assert closed["event_id"] == started["event_id"]
     # koncový idle event uzavře adapter_state a vyšle run.finished
-    idle = adapter_events[1]
+    idle = adapter_events[2]
     assert idle["kind"] == "idle" and idle["status"] == "success"
 
     # finální odpověď se bez explicitního opt-in neposílá jako task komentář

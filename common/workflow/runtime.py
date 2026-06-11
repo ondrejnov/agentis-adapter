@@ -78,7 +78,9 @@ def job_name(run_id: str, attempt_id: str, step_index: int, step_name: str) -> s
     return name[:63].strip("-")
 
 
-def build_bash_wrapper(env_files: list[str], script: str, *, workdir: str | None = None, workdir_env: str = "WORKDIR") -> str:
+def build_bash_wrapper(
+    env_files: list[str], script: str, *, workdir: str | None = None, workdir_env: str = "WORKDIR"
+) -> str:
     """Obalí krok do bashe; `workdir` (workingDir kroku/workflow) má přednost před `$WORKDIR`."""
 
     lines = ["set -euo pipefail"]
@@ -234,7 +236,7 @@ class KubectlJobRunner:
         name: str,
         *,
         timeout: float,
-        interval: float = 1.0,
+        interval: float = 0.25,
         abort_event: threading.Event | None = None,
     ) -> str:
         """Sleduje Job do dokončení; vrací `succeeded` / `failed` / `timeout` / `aborted`."""

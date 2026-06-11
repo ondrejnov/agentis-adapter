@@ -329,7 +329,7 @@ class WorkflowManager:
         self._emit_adapter_event(
             run.context,
             kind="workflow",
-            status="started",
+            status="success",
             event_id=workflow_event_id,
             message="Workflow bylo spuštěno.",
             data={"attempt": run.attempt_id, "namespace": run.namespace, "executor": run.executor},
@@ -440,11 +440,13 @@ class WorkflowManager:
         if not relpath:
             return None
         path = (run.output_root / relpath).resolve()
+        print(path)
         if run.output_root.resolve() not in path.parents:
             return None
         if not path.is_file():
             return None
         try:
+            print(path.read_text(encoding="utf-8"))
             return path.read_text(encoding="utf-8")
         except OSError:
             return None

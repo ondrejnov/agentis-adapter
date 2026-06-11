@@ -66,7 +66,7 @@ class ClaudeEvent:
 
 @dataclass
 class ClaudeRunConfig:
-    command: str = "clarp"
+    command: str = "claude"
     cwd: Optional[str] = None
     model: Optional[str] = None
     agent: Optional[str] = None

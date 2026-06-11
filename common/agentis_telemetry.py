@@ -160,8 +160,7 @@ class AgentisTelemetry:
         if self.run_id is None:
             self._on_error("Agentis task.start_run nevrátil run id; telemetrie je vypnutá.")
             return None
-        self._emit_adapter_event("started", kind="agentiscode", message="běh spuštěn.")
-        # self._emit_adapter_event("success", kind="agentiscode", message="běh spuštěn.")
+        self._emit_adapter_event("success", kind="agentiscode", message="běh spuštěn.")
         return self.run_id
 
     def handle(self, event: AgentEvent) -> None:
@@ -229,6 +228,9 @@ class AgentisTelemetry:
 
         if self.last_message_to_comment:
             self._post_final_comment()
+        # Stejný event_id jako úvodní `started` → karta "běh spuštěn" se přepne
+        # ze spinneru na hotovo/selhalo.
+        # self._emit_adapter_event(status, kind="agentiscode", message="běh selhal." if self._is_error else "běh doběhl.")
         # Koncový stav adapteru + run.finished (kind musí být přesně "idle").
         self._emit_adapter_event(status, kind="idle", message=message)
 
