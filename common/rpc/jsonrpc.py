@@ -53,6 +53,15 @@ class AgentJsonRpcService:
             self._workflow_manager = WorkflowManager(self.settings)
         return self._workflow_manager
 
+    def active_count(self) -> int:
+        """Běžící workflow runy; CLI session thready hlídá session manager na ``app.state``."""
+        return self._workflow_manager.active_count() if self._workflow_manager is not None else 0
+
+    def wait_idle(self, timeout: float | None = None) -> bool:
+        if self._workflow_manager is None:
+            return True
+        return self._workflow_manager.wait_idle(timeout)
+
     @staticmethod
     def _is_workflow_runtime(context: AgentExecutionContextPayload) -> bool:
         # Pojmenované workflow (followup akce jako merge/close) běží vždy přes workflow runtime.

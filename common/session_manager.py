@@ -20,6 +20,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -202,6 +203,35 @@ class BaseSessionManager:
     def get_snapshot_key(self, session_id: str) -> str | None:
         with self._lock:
             return self._sessions.get(session_id).snapshot_key if session_id in self._sessions else None
+
+    def active_count(self) -> int:
+        """Počet session threadů, které stále běží (pro graceful shutdown)."""
+        return len(self._active_threads())
+
+    def wait_idle(self, timeout: float | None = None) -> bool:
+        """Blokuje, dokud nedoběhnou všechny session thready.
+
+        Vrací ``False``, pokud po ``timeout`` sekundách stále něco běží;
+        ``timeout=None`` čeká bez limitu.
+        """
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        while True:
+            threads = self._active_threads()
+            if not threads:
+                return True
+            if deadline is None:
+                threads[0].join()
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            threads[0].join(timeout=remaining)
+
+    def _active_threads(self) -> list[threading.Thread]:
+        # Session může být v dictu dvakrát (pending key + session_id) — dedupe podle identity.
+        with self._lock:
+            threads = {id(sess.thread): sess.thread for sess in self._sessions.values() if sess.thread is not None}
+        return [thread for thread in threads.values() if thread.is_alive()]
 
     def _bind_session_id(self, sess: _AgentSession, session_id: str) -> None:
         is_new_session = sess.session_id is None

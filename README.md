@@ -99,6 +99,7 @@ Script umi:
 - `AGENTIS_WS_RECONNECT_INITIAL_DELAY` default `1`
 - `AGENTIS_WS_RECONNECT_MAX_DELAY` default `30`
 - `AGENTIS_WS_RECONNECT_MAX_ATTEMPTS` default `0` znamena neomezene reconnect pokusy
+- `ADAPTER_SHUTDOWN_GRACE_PERIOD` default `0`; kolik sekund po SIGTERM/SIGINT cekat na dobehnuti bezicich agentu a workflow (`0` = bez limitu). Adapter pri signalu zavre WebSocket (neprijima dalsi zpravy), necha dobehnout rozpracovanou praci a pak skonci; opakovany signal ukonci proces okamzite
 - `ADAPTER_NAMESPACE_PREFIX` default `Task`; pouzije se pro namespace workflow Jobu ve tvaru `<prefix>-<task_number>-<prvnich 20 znaku title>`, vysledek se normalizuje pro Kubernetes DNS label
 - `WORKFLOW_EXECUTOR` default `kubernetes`; urcuje, kde bezi kroky workflow runtime (`kubernetes` = Joby pres `kubectl`, `local` = lokalni bash procesy nad worktree); workflow YAML to muze prebit polem `workflow.executor`
 - `ADAPTER_WORKSPACE_ROOT` default root tohoto repozitare

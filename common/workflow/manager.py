@@ -243,6 +243,34 @@ class WorkflowManager:
             "deleted": deleted,
         }
 
+    def active_count(self) -> int:
+        """Počet workflow runů, jejichž thready stále běží (pro graceful shutdown)."""
+        return len(self._active_threads())
+
+    def wait_idle(self, timeout: float | None = None) -> bool:
+        """Blokuje, dokud nedoběhnou všechny workflow thready.
+
+        Vrací ``False``, pokud po ``timeout`` sekundách stále něco běží;
+        ``timeout=None`` čeká bez limitu.
+        """
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        while True:
+            threads = self._active_threads()
+            if not threads:
+                return True
+            if deadline is None:
+                threads[0].join()
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            threads[0].join(timeout=remaining)
+
+    def _active_threads(self) -> list[threading.Thread]:
+        with self._lock:
+            threads = [run.thread for run in self._runs.values() if run.thread is not None]
+        return [thread for thread in threads if thread.is_alive()]
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

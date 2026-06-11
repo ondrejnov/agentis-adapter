@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from websockets.exceptions import ConnectionClosedOK
 
 from common.config import Settings
 from common.models import ApproveParams
@@ -69,11 +70,8 @@ def test_passive_websocket_connect_uses_configured_max_message_size(monkeypatch)
         async def __aexit__(self, *_args: Any) -> None:
             return None
 
-        def __aiter__(self) -> FakeConnection:
-            return self
-
-        async def __anext__(self) -> str:
-            raise StopAsyncIteration
+        async def recv(self) -> str:
+            raise ConnectionClosedOK(None, None)
 
     def fake_connect(*args: Any, **kwargs: Any) -> FakeConnection:
         captured["args"] = args
@@ -87,6 +85,77 @@ def test_passive_websocket_connect_uses_configured_max_message_size(monkeypatch)
     asyncio.run(client._run_once())
 
     assert captured["kwargs"]["max_size"] == 123456
+
+
+def test_passive_websocket_shutdown_closes_connection_without_reconnect(monkeypatch):
+    class FakeService:
+        def approve(self, params: ApproveParams) -> dict[str, Any]:
+            return {"approved": params.approved}
+
+    sent: list[str] = []
+    connections = 0
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self._messages = [
+                '{"jsonrpc":"2.0","id":"run-1:approve","method":"approve","params":{"run_id":"run-1","approved":true}}'
+            ]
+
+        async def __aenter__(self) -> FakeConnection:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def recv(self) -> str:
+            if self._messages:
+                return self._messages.pop(0)
+            await asyncio.Event().wait()  # blokuje až do zrušení tasku při shutdownu
+            raise AssertionError("unreachable")
+
+        async def send(self, data: str) -> None:
+            sent.append(data)
+
+    def fake_connect(*args: Any, **kwargs: Any) -> FakeConnection:
+        nonlocal connections
+        connections += 1
+        return FakeConnection()
+
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=fake_connect))
+    client = PassiveWebSocketClient(
+        settings=make_settings(),
+        dispatch={"approve": JsonRpcRoute(ApproveParams, "approve")},
+        service_container=SimpleNamespace(agent_jsonrpc_service=FakeService()),
+    )
+
+    async def scenario() -> None:
+        runner = asyncio.create_task(client.run_forever())
+        while not sent:
+            await asyncio.sleep(0.01)
+        client.request_shutdown("SIGTERM")
+        await asyncio.wait_for(runner, timeout=2)
+
+    asyncio.run(scenario())
+
+    assert connections == 1
+    assert '"approved": true' in sent[0]
+    assert client.shutdown_requested
+
+
+def test_passive_websocket_shutdown_skips_reconnect_delay(monkeypatch):
+    settings = make_settings(websocket_reconnect_initial_delay=60, websocket_reconnect_max_attempts=0)
+    client = PassiveWebSocketClient(settings=settings, dispatch={}, service_container=SimpleNamespace())
+
+    async def fail_once() -> None:
+        client.request_shutdown("SIGTERM")
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(client, "_run_once", fail_once)
+
+    async def scenario() -> None:
+        await asyncio.wait_for(client.run_forever(), timeout=2)
+
+    asyncio.run(scenario())
 
 
 def test_passive_websocket_rejects_insecure_non_local_endpoint():
