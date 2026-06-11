@@ -3,7 +3,8 @@
 `WorkflowManager` drží běžící workflow runy per task, spouští jednotlivé kroky
 přes :class:`WorkflowStepRunner` (Kubernetes Joby přes :class:`KubectlJobRunner`,
 nebo lokální bash procesy přes :class:`LocalProcessRunner` — podle executoru)
-a po úspěšném dokončení celého workflow aplikuje `outputs` do Agentisu.
+a po dokončení workflow aplikuje `outputs` úspěšně doběhlých kroků do Agentisu
+(i po selhání — `always` krok tak může doručit failure komentář).
 `start` / `add_message` vrací rychle — workflow běží v daemon threadu.
 """
 
@@ -72,8 +73,11 @@ class _WorkflowRun:
     status: str = "running"
     #: Proměnné nasbírané z `var` outputs dokončených kroků; vstup pro `if` podmínky.
     vars: dict[str, str] = field(default_factory=dict)
-    #: Indexy kroků přeskočených kvůli `if` — jejich outputs se na konci neaplikují.
+    #: Indexy kroků přeskočených kvůli `if` nebo po selhání workflow — jejich
+    #: outputs se na konci neaplikují.
     skipped_steps: set[int] = field(default_factory=set)
+    #: Indexy selhaných kroků (`continueOnError` i fatální) — outputs se neaplikují.
+    failed_steps: set[int] = field(default_factory=set)
 
     @property
     def active(self) -> bool:
@@ -389,12 +393,25 @@ class WorkflowManager:
             data={"attempt": run.attempt_id, "namespace": run.namespace, "executor": run.executor},
         )
 
+        #: Jméno prvního fatálně selhaného kroku; po selhání běží už jen `always` kroky.
+        failed_step: str | None = None
         for index, step in enumerate(run.workflow.workflow.steps):
             if run.abort_event.is_set():
                 run.status = "aborted"
                 return
 
             step_event_id = f"workflow_step:{run.context.run_id}:{run.attempt_id}:{index}"
+            if failed_step is not None and not step.always:
+                run.skipped_steps.add(index)
+                self._emit_adapter_event(
+                    run.context,
+                    kind="workflow_step",
+                    status="skipped",
+                    event_id=step_event_id,
+                    message=f"Krok přeskočen (workflow selhalo): {step.name}",
+                    data={"step": step.name, "skipped": True, "failed_step": failed_step},
+                )
+                continue
             if step.if_ is not None and not evaluate_condition(step.if_, run.vars):
                 run.skipped_steps.add(index)
                 self._emit_adapter_event(
@@ -424,40 +441,60 @@ class WorkflowManager:
                 data={"step": step.name, "job": name},
             )
 
+            # `always` kroky dostanou stav workflow, aby šel složit failure komentář.
+            step_env = env
+            if step.always:
+                step_env = dict(env)
+                step_env["AGENTIS_WORKFLOW_STATUS"] = "failed" if failed_step else "success"
+                step_env["AGENTIS_FAILED_STEP"] = failed_step or ""
+
             timeout = step.timeoutSeconds if step.timeoutSeconds is not None else run.workflow.workflow.timeoutSeconds
-            result = run.runner.run_step(
-                run.workflow,
-                step,
-                namespace=run.namespace,
-                name=name,
-                labels=labels,
-                env=env,
-                timeout=float(timeout),
-                abort_event=run.abort_event,
-                run_dir=run.run_dir,
-            )
-            if result.status == "aborted":
-                run.status = "aborted"
-                return
+            # Retry smyčka: hlásí se jen finální výsledek s počtem pokusů; opakovaný
+            # pokus dostane unikátní jméno (selhaný K8s Job s původním jménem existuje).
+            attempt = 0
+            while True:
+                attempt += 1
+                attempt_name = name if attempt == 1 else f"{name[:60].rstrip('-')}-r{attempt}"
+                result = run.runner.run_step(
+                    run.workflow,
+                    step,
+                    namespace=run.namespace,
+                    name=attempt_name,
+                    labels=labels,
+                    env=step_env,
+                    timeout=float(timeout),
+                    abort_event=run.abort_event,
+                    run_dir=run.run_dir,
+                )
+                if result.status == "aborted":
+                    run.status = "aborted"
+                    return
+                if result.status == "succeeded" or attempt > step.retries:
+                    break
+                if run.abort_event.is_set():
+                    run.status = "aborted"
+                    return
+
             if result.status != "succeeded":
-                run.status = "failed"
+                run.failed_steps.add(index)
                 self._emit_adapter_event(
                     run.context,
                     kind="workflow_step",
                     status="failed",
                     event_id=step_event_id,
                     message=f"Krok selhal ({result.status}): {step.name}",
-                    data={"step": step.name, "job": name, "result": result.status, "log_tail": result.log_tail},
+                    data={
+                        "step": step.name,
+                        "job": name,
+                        "result": result.status,
+                        "log_tail": result.log_tail,
+                        "attempts": attempt,
+                        "continueOnError": step.continueOnError,
+                    },
                 )
-                self._emit_adapter_event(
-                    run.context,
-                    kind="idle",
-                    status="failed",
-                    event_id=workflow_event_id,
-                    message="Workflow selhalo.",
-                    data={"failed_step": step.name, "result": result.status},
-                )
-                return
+                if not step.continueOnError and failed_step is None:
+                    failed_step = step.name
+                continue
 
             self._emit_adapter_event(
                 run.context,
@@ -474,7 +511,21 @@ class WorkflowManager:
                 run.vars.update(new_vars)
                 env.update(new_vars)
 
-        # Outputs se aplikují až po úspěšném dokončení celého workflow.
+        # Outputs úspěšně doběhlých kroků se aplikují i po selhání workflow —
+        # `always` krok tak může doručit failure komentář do ticketu.
+        if failed_step is not None:
+            run.status = "failed"
+            self._apply_outputs(run)
+            self._emit_adapter_event(
+                run.context,
+                kind="idle",
+                status="failed",
+                event_id=workflow_event_id,
+                message="Workflow selhalo.",
+                data={"failed_step": failed_step, "attempt": run.attempt_id},
+            )
+            return
+
         self._apply_outputs(run)
         self._cleanup_namespace(run)
         run.status = "success"
@@ -538,7 +589,7 @@ class WorkflowManager:
     def _apply_outputs(self, run: _WorkflowRun) -> None:
         outputs: list[WorkflowOutput] = []
         for index, step in enumerate(run.workflow.workflow.steps):
-            if index in run.skipped_steps:
+            if index in run.skipped_steps or index in run.failed_steps:
                 continue
             outputs.extend(step.outputs)
 
@@ -599,7 +650,13 @@ class WorkflowManager:
         if comment_body:
             # Followup akce se konfigurují v `workflow.followups` sekci workflow YAML;
             # pojmenovaná workflow (merge/close) sekci nemají, takže další akce nenabízí.
-            actions = [followup.to_action() for followup in run.workflow.workflow.followups]
+            # U failure komentáře se akce nenabízí vůbec — merge/close rozdělané práce
+            # po selhaném runu nedává smysl.
+            actions = (
+                []
+                if run.status == "failed"
+                else [followup.to_action() for followup in run.workflow.workflow.followups]
+            )
             self._agentis_call(
                 method="task.add_agent_comment",
                 params={

@@ -961,6 +961,261 @@ def test_failed_step_stops_workflow_and_reports_log_tail(tmp_path: Path) -> None
     assert manager._runs[context.task_id].status == "failed"
 
 
+# ---------------------------------------------------------------------------
+# Error handling kroků: continueOnError / retries / always
+# ---------------------------------------------------------------------------
+
+
+CONTINUE_ON_ERROR_WORKFLOW_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 120
+  steps:
+    - name: Optional lint
+      continueOnError: true
+      run: lint
+      outputs:
+        - type: url
+          label: Lint Log
+          valueFrom: .agentis/outputs/lint-log-url
+        - type: var
+          name: LINT_OK
+          valueFrom: .agentis/outputs/lint-ok
+    - name: Run agent
+      run: agentiscode
+      outputs:
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/final-comment.md
+          status: 4
+"""
+
+
+ALWAYS_WORKFLOW_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 120
+  followups:
+    - title: Git merge
+      workflow: merge
+  steps:
+    - name: Run agent
+      run: agentiscode
+      outputs:
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/final-comment.md
+          status: 4
+    - name: Create pull request
+      run: echo pr
+    - name: Cleanup
+      always: true
+      run: cleanup
+      outputs:
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/failure-comment.md
+    - name: Conditional cleanup
+      always: true
+      if: NEVER_SET
+      run: echo skip
+"""
+
+
+RETRY_WORKFLOW_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 120
+  steps:
+    - name: Flaky
+      retries: 2
+      run: flaky
+    - name: After
+      run: echo ok
+"""
+
+
+def test_continue_on_error_step_does_not_fail_workflow_and_skips_its_outputs(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, CONTINUE_ON_ERROR_WORKFLOW_YAML)
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "final-comment.md").write_text("Hotovo.", encoding="utf-8")
+    # pozůstatky z minulého běhu — outputs selhaného kroku se nesmí aplikovat
+    (outputs_dir / "lint-log-url").write_text("https://example.org/stale", encoding="utf-8")
+    (outputs_dir / "lint-ok").write_text("true", encoding="utf-8")
+
+    runner = FakeRunner()
+    runner.results = ["failed"]
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "success"
+    assert len(runner.steps) == 2  # selhání kroku workflow nezastavilo
+    # `var` output selhaného kroku se nečte — další krok proměnnou nedostane
+    assert "LINT_OK" not in runner.steps[1]["env"]
+
+    failed_events = [
+        params
+        for method, params in calls
+        if method == "run.adapter_event" and params["kind"] == "workflow_step" and params["status"] == "failed"
+    ]
+    assert len(failed_events) == 1
+    assert failed_events[0]["data"]["continueOnError"] is True
+
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert len(comment_calls) == 1
+    assert comment_calls[0]["body"] == "Hotovo."
+    assert comment_calls[0]["attachments"] == []  # url output selhaného kroku se neaplikoval
+    assert any(
+        method == "run.adapter_event" and params["kind"] == "idle" and params["status"] == "success"
+        for method, params in calls
+    )
+
+
+def test_failed_step_runs_always_steps_and_delivers_failure_comment(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, ALWAYS_WORKFLOW_YAML)
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    # final-comment patří selhanému kroku — nesmí se aplikovat ani jako stale soubor
+    (outputs_dir / "final-comment.md").write_text("Hotovo.", encoding="utf-8")
+    (outputs_dir / "failure-comment.md").write_text("Workflow selhalo, uklizeno.", encoding="utf-8")
+
+    runner = FakeRunner()
+    runner.results = ["failed"]
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "failed"
+
+    # po selhání běží jen `always` kroky; `if` podmínka platí i pro ně
+    step_indexes = [record["labels"]["agentis.step_index"] for record in runner.steps]
+    assert step_indexes == ["0", "2"]
+
+    # `always` krok dostane stav workflow pro složení failure komentáře
+    env = runner.steps[1]["env"]
+    assert env["AGENTIS_WORKFLOW_STATUS"] == "failed"
+    assert env["AGENTIS_FAILED_STEP"] == "Run agent"
+
+    # komentář z `always` kroku se doručil, bez followup akcí
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert len(comment_calls) == 1
+    assert comment_calls[0]["body"] == "Workflow selhalo, uklizeno."
+    assert comment_calls[0]["actions"] == []
+
+    idle_events = [
+        params for method, params in calls if method == "run.adapter_event" and params["kind"] == "idle"
+    ]
+    assert len(idle_events) == 1
+    assert idle_events[0]["status"] == "failed"
+    assert idle_events[0]["data"]["failed_step"] == "Run agent"
+
+
+def test_always_step_gets_success_status_when_nothing_failed(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, ALWAYS_WORKFLOW_YAML)
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "final-comment.md").write_text("Hotovo.", encoding="utf-8")
+
+    runner = FakeRunner()
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "success"
+    cleanup_env = runner.steps[2]["env"]
+    assert cleanup_env["AGENTIS_WORKFLOW_STATUS"] == "success"
+    assert cleanup_env["AGENTIS_FAILED_STEP"] == ""
+
+    # bez failure-comment.md zůstává completion komentář z Run agent, followups se nabízí
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert comment_calls[0]["body"] == "Hotovo."
+    assert [action["workflow"] for action in comment_calls[0]["actions"]] == ["merge"]
+
+
+def test_retries_rerun_failed_step_and_report_only_final_result(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, RETRY_WORKFLOW_YAML)
+    runner = FakeRunner()
+    runner.results = ["failed", "failed", "succeeded"]
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "success"
+    flaky_runs = [record for record in runner.steps if record["step"] == "Flaky"]
+    assert len(flaky_runs) == 3  # retries: 2 → max 3 spuštění
+    # opakované pokusy mají unikátní jméno Jobu (selhaný K8s Job stále existuje)
+    assert flaky_runs[1]["name"].endswith("-r2")
+    assert flaky_runs[2]["name"].endswith("-r3")
+    # hlásí se jen finální výsledek — žádný failed event pro mezipokusy
+    step_events = [
+        params for method, params in calls if method == "run.adapter_event" and params["kind"] == "workflow_step"
+    ]
+    assert [event["status"] for event in step_events] == ["started", "success", "started", "success"]
+
+
+def test_retries_exhausted_reports_failure_with_attempt_count(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, RETRY_WORKFLOW_YAML)
+    runner = FakeRunner()
+    runner.results = ["failed", "failed", "failed"]
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "failed"
+    assert len(runner.steps) == 3  # jen Flaky pokusy, After se nespustil
+    failed_events = [
+        params
+        for method, params in calls
+        if method == "run.adapter_event" and params["kind"] == "workflow_step" and params["status"] == "failed"
+    ]
+    assert len(failed_events) == 1
+    assert failed_events[0]["data"]["attempts"] == 3
+
+
+class AbortBetweenRetriesRunner(FakeRunner):
+    """Po prvním (selhaném) pokusu nastaví abort_event — simulace abortu mezi pokusy."""
+
+    def run_step(self, workflow, step, *, abort_event: threading.Event, **kwargs: Any) -> StepResult:
+        result = super().run_step(workflow, step, abort_event=abort_event, **kwargs)
+        abort_event.set()
+        return result
+
+
+def test_abort_between_retry_attempts_stops_workflow(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, RETRY_WORKFLOW_YAML)
+    runner = AbortBetweenRetriesRunner()
+    runner.results = ["failed"]
+    manager, _calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "aborted"
+    assert len(runner.steps) == 1  # žádný další pokus po abortu
+
+
 def test_abort_deletes_jobs_by_labels_without_session_id(tmp_path: Path) -> None:
     runner = FakeRunner()
     manager, _calls = _manager(tmp_path, runner)

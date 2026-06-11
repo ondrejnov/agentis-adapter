@@ -2,7 +2,7 @@
 
 ## K čemu workflow slouží
 
-Workflow režim přesouvá projektově proměnlivou logiku běhu agenta (příprava prostředí, spuštění agenta, commit, pull request, úklid) z Python adapteru do deklarativního YAML souboru ve worktree projektu. Adapter pak jen orchestruje: načte YAML, spouští kroky postupně přes zvolený executor a po úspěšném doběhnutí aplikuje výstupy (komentář, přílohy, artefakty) do Agentisu.
+Workflow režim přesouvá projektově proměnlivou logiku běhu agenta (příprava prostředí, spuštění agenta, commit, pull request, úklid) z Python adapteru do deklarativního YAML souboru ve worktree projektu. Adapter pak jen orchestruje: načte YAML, spouští kroky postupně přes zvolený executor a po doběhnutí aplikuje výstupy úspěšných kroků (komentář, přílohy, artefakty) do Agentisu.
 
 Je to protějšek lokálního CLI runtime (`local`), kde agent běží jako proces přímo na hostu řízený adapterem. Ve workflow režimu adapter sám žádného agenta nespouští — agent je jen jedním z kroků workflow (typicky `agentiscode` v kroku „Run agent“).
 
@@ -86,6 +86,9 @@ workflow:
       run: |                    # bash skript kroku
         ...
       if: ENV_READY != 'true'   # volitelná podmínka (viz níže)
+      continueOnError: false    # selhání kroku nezastaví workflow (viz Error handling)
+      retries: 0                # počet opakování selhaného kroku
+      always: false             # krok běží i po selhání dřívějšího kroku
       image: ...                # přepis workflow image (jen kubernetes)
       env: {}                   # env navíc pro tento krok
       workingDir: ...           # přepis pracovního adresáře
@@ -165,7 +168,17 @@ Kroky komunikují s adapterem přes soubory; cesty jsou relativní k output root
 | `artifact` | `name`, `path` | Soubor přiložený ke komentáři (base64) |
 | `var` | `name`, `valueFrom` | Workflow proměnná pro `if` podmínky a env dalších kroků |
 
-Při selhání kroku se workflow zastaví, do Agentisu jde událost s posledními ~50 řádky logu a žádné outputs se neaplikují. U běžných task runů adapter navíc automaticky přikládá „Changes diff“ (snapshot zdrojáků při startu vs. konci).
+Outputs se aplikují po dokončení workflow **za úspěšně doběhlé kroky** — i když workflow jako celek selhalo (viz Error handling níže). Outputs přeskočených a selhaných kroků se neaplikují. U běžných task runů adapter navíc automaticky přikládá „Changes diff“ (snapshot zdrojáků při startu vs. konci).
+
+### Error handling kroků
+
+Selhaný krok bez příznaků níže workflow ukončí: do Agentisu jde událost `workflow_step` failed s posledními ~50 řádky logu, přeskočí se všechny zbývající ne-`always` kroky (hlásí se jako skipped) a na závěr jde `idle` failed se jménem selhaného kroku.
+
+- **`continueOnError: true`** — selhání kroku workflow nezastaví. Krok se nahlásí jako failed (s `continueOnError: true` v datech eventu), ale jeho `var` outputs se nečtou a ostatní outputs se na konci neaplikují.
+- **`retries: N`** — selhaný krok se zopakuje až N× (bez backoffu), tj. maximálně `N + 1` spuštění. Do Agentisu se hlásí **jen finální výsledek** s počtem pokusů (`attempts` v datech eventu) — mezivýsledky pokusů by jen zaplevelily timeline. Abort mezi pokusy workflow ukončí. Opakovaný pokus dostane unikátní jméno Jobu (`<job>-r<n>`), protože selhaný K8s Job s původním jménem stále existuje; u lokálního executoru má tím pádem každý pokus vlastní log soubor.
+- **`always: true`** — krok běží i poté, co dřívější krok fatálně selhal (typicky úklid a failure komentář na konci). `always` kroky běží v původním pořadí a `if` podmínky pro ně platí stejně. Adapter jim navíc exportuje env proměnné `AGENTIS_WORKFLOW_STATUS` (`failed`/`success`) a `AGENTIS_FAILED_STEP` (jméno prvního fatálně selhaného kroku, jinak prázdné) — krok z nich pozná, jestli má složit failure komentář.
+
+Protože se outputs úspěšných kroků aplikují i u selhaného workflow, může `always` krok doručit `agent_comment` s důvodem selhání do ticketu (viz krok „Report merge failure“ v `merge.yaml`). **Followup akce se u failure komentáře nenabízí** — sekce `workflow.followups` platí jen pro úspěšný run; nabízet merge/close nad rozdělanou prací po selhaném runu nedává smysl.
 
 ### Followup akce
 
@@ -201,7 +214,7 @@ Workflow `default.yaml`, `project.yaml`, `merge.yaml` a `close.yaml` dědí pře
 | `_base.yaml` | Sdílený základ pro dědičnost; samostatně nespustitelný (nemá `steps`) |
 | `default.yaml` | Plný task run: příprava `.env` a virtualenvu (podmíněně přes `ENV_READY`), spuštění agenta (`agentiscode`, adapter podle modelu), commit, push + pull request; nabízí followups „Git merge“ a „Zavřít prostředí“ |
 | `project.yaml` | Run nad celým projektem bez gitu — jen spuštění agenta s outputs `agent_comment` + `session_id` |
-| `merge.yaml` | Rebase task větve na base (konflikty řeší AI resolver), fast-forward base větve, push, úklid worktree a větve |
+| `merge.yaml` | Rebase task větve na base (konflikty řeší AI resolver), fast-forward base větve, push, úklid worktree a větve; při selhání pošle failure komentář (`always` krok) |
 | `close.yaml` | Úklid worktree a task větve bez merge; `deleteNamespace: true` |
 | `local-env.yaml` | Prostředí lokálních CLI sessions: PATH s venv (worktree, pak hlavní worktree) a vytvoření venv při studeném startu; viz výše |
 
@@ -213,4 +226,4 @@ Workflow `default.yaml`, `project.yaml`, `merge.yaml` a `close.yaml` dědí pře
 - **`chained 'extends' is not supported`** — rodičovský soubor má vlastní `extends`; dědičnost má jen jednu úroveň.
 - **`Unknown workflow token [%X%]`** — token mimo allowlist; viz tabulka výše.
 - **Workflow „busy“** — per task běží jen jeden run; počkat na doběhnutí nebo zavolat `abort`.
-- **Output se nepropsal** — soubor neexistuje, je prázdný, krok byl přeskočen přes `if`, workflow neskončilo úspěchem, nebo cesta vede mimo output root.
+- **Output se nepropsal** — soubor neexistuje, je prázdný, krok byl přeskočen (přes `if` nebo po selhání workflow), krok sám selhal (včetně `continueOnError`), nebo cesta vede mimo output root.

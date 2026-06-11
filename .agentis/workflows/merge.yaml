@@ -40,6 +40,20 @@ workflow:
         - type: agent_comment
           bodyFrom: outputs/final-comment.md
           status: 5
+    - name: Report merge failure
+      always: true
+      run: |
+        [ "${AGENTIS_WORKFLOW_STATUS:-success}" = "failed" ] || exit 0
+        mkdir -p "$AGENTIS_RUN_DIR/outputs"
+        {
+          printf '❌ Merge task větve selhal v kroku „%s“.\n' "$AGENTIS_FAILED_STEP"
+          if [ -s "$AGENTIS_RUN_DIR/outputs/conflict-resolution.txt" ]; then
+            printf '\nRebase narazil na konflikt, který se nepodařilo vyřešit ani přes AI resolver; rebase byl zrušen (git rebase --abort) a task větev zůstává beze změny.\n'
+          fi
+        } > "$AGENTIS_RUN_DIR/outputs/failure-comment.md"
+      outputs:
+        - type: agent_comment
+          bodyFrom: outputs/failure-comment.md
         - label: AI conflict resolver
           type: text
           valueFrom: outputs/conflict-resolution.txt

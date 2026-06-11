@@ -75,6 +75,12 @@ def _ignored_fields(workflow: WorkflowFile) -> list[str]:
         ignored.append("steps[].resources")
     if any(step.workingDir for step in spec.steps):
         ignored.append("steps[].workingDir")
+    if any(step.continueOnError for step in spec.steps):
+        ignored.append("steps[].continueOnError")
+    if any(step.retries for step in spec.steps):
+        ignored.append("steps[].retries")
+    if any(step.always for step in spec.steps):
+        ignored.append("steps[].always")
     return ignored
 
 

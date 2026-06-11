@@ -176,6 +176,12 @@ class WorkflowStep(BaseModel):
     name: str
     run: str
     if_: str | None = Field(default=None, alias="if")
+    #: Selhání kroku nezastaví workflow; jeho outputs (včetně `var`) se ale neaplikují.
+    continueOnError: bool = False
+    #: Počet opakování selhaného kroku (bez backoffu); hlásí se jen finální výsledek.
+    retries: int = Field(default=0, ge=0)
+    #: Krok běží i poté, co dřívější krok selhal (úklid, failure komentář).
+    always: bool = False
     image: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
     workingDir: str | None = None
