@@ -66,7 +66,7 @@ workflow:
       outputs:
         - type: agent_comment
           bodyFrom: .agentis/outputs/final-comment.md
-          status: 4
+          status: in_review
         - type: session_id
           valueFrom: .agentis/outputs/session-id
     - name: Commit changes

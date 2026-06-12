@@ -44,7 +44,7 @@ workflow:
       outputs:
         - type: agent_comment
           bodyFrom: outputs/final-comment.md
-          status: 5
+          status: done
         - type: session_id
           valueFrom: outputs/session-id
   env:

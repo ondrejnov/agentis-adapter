@@ -20,4 +20,4 @@ workflow:
       outputs:
         - type: agent_comment
           bodyFrom: outputs/final-comment.md
-          status: 6
+          status: cancelled

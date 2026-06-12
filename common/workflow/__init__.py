@@ -1,4 +1,5 @@
 from common.workflow.schema import (
+    COMMENT_STATUS_ALIASES,
     PROJECT_WORKFLOW_FILE_RELPATH,
     WORKFLOW_EXECUTORS,
     WORKFLOW_FILE_RELPATH,
@@ -24,6 +25,7 @@ from common.workflow.local_runtime import LocalProcessRunner
 from common.workflow.manager import WorkflowBusyError, WorkflowManager
 
 __all__ = [
+    "COMMENT_STATUS_ALIASES",
     "PROJECT_WORKFLOW_FILE_RELPATH",
     "WORKFLOW_EXECUTORS",
     "WORKFLOW_FILE_RELPATH",

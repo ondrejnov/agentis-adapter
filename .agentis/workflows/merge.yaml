@@ -39,7 +39,7 @@ workflow:
       outputs:
         - type: agent_comment
           bodyFrom: outputs/final-comment.md
-          status: 5
+          status: done
     - name: Report merge failure
       always: true
       run: |

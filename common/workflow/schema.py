@@ -17,6 +17,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from common.models import TaskStatus
+
 WORKFLOW_DIR_RELPATH = ".agentis/workflows"
 
 WORKFLOW_FILE_RELPATH = f"{WORKFLOW_DIR_RELPATH}/default.yaml"
@@ -169,6 +171,19 @@ def evaluate_condition(expression: str, variables: Mapping[str, str]) -> bool:
     return any(all(_evaluate_term(term, variables) for term in group) for group in parse_condition(expression))
 
 
+#: Pojmenované aliasy comment statusů; čísla odpovídají `Task.STATUS_*`
+#: číselníku v Agentis backendu (`app/entities/task.py`).
+COMMENT_STATUS_ALIASES: dict[str, int] = {
+    "backlog": TaskStatus.BACKLOG,
+    "todo": TaskStatus.TODO,
+    "in_progress": TaskStatus.IN_PROGRESS,
+    "in_review": TaskStatus.IN_REVIEW,
+    "done": TaskStatus.DONE,
+    "cancelled": TaskStatus.CANCELLED,
+    "blocked": TaskStatus.BLOCKED,
+}
+
+
 class WorkflowOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -176,9 +191,23 @@ class WorkflowOutput(BaseModel):
     label: str | None = None
     bodyFrom: str | None = None
     valueFrom: str | None = None
+    #: Přijímá číslo i alias z `COMMENT_STATUS_ALIASES`; po validaci vždy int.
     status: int | None = None
     path: str | None = None
     name: str | None = None
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def resolve_status_alias(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return COMMENT_STATUS_ALIASES[value]
+            except KeyError:
+                raise ValueError(
+                    f"Unknown comment status alias {value!r}; expected an int or one of "
+                    f"{', '.join(sorted(COMMENT_STATUS_ALIASES))}"
+                ) from None
+        return value
 
     @model_validator(mode="after")
     def validate_var_output(self) -> WorkflowOutput:

@@ -19,6 +19,7 @@ from common.workflow.local_runtime import LocalProcessRunner
 from common.workflow.manager import WorkflowBusyError, WorkflowManager
 from common.workflow.runtime import StepResult, build_bash_wrapper, build_job_manifest, job_labels, job_name
 from common.workflow.schema import (
+    COMMENT_STATUS_ALIASES,
     PROJECT_WORKFLOW_FILE_RELPATH,
     WORKFLOW_FILE_RELPATH,
     WorkflowConditionError,
@@ -64,7 +65,7 @@ workflow:
       outputs:
         - type: agent_comment
           bodyFrom: .agentis/outputs/final-comment.md
-          status: 4
+          status: in_review
         - type: session_id
           valueFrom: .agentis/outputs/session-id
     - name: Create pull request
@@ -196,7 +197,31 @@ def test_workflow_schema_parses_and_interpolates(tmp_path: Path) -> None:
     assert [step.name for step in spec.steps] == ["Run agent", "Create pull request"]
     assert spec.steps[1].image == "registry.example/other:2.0"
     assert spec.steps[0].outputs[0].type == "agent_comment"
-    assert spec.steps[0].outputs[0].status == 4
+    assert spec.steps[0].outputs[0].status == 4  # alias `in_review` se mapuje na číslo
+
+
+def test_comment_status_aliases_map_to_agentis_enum() -> None:
+    assert COMMENT_STATUS_ALIASES == {
+        "backlog": 1,
+        "todo": 2,
+        "in_progress": 3,
+        "in_review": 4,
+        "done": 5,
+        "cancelled": 6,
+        "blocked": 7,
+    }
+
+
+def test_workflow_schema_rejects_unknown_status_alias(tmp_path: Path) -> None:
+    path = tmp_path / "ci.yaml"
+    path.write_text(
+        "version: 1\nworkflow:\n  image: x\n  steps:\n"
+        "    - name: a\n      run: echo\n      outputs:\n"
+        "        - type: agent_comment\n          bodyFrom: out.md\n          status: closed\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError, match="Unknown comment status alias 'closed'"):
+        load_workflow_file(path, _values(tmp_path))
 
 
 def test_workflow_schema_rejects_unknown_keys(tmp_path: Path) -> None:
