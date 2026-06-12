@@ -131,7 +131,7 @@ def test_session_manager_posts_completion_comment_with_attachments(monkeypatch, 
     monkeypatch.setattr(
         manager,
         "_finish_session_actions",
-        lambda sess, session_ref: [
+        lambda sess: [
             {"label": "Pull Request", "value": "https://github.com/example/repo/pull/42/changes", "type": "url"}
         ],
     )

@@ -19,7 +19,6 @@ from common.models import (
 from claude.adapter import ClaudeCodeAdapterService
 from claude.activity_mapper import ClaudeActivityMapper
 from claude.session_manager import ClaudeSessionManager, _ClaudeSession
-from common.integrations.github_pr import GithubPrResult
 from tests.support import RpcTestClient
 
 
@@ -616,7 +615,7 @@ def test_session_manager_extract_final_text_empty_when_no_assistant():
     )
 
 
-def test_session_manager_finish_actions_commit_pr_and_start_dev_server(monkeypatch, tmp_path: Path):
+def test_session_manager_finish_actions_skip_commit_pr_and_dev_server(monkeypatch, tmp_path: Path):
     captured_calls: list[dict[str, Any]] = []
     worktree = tmp_path / "worktrees" / "task-1"
     worktree.mkdir(parents=True)
@@ -637,27 +636,8 @@ def test_session_manager_finish_actions_commit_pr_and_start_dev_server(monkeypat
         "_agentis_call",
         lambda method, params: captured_calls.append({"method": method, "params": params}),
     )
-    monkeypatch.setattr(
-        manager,
-        "_commit_session_changes",
-        lambda context, worktree_path: {
-            "status": "skipped",
-            "reason": "clean_worktree",
-            "working_dir": str(worktree_path),
-        },
-    )
-    monkeypatch.setattr(
-        manager,
-        "_ensure_pull_request",
-        lambda context, worktree_path: GithubPrResult(url="https://github.com/example/repo/pull/42", created=True),
-    )
-    monkeypatch.setattr(
-        manager,
-        "_start_dev_server",
-        lambda sess: {"namespace": "task-1", "working_dir": sess.worktree},
-    )
 
-    attachments = manager._finish_session_actions(sess, "sess-1")
+    attachments = manager._finish_session_actions(sess)
 
     assert attachments == [
         {
@@ -665,23 +645,8 @@ def test_session_manager_finish_actions_commit_pr_and_start_dev_server(monkeypat
             "value": f"vscode://file/{worktree}?windowId=_blank",
             "type": "url",
         },
-        {
-            "label": "Pull Request",
-            "value": "https://github.com/example/repo/pull/42/changes",
-            "type": "url",
-        },
-        {
-            "label": "Dev server",
-            "type": "url",
-            "value": "http://app-task-1.dev.agentis.cz",
-        },
     ]
-    adapter_events = [call["params"] for call in captured_calls if call["method"] == "run.adapter_event"]
-    assert [(event["kind"], event["status"], event["message"]) for event in adapter_events] == [
-        ("commit", "success", "Žádné změny ke commitnutí."),
-        ("dev_server", "started", "Spouštím dev server."),
-        ("dev_server", "success", "Dev server byl spuštěn."),
-    ]
+    assert [call for call in captured_calls if call["method"] == "run.adapter_event"] == []
 
 
 def test_session_manager_stream_adds_completion_attachments_and_actions(monkeypatch, tmp_path: Path):
@@ -726,7 +691,7 @@ def test_session_manager_stream_adds_completion_attachments_and_actions(monkeypa
     monkeypatch.setattr(
         manager,
         "_finish_session_actions",
-        lambda sess, session_ref: [
+        lambda sess: [
             {"label": "Pull Request", "value": "https://github.com/example/repo/pull/42/changes", "type": "url"}
         ],
     )

@@ -22,27 +22,7 @@ workflow:
       mountPath: /root/.claude
   steps:
     - name: Run agent
-      run: |
-        mkdir -p "$AGENTIS_RUN_DIR/outputs"
-        MODEL="${AGENTIS_MODEL:-openai/gpt-5.4-mini}"
-        case "$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')" in
-          *claude*) ADAPTER=claude ;;
-          *) ADAPTER=opencode ;;
-        esac
-        agentiscode --json --adapter "$ADAPTER" \
-          ${AGENTIS_SESSION_ID:+--resume "$AGENTIS_SESSION_ID"} \
-          --model "$MODEL" \
-          --run-id "$AGENTIS_RUN_ID" \
-          --task-id "$AGENTIS_TASK_ID" \
-          --final-output "$AGENTIS_RUN_DIR/outputs/final-comment.md" \
-          --session-output "$AGENTIS_RUN_DIR/outputs/session-id" \
-          < "$AGENTIS_PROMPT_FILE"
-      outputs:
-        - type: agent_comment
-          bodyFrom: outputs/final-comment.md
-          status: 5
-        - type: session_id
-          valueFrom: outputs/session-id
+      uses: run-agent
 volumes:
   - name: npm-cache
     hostPath:

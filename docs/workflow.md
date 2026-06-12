@@ -81,9 +81,13 @@ workflow:
     TASK_NUMBER: "[%TASK_NUMBER%]"
   volumeMounts: [...]           # jen kubernetes
   followups: [...]              # akce nabídnuté v completion komentáři (viz níže)
+  stepTemplates:                # sdílené definice kroků pro `uses` (viz níže)
+    run-agent:
+      run: ...
   steps:                        # povinné, aspoň jeden krok
     - name: Run agent
-      run: |                    # bash skript kroku
+      uses: run-agent           # volitelně: defaulty kroku ze šablony (viz níže)
+      run: |                    # bash skript kroku (povinný, pokud ho nedodá `uses`)
         ...
       if: ENV_READY != 'true'   # volitelná podmínka (viz níže)
       continueOnError: false    # selhání kroku nezastaví workflow (viz Error handling)
@@ -110,10 +114,43 @@ Merge probíhá nad surovým YAML (defaulty schématu nepřebijí hodnoty rodič
 | --- | --- |
 | skaláry (`image`, `workingDir`, `timeoutSeconds`, `deleteNamespace`, …) | potomek přepisuje rodiče; bez hodnoty v potomkovi platí rodič |
 | `env` | merge po klíčích, potomek vyhrává |
+| `stepTemplates` | merge po jménech šablon; potomek přepisuje **celou** šablonu (žádný deep-merge polí) |
 | `envFiles`, `volumeMounts`, `imagePullSecrets`, `volumes` | konkatenace rodič + potomek; položka-mapa se stejným `name` se přepíše na místě, přesný duplikát se vynechá |
 | `steps`, `followups` | **nedědí se nikdy** — potomek je musí definovat sám |
 
-Konkatenace seznamů (místo přepisu) je zvolená záměrně: potomci typicky jen *přidávají* mounty navíc a přepis by je nutil kopírovat celý base blok, čímž by dědičnost ztratila smysl. Přepis podle `name` zároveň brání duplicitním jménům volumes v Job manifestu a umožňuje cílené přepsání jedné položky (např. zrušit `readOnly`). `steps` se nedědí, protože kroky jsou podstata workflow — „zdědit a upravit“ seznam kroků se nedá vyjádřit srozumitelně.
+Konkatenace seznamů (místo přepisu) je zvolená záměrně: potomci typicky jen *přidávají* mounty navíc a přepis by je nutil kopírovat celý base blok, čímž by dědičnost ztratila smysl. Přepis podle `name` zároveň brání duplicitním jménům volumes v Job manifestu a umožňuje cílené přepsání jedné položky (např. zrušit `readOnly`). `steps` se nedědí, protože kroky jsou podstata workflow — „zdědit a upravit“ seznam kroků se nedá vyjádřit srozumitelně; sdílení *jednoho* kroku mezi workflow řeší `stepTemplates` + `uses` (viz níže).
+
+### Sdílené kroky (`stepTemplates` + `uses`)
+
+Krok, který se opakuje ve více workflow, se definuje jednou ve `workflow.stepTemplates` (typicky v `_base.yaml`, odkud se dědí přes `extends`) a kroky se na něj odkazují přes `uses: <jméno šablony>`:
+
+```yaml
+workflow:
+  stepTemplates:
+    run-agent:
+      env:
+        RUN_AGENT_FLAGS: --json
+      run: |
+        agentiscode ${RUN_AGENT_FLAGS:-} ...
+      outputs:
+        - type: session_id
+          valueFrom: outputs/session-id
+  steps:
+    - name: Run agent
+      uses: run-agent
+      env:
+        RUN_AGENT_FLAGS: ""    # odchylka jen tam, kde je potřeba
+```
+
+Šablona má stejná pole jako krok kromě `name` a `uses`. Sémantika merge:
+
+- pole, které krok sám deklaruje, vyhrává nad šablonou — **celé** (deklarované `outputs` nahradí outputs šablony, nedoplňují se),
+- `env` se merguje po klíčích, krok vyhrává,
+- `run` je u kroku s `uses` volitelný (dodá ho šablona); krok bez `run` i `uses` je chyba validace, stejně jako `uses` na neexistující šablonu.
+
+Resoluce proběhne při načtení souboru (po `extends` merge), runtime už vidí jen plně rozbalené kroky. Parametrizace skriptu se dělá přes env proměnné s defaulty v bashi (`${VAR:-default}`), ne přes interpolační tokeny — `[%TOKEN%]` v šabloně se nahradí built-in hodnotami runu jako kdekoli jinde.
+
+Dodávaná šablona `run-agent` v `_base.yaml` spouští agenta (`agentiscode`, adapter CLI podle modelu, resume session) a parametrizuje se přes `RUN_AGENT_FLAGS` (default `--json`), `RUN_AGENT_OUTPUT_DIR` (default `$AGENTIS_RUN_DIR/outputs`; při přepisu je nutné přepsat i `outputs`, jejich cesty se čtou relativně k output rootu runu) a `RUN_AGENT_STREAM_FILTER` (příkaz, kterým proteče stdout agenta, default `cat` — Slack workflow tudy posílá stream do `scripts/slack_stream.py`).
 
 ### Interpolace tokenů
 
@@ -222,13 +259,14 @@ Z tokenů jsou k dispozici `[%WORKDIR%]` (cwd agenta) a `[%MAIN_DIR%]` (hlavní 
 
 ## Dodávaná workflow
 
-Workflow `default.yaml`, `project.yaml`, `merge.yaml` a `close.yaml` dědí přes `extends: _base` sdílenou infrastrukturu (image, `imagePullSecrets`, `envFiles`, společné env a volumes) z `_base.yaml` a definují jen vlastní kroky a odchylky.
+Workflow `default.yaml`, `project.yaml`, `slack.yaml`, `merge.yaml` a `close.yaml` dědí přes `extends: _base` sdílenou infrastrukturu (image, `imagePullSecrets`, `envFiles`, společné env a volumes) a šablonu kroku `run-agent` z `_base.yaml` a definují jen vlastní kroky a odchylky.
 
 | Soubor | Účel |
 | --- | --- |
-| `_base.yaml` | Sdílený základ pro dědičnost; samostatně nespustitelný (nemá `steps`) |
-| `default.yaml` | Plný task run: příprava `.env` a virtualenvu (podmíněně přes `ENV_READY`), spuštění agenta (`agentiscode`, adapter podle modelu), commit, push + pull request (jen s nastaveným repozitářem — `if: GITHUB_REPO`); nabízí followups „Git merge“ a „Zavřít prostředí“ |
-| `project.yaml` | Run nad celým projektem bez gitu — jen spuštění agenta s outputs `agent_comment` + `session_id` |
+| `_base.yaml` | Sdílený základ pro dědičnost (infrastruktura + šablona `run-agent`); samostatně nespustitelný (nemá `steps`) |
+| `default.yaml` | Plný task run: příprava `.env` a virtualenvu (podmíněně přes `ENV_READY`), spuštění agenta (`uses: run-agent` s outputs ve worktree a bez `--json`), commit, push + pull request (jen s nastaveným repozitářem — `if: GITHUB_REPO`); nabízí followups „Git merge“ a „Zavřít prostředí“ |
+| `project.yaml` | Run nad celým projektem bez gitu — jen `uses: run-agent` s defaultními outputs `agent_comment` + `session_id` |
+| `slack.yaml` | Dotaz ze Slack threadu (project scope): `uses: run-agent` se streamem přes `scripts/slack_stream.py`, odpověď/failure report do Slacku |
 | `merge.yaml` | Rebase task větve na base (konflikty řeší AI resolver), fast-forward base větve, push, úklid worktree a větve; při selhání pošle failure komentář (`always` krok) |
 | `close.yaml` | Úklid worktree a task větve bez merge; `deleteNamespace: true` |
 | `local-env.yaml` | Prostředí lokálních CLI sessions: PATH s venv (worktree, pak hlavní worktree) a vytvoření venv při studeném startu; viz výše |
@@ -239,6 +277,7 @@ Workflow `default.yaml`, `project.yaml`, `merge.yaml` a `close.yaml` dědí pře
 - **`Workflow file not found`** — ve worktree chybí `.agentis/workflows/<soubor>.yaml` (u project scope `project.yaml`, u followup akce soubor pojmenovaného workflow).
 - **`Workflow extends target not found`** — `extends` ukazuje na neexistující soubor v `.agentis/workflows/`.
 - **`chained 'extends' is not supported`** — rodičovský soubor má vlastní `extends`; dědičnost má jen jednu úroveň.
+- **`uses unknown step template`** — krok odkazuje šablonu, která po `extends` merge není ve `workflow.stepTemplates`.
 - **`Unknown workflow token [%X%]`** — token mimo allowlist; viz tabulka výše.
 - **Workflow „busy“** — per task běží jen jeden run; počkat na doběhnutí nebo zavolat `abort`.
 - **Output se nepropsal** — soubor neexistuje, je prázdný, krok byl přeskočen (přes `if` nebo po selhání workflow), krok sám selhal (včetně `continueOnError`), nebo cesta vede mimo output root.

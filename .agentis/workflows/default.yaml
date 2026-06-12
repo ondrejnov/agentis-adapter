@@ -59,21 +59,10 @@ workflow:
       if: ENV_READY != 'true'
       run: code-review-graph build
     - name: Run agent
-      run: |
-        mkdir -p .agentis/outputs
-        MODEL="${AGENTIS_MODEL:-openai/gpt-5.4-mini}"
-        case "$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')" in
-          *claude*) ADAPTER=claude ;;
-          *) ADAPTER=opencode ;;
-        esac
-        agentiscode --adapter "$ADAPTER" \
-          ${AGENTIS_SESSION_ID:+--resume "$AGENTIS_SESSION_ID"} \
-          --model "$MODEL" \
-          --run-id "$AGENTIS_RUN_ID" \
-          --task-id "$AGENTIS_TASK_ID" \
-          --final-output .agentis/outputs/final-comment.md \
-          --session-output .agentis/outputs/session-id \
-          < "$AGENTIS_PROMPT_FILE"
+      uses: run-agent
+      env:
+        RUN_AGENT_FLAGS: ""
+        RUN_AGENT_OUTPUT_DIR: .agentis/outputs
       outputs:
         - type: agent_comment
           bodyFrom: .agentis/outputs/final-comment.md

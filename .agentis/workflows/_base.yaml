@@ -11,6 +11,42 @@ workflow:
   ttlSecondsAfterFinished: 300
   envFiles:
     - /root/.config/agentis/agentis.env
+  # Sdílené kroky: workflow se na ně odkazují přes `uses: <jméno>` a deklarují
+  # jen odchylky (env merge po klíčích, ostatní pole krok přepisuje celá).
+  stepTemplates:
+    # Spustí agenta nad promptem runu; adapter CLI se volí podle modelu.
+    # Parametry přes env:
+    #   RUN_AGENT_FLAGS         — extra flagy pro agentiscode (default `--json`)
+    #   RUN_AGENT_OUTPUT_DIR    — kam psát final-comment.md a session-id
+    #                             (default `$AGENTIS_RUN_DIR/outputs`; přepiš spolu s `outputs`,
+    #                             jejich cesty jsou relativní k output rootu runu)
+    #   RUN_AGENT_STREAM_FILTER — příkaz, kterým proteče stdout agenta (default `cat`)
+    run-agent:
+      env:
+        RUN_AGENT_FLAGS: --json
+      run: |
+        OUTPUT_DIR="${RUN_AGENT_OUTPUT_DIR:-$AGENTIS_RUN_DIR/outputs}"
+        mkdir -p "$OUTPUT_DIR"
+        MODEL="${AGENTIS_MODEL:-openai/gpt-5.4-mini}"
+        case "$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')" in
+          *claude*) ADAPTER=claude ;;
+          *) ADAPTER=opencode ;;
+        esac
+        agentiscode ${RUN_AGENT_FLAGS:-} --adapter "$ADAPTER" \
+          ${AGENTIS_SESSION_ID:+--resume "$AGENTIS_SESSION_ID"} \
+          --model "$MODEL" \
+          --run-id "$AGENTIS_RUN_ID" \
+          --task-id "$AGENTIS_TASK_ID" \
+          --final-output "$OUTPUT_DIR/final-comment.md" \
+          --session-output "$OUTPUT_DIR/session-id" \
+          < "$AGENTIS_PROMPT_FILE" \
+          | ${RUN_AGENT_STREAM_FILTER:-cat}
+      outputs:
+        - type: agent_comment
+          bodyFrom: outputs/final-comment.md
+          status: 5
+        - type: session_id
+          valueFrom: outputs/session-id
   env:
     HOME: /root
     BRANCH: "[%BRANCH%]"

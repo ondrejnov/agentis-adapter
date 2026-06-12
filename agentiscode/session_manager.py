@@ -49,10 +49,6 @@ class AgentisCodeSessionManager:
     _AGENT_LABEL = "agentiscode"
     _completion_actions = staticmethod(BaseSessionManager._completion_actions)
     _normalize_adapter_event_status = staticmethod(BaseSessionManager._normalize_adapter_event_status)
-    _commit_session_changes = BaseSessionManager._commit_session_changes
-    _ensure_pull_request = BaseSessionManager._ensure_pull_request
-    _run_completed_process = BaseSessionManager._run_completed_process
-    _start_dev_server = BaseSessionManager._start_dev_server
     _finish_session_actions = BaseSessionManager._finish_session_actions
     _agentis_call = BaseSessionManager._agentis_call
     _emit_adapter_event = BaseSessionManager._emit_adapter_event
@@ -213,7 +209,7 @@ class AgentisCodeSessionManager:
             return
 
         try:
-            attachments = self._finish_session_actions(cast(Any, sess), sess.session_id)
+            attachments = self._finish_session_actions(cast(Any, sess))
             if sess.snapshot_key:
                 diff_result = write_changes_diff_best_effort(
                     sess.worktree,

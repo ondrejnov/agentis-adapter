@@ -10,8 +10,6 @@ from common.models import (
     AddMessageParams,
     AgentExecutionContextPayload,
     AbortParams,
-    ApproveParams,
-    QuestionParams,
     RunEventPayload,
     RunStatePayload,
     StartParams,
@@ -420,86 +418,6 @@ class AgentJsonRpcService:
                 "steps": adapter_steps,
             },
         }
-
-    def question(self, params: QuestionParams) -> dict[str, Any]:
-        return {}
-        if self._is_workflow_runtime(params.context):
-            raise AgentJsonRpcException(400, "Workflow runtime nepodporuje question/approve IPC do Jobu")
-
-        if params.context.session_id:
-            self.session_registry.register(params.context.session_id, params.context)
-            session_id = params.context.session_id
-        else:
-            raise AgentJsonRpcException(400, "Context must include session_id to reply to questions")
-
-        context = params.context
-        run = RunStatePayload(run_id=context.run_id, context=context)
-        run.opencode_session_id = session_id
-        run.events.append(
-            RunEventPayload(
-                kind="question",
-                payload={"request_id": params.request_id, "answers": params.answers},
-            )
-        )
-
-        adapter_steps: list[dict[str, Any]] = []
-        try:
-            adapter = self._adapter_factory(context)
-            adapter_steps.append(
-                self._run_adapter_step(
-                    adapter,
-                    kind="create_worktree",
-                    started_message="Zakládám git worktree.",
-                    success_message="Git worktree je připravený.",
-                    callback=adapter.create_worktree,
-                )
-            )
-            adapter_steps.append(
-                self._run_adapter_step(
-                    adapter,
-                    kind="deploy",
-                    started_message="Připravuji prostředí.",
-                    success_message="Prostředí je připravené.",
-                    callback=adapter.deploy,
-                )
-            )
-            wait_result = self._run_adapter_step(
-                adapter,
-                kind="wait_ready",
-                started_message="Čekám na připravenost prostředí.",
-                success_message="Prostředí běží.",
-                callback=adapter.wait_ready,
-            )
-            adapter_steps.append(wait_result)
-            pod_url = wait_result.get("url")
-            if not isinstance(pod_url, str) or not pod_url:
-                raise RuntimeError("wait_ready did not return a usable pod URL")
-            adapter_steps.append(
-                self._run_adapter_step(
-                    adapter,
-                    kind="question",
-                    started_message="Předávám odpověď na otázku OpenCode session.",
-                    success_message="Odpověď na otázku byla předána.",
-                    callback=lambda: adapter.question_reply(params.request_id, params.answers, pod_url=pod_url),
-                )
-            )
-        except Exception as exc:
-            run.status = "failed"
-            raise AgentJsonRpcException(500, f"Adapter error: {exc}") from exc
-        return {
-            "run": run.safe_dump(),
-            "adapter": {
-                "executed": True,
-                "steps": adapter_steps,
-            },
-        }
-
-    def approve(self, params: ApproveParams) -> dict[str, Any]:
-        event = RunEventPayload(
-            kind="approve",
-            payload={"approved": params.approved, "comment": params.comment},
-        )
-        return {"ok": True, "approved": params.approved, "event": event.model_dump()}
 
     def abort(self, params: AbortParams) -> dict[str, Any]:
         context = params.context

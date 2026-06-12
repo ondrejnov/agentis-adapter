@@ -7,8 +7,6 @@ from common.config import Settings, get_settings
 from common.models import (
     AbortParams,
     AddMessageParams,
-    ApproveParams,
-    QuestionParams,
     StartParams,
     UndoParams,
 )
@@ -21,8 +19,6 @@ from agentiscode.session_manager import AgentisCodeSessionManager
 _DISPATCH: dict[str, JsonRpcRoute] = {
     "start": JsonRpcRoute(StartParams, "start"),
     "add_message": JsonRpcRoute(AddMessageParams, "add_message"),
-    "question": JsonRpcRoute(QuestionParams, "question"),
-    "approve": JsonRpcRoute(ApproveParams, "approve"),
     "abort": JsonRpcRoute(AbortParams, "abort"),
     "undo": JsonRpcRoute(UndoParams, "undo"),
 }

@@ -224,17 +224,20 @@ class WorkflowFollowup(BaseModel):
         }
 
 
-class WorkflowStep(BaseModel):
+class WorkflowStepTemplate(BaseModel):
+    """Sdílená definice kroku ve `workflow.stepTemplates`; kroky se na ni odkazují přes `uses`.
+
+    Šablona dává kroku defaulty: pole, která krok sám deklaruje, vyhrávají,
+    `env` se merguje po klíčích (krok vyhrává). Resoluce běží při validaci
+    `WorkflowSpec` — runtime už vidí jen plně rozbalené kroky.
+    """
+
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    name: str
     run: str
     if_: str | None = Field(default=None, alias="if")
-    #: Selhání kroku nezastaví workflow; jeho outputs (včetně `var`) se ale neaplikují.
     continueOnError: bool = False
-    #: Počet opakování selhaného kroku (bez backoffu); hlásí se jen finální výsledek.
     retries: int = Field(default=0, ge=0)
-    #: Krok běží i poté, co dřívější krok selhal (úklid, failure komentář).
     always: bool = False
     image: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
@@ -255,6 +258,37 @@ class WorkflowStep(BaseModel):
         if value is not None:
             parse_condition(value)
         return value
+
+
+#: Pole kroku, pro která šablona (`uses`) poskytuje default; krok je přepisuje
+#: tím, že je sám deklaruje. `env` má vlastní merge po klíčích.
+_TEMPLATE_DEFAULTED_STEP_FIELDS = (
+    "run",
+    "if_",
+    "continueOnError",
+    "retries",
+    "always",
+    "image",
+    "workingDir",
+    "timeoutSeconds",
+    "ttlSecondsAfterFinished",
+    "resources",
+    "outputs",
+)
+
+
+class WorkflowStep(WorkflowStepTemplate):
+    name: str
+    #: Jméno šablony ve `workflow.stepTemplates`, ze které krok bere defaulty.
+    uses: str | None = None
+    #: Povinné, pokud krok nemá `uses` — pak `run` dodá šablona.
+    run: str | None = None
+
+    @model_validator(mode="after")
+    def validate_run_or_uses(self) -> WorkflowStep:
+        if self.uses is None and self.run is None:
+            raise ValueError(f"step {self.name!r} requires 'run' (or 'uses' referencing a step template)")
+        return self
 
 
 #: Podporované executory workflow kroků: Kubernetes Joby vs. lokální bash procesy.
@@ -278,6 +312,8 @@ class WorkflowSpec(BaseModel):
     envFiles: list[str] = Field(default_factory=list)
     volumeMounts: list[dict[str, Any]] = Field(default_factory=list)
     imagePullSecrets: list[dict[str, Any]] = Field(default_factory=list)
+    #: Sdílené definice kroků pro `uses`; dědí se přes `extends` (merge po jménech).
+    stepTemplates: dict[str, WorkflowStepTemplate] = Field(default_factory=dict)
     steps: list[WorkflowStep] = Field(min_length=1)
     #: Followup akce nabídnuté po doběhnutí workflow; bez sekce se žádné nenabízí.
     followups: list[WorkflowFollowup] = Field(default_factory=list)
@@ -286,6 +322,29 @@ class WorkflowSpec(BaseModel):
     @classmethod
     def coerce_env(cls, value: Any) -> Any:
         return _coerce_env(value) if isinstance(value, dict) else value
+
+    @model_validator(mode="after")
+    def resolve_step_templates(self) -> WorkflowSpec:
+        """Rozbalí `uses` kroků: doplní defaulty ze šablony, krok přepisuje vlastní pole."""
+
+        resolved: list[WorkflowStep] = []
+        for step in self.steps:
+            if step.uses is None:
+                resolved.append(step)
+                continue
+            template = self.stepTemplates.get(step.uses)
+            if template is None:
+                known = ", ".join(sorted(self.stepTemplates)) or "no stepTemplates defined"
+                raise ValueError(f"step {step.name!r} uses unknown step template {step.uses!r} ({known})")
+            updates: dict[str, Any] = {
+                field: getattr(template, field)
+                for field in _TEMPLATE_DEFAULTED_STEP_FIELDS
+                if field not in step.model_fields_set
+            }
+            updates["env"] = {**template.env, **step.env}
+            resolved.append(step.model_copy(update=updates))
+        self.steps = resolved
+        return self
 
 
 class WorkflowFile(BaseModel):
@@ -334,11 +393,12 @@ def _merge_list(parent: list[Any], child: list[Any]) -> list[Any]:
 def _merge_workflow_raw(parent: dict[str, Any], child: dict[str, Any]) -> dict[str, Any]:
     """Sloučí surové YAML mapy rodiče a potomka podle dědičné sémantiky.
 
-    Skaláry přepisuje potomek, `env` se merguje po klíčích (potomek vyhrává),
-    seznamy infrastruktury (`volumes`, `envFiles`, `volumeMounts`,
-    `imagePullSecrets`) se slučují přes `_merge_list`, `steps` a `followups`
-    se nedědí nikdy. Merge běží nad surovými daty před validací a interpolací,
-    aby se defaulty schématu neprosadily místo hodnot rodiče.
+    Skaláry přepisuje potomek, `env` a `stepTemplates` se mergují po klíčích
+    (potomek vyhrává, šablonu přepisuje celou), seznamy infrastruktury
+    (`volumes`, `envFiles`, `volumeMounts`, `imagePullSecrets`) se slučují přes
+    `_merge_list`, `steps` a `followups` se nedědí nikdy. Merge běží nad
+    surovými daty před validací a interpolací, aby se defaulty schématu
+    neprosadily místo hodnot rodiče.
     """
 
     merged = {key: value for key, value in parent.items() if key != "workflow"}
@@ -351,6 +411,7 @@ def _merge_workflow_raw(parent: dict[str, Any], child: dict[str, Any]) -> dict[s
         parent_spec.pop(field, None)
     spec = {**parent_spec, **child_spec}
     spec["env"] = {**(parent_spec.get("env") or {}), **(child_spec.get("env") or {})}
+    spec["stepTemplates"] = {**(parent_spec.get("stepTemplates") or {}), **(child_spec.get("stepTemplates") or {})}
     for field in _MERGED_SPEC_LIST_FIELDS:
         spec[field] = _merge_list(parent_spec.get(field) or [], child_spec.get(field) or [])
     merged["workflow"] = spec
@@ -439,6 +500,7 @@ __all__ = [
     "WorkflowInterpolationError",
     "WorkflowOutput",
     "WorkflowStep",
+    "WorkflowStepTemplate",
     "WorkflowSpec",
     "WorkflowFile",
     "evaluate_condition",

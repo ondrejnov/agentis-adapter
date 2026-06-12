@@ -417,6 +417,86 @@ def test_workflow_without_extends_is_unchanged(tmp_path: Path) -> None:
     assert [step.name for step in workflow.workflow.steps] == ["Run agent", "Create pull request"]
 
 
+TEMPLATE_BASE_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  stepTemplates:
+    run-agent:
+      timeoutSeconds: 900
+      env:
+        FLAGS: --json
+      run: agentiscode $FLAGS
+      outputs:
+        - type: session_id
+          valueFrom: outputs/session-id
+"""
+
+TEMPLATE_CHILD_YAML = """
+version: 1
+extends: _base
+workflow:
+  steps:
+    - name: Run agent
+      uses: run-agent
+    - name: Run agent tuned
+      uses: run-agent
+      timeoutSeconds: 60
+      env:
+        FLAGS: ""
+        EXTRA: "1"
+      outputs:
+        - type: agent_comment
+          bodyFrom: outputs/final-comment.md
+          status: 4
+"""
+
+
+def test_step_template_fills_defaults_and_step_overrides(tmp_path: Path) -> None:
+    child_path = _write_extends_pair(tmp_path, child_yaml=TEMPLATE_CHILD_YAML, base_yaml=TEMPLATE_BASE_YAML)
+    steps = load_workflow_file(child_path, _values(tmp_path)).workflow.steps
+
+    plain, tuned = steps
+    assert plain.run == "agentiscode $FLAGS"  # run dodala šablona
+    assert plain.timeoutSeconds == 900
+    assert plain.env == {"FLAGS": "--json"}
+    assert [output.type for output in plain.outputs] == ["session_id"]
+
+    assert tuned.run == "agentiscode $FLAGS"
+    assert tuned.timeoutSeconds == 60  # pole deklarované krokem vyhrává
+    assert tuned.env == {"FLAGS": "", "EXTRA": "1"}  # env merge po klíčích, krok vyhrává
+    assert [output.type for output in tuned.outputs] == ["agent_comment"]  # outputs krok přepisuje celé
+
+
+def test_step_templates_inherited_and_overridable_by_child(tmp_path: Path) -> None:
+    child_yaml = TEMPLATE_CHILD_YAML.replace(
+        "workflow:\n",
+        "workflow:\n  stepTemplates:\n    run-agent:\n      run: child-agent\n",
+        1,
+    )
+    child_path = _write_extends_pair(tmp_path, child_yaml=child_yaml, base_yaml=TEMPLATE_BASE_YAML)
+    steps = load_workflow_file(child_path, _values(tmp_path)).workflow.steps
+
+    # Potomek přepsal celou šablonu (žádný deep-merge): env/outputs z base šablony zmizely.
+    assert steps[0].run == "child-agent"
+    assert steps[0].env == {}
+    assert steps[0].outputs == []
+
+
+def test_step_uses_unknown_template_is_validation_error(tmp_path: Path) -> None:
+    child_yaml = TEMPLATE_CHILD_YAML.replace("uses: run-agent", "uses: missing")
+    child_path = _write_extends_pair(tmp_path, child_yaml=child_yaml, base_yaml=TEMPLATE_BASE_YAML)
+    with pytest.raises(ValidationError, match="unknown step template 'missing'"):
+        load_workflow_file(child_path, _values(tmp_path))
+
+
+def test_step_without_run_and_uses_is_validation_error(tmp_path: Path) -> None:
+    child_yaml = TEMPLATE_CHILD_YAML.replace("      uses: run-agent\n", "", 1)
+    child_path = _write_extends_pair(tmp_path, child_yaml=child_yaml, base_yaml=TEMPLATE_BASE_YAML)
+    with pytest.raises(ValidationError, match="requires 'run'"):
+        load_workflow_file(child_path, _values(tmp_path))
+
+
 def test_evaluate_condition_truthiness_negation_and_comparison() -> None:
     assert evaluate_condition("READY", {"READY": "1"})
     assert evaluate_condition("READY", {"READY": "yes"})

@@ -1,0 +1,114 @@
+version: 1
+extends: _base
+# Workflow pro dotazy ze Slacku. Slack bridge (strana Agentisu) namapuje Slack
+# thread na task a dispatchne `start` s `context.adapter.workflow = "slack"` a
+# `context.adapter.scope = "project"` (běh přímo v adresáři projektu, bez
+# worktree a git operací).
+#
+# Bridge jako ack na Slack event rovnou pošle pending zprávu („⏳ Pracuju na
+# tom…“) a v task headers předá adresáta: `slack_channel`, `slack_message_ts`
+# (ts pending zprávy) a volitelně `slack_thread_ts`. Kroky je dostanou jako
+# env `TASK_HEADER_SLACK_*`. Průběh běhu agenta edituje pending zprávu přes
+# `chat.update` (scripts/slack_stream.py), finální odpověď ji nakonec nahradí
+# — ve Slacku tak žije jediná zpráva od „pracuju“ po odpověď.
+#
+# Navazující zprávy v threadu posílá bridge jako `add_message` na stejný task;
+# session_id output zajistí resume konverzace agenta.
+workflow:
+  # Konverzační dotaz — kratší timeout než plný task run.
+  timeoutSeconds: 1800
+  envFiles:
+    - /root/.config/agentis/slack.env
+  env:
+    TASK_NUMBER: "[%TASK_NUMBER%]"
+    TASK_TITLE: "[%TASK_TITLE%]"
+    IS_SANDBOX: 1
+    PYTHONPATH: "[%WORKDIR%]/backend"
+    PATH: "[%WORKDIR%]/.venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  volumeMounts:
+    - name: npm-cache
+      mountPath: /root/.npm
+    - name: poetry-cache
+      mountPath: /root/.cache/pypoetry
+    - name: claudecodejson
+      mountPath: /root/.claude.json
+    - name: claudecode
+      mountPath: /root/.claude
+  steps:
+    # Task headers nejsou dostupné v `if` podmínkách (jen env), proto se
+    # kanál přečte do `var` outputu — kroky pro Slack se pak dají podmínit
+    # a run spuštěný mimo Slack je čistě přeskočí.
+    - name: Resolve Slack target
+      run: |
+        mkdir -p "$AGENTIS_RUN_DIR/outputs"
+        printf '%s' "${TASK_HEADER_SLACK_CHANNEL:-}" > "$AGENTIS_RUN_DIR/outputs/slack-channel"
+      outputs:
+        - type: var
+          name: SLACK_CHANNEL
+          valueFrom: outputs/slack-channel
+    # JSON stream agenta jde přes scripts/slack_stream.py — ten ho beze změny
+    # tee-uje do logu a throttlovaně edituje pending zprávu posledním děním
+    # (běžící nástroj, reasoning). Bez Slack headers se chová jako čistý tee.
+    - name: Run agent
+      uses: run-agent
+      env:
+        RUN_AGENT_STREAM_FILTER: python3 scripts/slack_stream.py
+    # Finální odpověď nahradí pending zprávu (chat.update); bez ts v headers
+    # spadne na postMessage do threadu.
+    - name: Post answer to Slack
+      if: SLACK_CHANNEL
+      run: |
+        text="$(cat "$AGENTIS_RUN_DIR/outputs/final-comment.md")"
+        # Hrubý převod markdownu na Slack mrkdwn: nadpisy a **bold** na *bold*.
+        text="$(printf '%s' "$text" | sed -e 's/^#\{1,6\} \(.*\)/*\1*/' -e 's/\*\*/*/g')"
+        if [ "${#text}" -gt 12000 ]; then
+          text="${text:0:12000}"$'\n\n'"_… odpověď zkrácena, celé znění je v Agentis tasku #${TASK_NUMBER}._"
+        fi
+        if [ -n "${TASK_HEADER_SLACK_MESSAGE_TS:-}" ]; then API=chat.update; else API=chat.postMessage; fi
+        jq -n --arg channel "$SLACK_CHANNEL" \
+              --arg ts "${TASK_HEADER_SLACK_MESSAGE_TS:-}" \
+              --arg thread "${TASK_HEADER_SLACK_THREAD_TS:-}" \
+              --arg text "$text" \
+              'if $ts != "" then {channel: $channel, ts: $ts, text: $text}
+               else {channel: $channel, text: $text, unfurl_links: false}
+                    + (if $thread == "" then {} else {thread_ts: $thread} end) end' \
+          | curl -sS -X POST "https://slack.com/api/${API}" \
+              -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              --data @- \
+          | jq -e '.ok' >/dev/null
+    # Při selhání se pending zpráva nesmí navždy točit — přepíše se na ❌.
+    - name: Report failure to Slack
+      always: true
+      if: SLACK_CHANNEL
+      run: |
+        [ "${AGENTIS_WORKFLOW_STATUS:-success}" = "failed" ] || exit 0
+        if [ -n "${TASK_HEADER_SLACK_MESSAGE_TS:-}" ]; then API=chat.update; else API=chat.postMessage; fi
+        jq -n --arg channel "$SLACK_CHANNEL" \
+              --arg ts "${TASK_HEADER_SLACK_MESSAGE_TS:-}" \
+              --arg thread "${TASK_HEADER_SLACK_THREAD_TS:-}" \
+              --arg text "❌ Zpracování dotazu selhalo v kroku „${AGENTIS_FAILED_STEP}“. Detaily jsou v Agentis tasku #${TASK_NUMBER}." \
+              'if $ts != "" then {channel: $channel, ts: $ts, text: $text}
+               else {channel: $channel, text: $text}
+                    + (if $thread == "" then {} else {thread_ts: $thread} end) end' \
+          | curl -sS -X POST "https://slack.com/api/${API}" \
+              -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              --data @- \
+          | jq -e '.ok' >/dev/null
+volumes:
+  - name: npm-cache
+    hostPath:
+      path: /root/.npm
+      type: DirectoryOrCreate
+  - name: poetry-cache
+    hostPath:
+      path: /root/.cache/pypoetry
+      type: DirectoryOrCreate
+  - name: claudecode
+    hostPath:
+      path: /root/.claude
+      type: DirectoryOrCreate
+  - name: claudecodejson
+    hostPath:
+      path: /root/.claude.json

@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
-import subprocess
 import sys
 import threading
 import time
@@ -29,7 +28,6 @@ from uuid import uuid4
 from common.config import Settings
 from common.models import AgentExecutionContextPayload, completion_task_status
 from common.git_adapter import GitAdapterService
-from common.namespaces import dev_server_url_for_context
 from common.artifacts.expected import collect_expected_artifacts
 from common.artifacts.screenshots import collect_screenshot_images
 from common.artifacts.source_snapshot import (
@@ -39,7 +37,6 @@ from common.artifacts.source_snapshot import (
     write_changes_diff_best_effort,
 )
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
-from common.integrations.github_pr import GithubPrError, GithubPrResult, GithubPrService
 from common.status import activity_from_event, get_status_registry
 
 
@@ -387,7 +384,7 @@ class BaseSessionManager:
             body = self._extract_final_text(snapshot)
             attachments: list[dict[str, Any]] = []
             if not sess.abort_event.is_set():
-                attachments = self._finish_session_actions(sess, sess.session_id or run_session_id)
+                attachments = self._finish_session_actions(sess)
                 if sess.snapshot_key:
                     diff_result = write_changes_diff_best_effort(
                         sess.worktree,
@@ -496,94 +493,13 @@ class BaseSessionManager:
             return normalized
         return "failed"
 
-    def _commit_session_changes(self, context: AgentExecutionContextPayload, worktree_path: Path) -> dict[str, Any]:
-        if not worktree_path.is_dir():
-            return {
-                "status": "skipped",
-                "reason": "missing_worktree",
-                "working_dir": str(worktree_path),
-            }
+    def _finish_session_actions(self, sess: _AgentSession) -> list[dict[str, Any]]:
+        """Přílohy completion komentáře lokální session.
 
-        if not GitAdapterService._git_succeeds(worktree_path, "rev-parse", "--is-inside-work-tree"):
-            return {
-                "status": "skipped",
-                "reason": "not_a_git_worktree",
-                "working_dir": str(worktree_path),
-            }
+        Commit, pull request ani dev server lokální session nedělá — to je věc
+        workflow runtime (kroky v `.agentis/workflows/*.yaml`).
+        """
 
-        if not GitAdapterService._run_git(worktree_path, "status", "--porcelain"):
-            return {
-                "status": "skipped",
-                "reason": "clean_worktree",
-                "working_dir": str(worktree_path),
-            }
-
-        commit_message = f"TASK: #{context.task_number} - {context.title}"
-        GitAdapterService._run_git(worktree_path, "add", "--all")
-        GitAdapterService._run_git(
-            worktree_path,
-            "-c",
-            "user.name=Agentis",
-            "-c",
-            "user.email=code@agentis.cz",
-            "commit",
-            "-m",
-            commit_message,
-        )
-        commit_sha = GitAdapterService._run_git(worktree_path, "rev-parse", "HEAD")
-        return {
-            "status": "success",
-            "working_dir": str(worktree_path),
-            "commit_sha": commit_sha,
-            "commit_message": commit_message,
-        }
-
-    def _ensure_pull_request(
-        self,
-        context: AgentExecutionContextPayload,
-        worktree_path: Path,
-    ) -> GithubPrResult | None:
-        if GitAdapterService.is_project_scope(context):
-            return None
-        if not context.project_github_repo:
-            return None
-
-        try:
-            branch = GitAdapterService._branch_name_for_context(context)
-            service = GithubPrService(context=context, worktree_path=worktree_path, branch=branch)
-            return service.ensure_pull_request_result()
-        except GithubPrError as exc:
-            sys.stderr.write(f"[{self._AGENT_LABEL}-session] ensure_pull_request failed: {exc}\n")
-            return None
-        except Exception as exc:  # noqa: BLE001
-            sys.stderr.write(f"[{self._AGENT_LABEL}-session] ensure_pull_request unexpected error: {exc}\n")
-            return None
-
-    def _run_completed_process(self, args: list[str], *, cwd: Path | None = None) -> str:
-        completed = subprocess.run(
-            args,
-            cwd=str(cwd) if cwd is not None else None,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            stderr = completed.stderr.strip() or completed.stdout.strip() or "unknown command error"
-            raise RuntimeError(f"{' '.join(args)} failed: {stderr}")
-        return completed.stdout.strip()
-
-    def _start_dev_server(self, sess: _AgentSession) -> dict[str, Any]:
-        worktree_path = Path(sess.worktree)
-        script = worktree_path / "run-dev.sh"
-        if not script.is_file():
-            raise RuntimeError(f"Dev server script {script} does not exist")
-        output = self._run_completed_process(["./run-dev.sh"], cwd=worktree_path)
-        result: dict[str, Any] = {"working_dir": str(worktree_path)}
-        if output:
-            result["output"] = output
-        return result
-
-    def _finish_session_actions(self, sess: _AgentSession, session_ref: str) -> list[dict[str, Any]]:
         context = sess.context
         if GitAdapterService.is_project_scope(context) or not context.project_github_repo:
             return []
@@ -594,86 +510,6 @@ class BaseSessionManager:
         if context.ide:
             ide = context.ide.strip().replace("[%WORKDIR%]", str(worktree_path))
             attachments.append({"label": "Directory", "value": ide, "type": "url"})
-
-        commit_event_id = f"commit:{session_ref}:{uuid4().hex}"
-        dev_server_event_id = f"dev_server:{session_ref}:{uuid4().hex}"
-
-        try:
-            commit_result = self._commit_session_changes(context, worktree_path)
-        except Exception as exc:  # noqa: BLE001
-            self._emit_adapter_event(
-                context,
-                kind="commit",
-                status="failed",
-                event_id=commit_event_id,
-                message="Commit rozpracovaného kódu selhal.",
-                data={"session_id": sess.session_id, "error": str(exc)},
-            )
-        else:
-            commit_status = str(commit_result.get("status") or "skipped")
-            reason = str(commit_result.get("reason") or "")
-            commit_message = "Rozpracovaný kód byl commitnut."
-            if commit_status == "skipped":
-                if reason == "missing_worktree":
-                    commit_message = "Worktree pro session není k dispozici, commit přeskočen."
-                elif reason == "not_a_git_worktree":
-                    commit_message = "Session worktree není git repozitář, commit přeskočen."
-                else:
-                    commit_message = "Žádné změny ke commitnutí."
-
-            self._emit_adapter_event(
-                context,
-                kind="commit",
-                status=commit_status,
-                event_id=commit_event_id,
-                message=commit_message,
-                data={"session_id": sess.session_id, **commit_result},
-            )
-
-        pr_result = self._ensure_pull_request(context, worktree_path)
-        if pr_result:
-            attachments.append(
-                {
-                    "label": "Pull Request",
-                    "value": pr_result.url + "/changes",
-                    "type": "url",
-                }
-            )
-
-        self._emit_adapter_event(
-            context,
-            kind="dev_server",
-            status="started",
-            event_id=dev_server_event_id,
-            message="Spouštím dev server.",
-        )
-        try:
-            dev_server_result = self._start_dev_server(sess)
-        except Exception as exc:  # noqa: BLE001
-            self._emit_adapter_event(
-                context,
-                kind="dev_server",
-                status="failed",
-                event_id=dev_server_event_id,
-                message="Spuštění dev serveru selhalo.",
-                data={"error": str(exc)},
-            )
-        else:
-            self._emit_adapter_event(
-                context,
-                kind="dev_server",
-                status="success",
-                event_id=dev_server_event_id,
-                message="Dev server byl spuštěn.",
-                data=dev_server_result,
-            )
-            attachments.append(
-                {
-                    "label": "Dev server",
-                    "type": "url",
-                    "value": dev_server_url_for_context(context, self.settings),
-                }
-            )
 
         return attachments
 
