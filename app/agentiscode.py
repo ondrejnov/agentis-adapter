@@ -202,7 +202,7 @@ def _parser() -> argparse.ArgumentParser:
         "-a",
         required=True,
         metavar="NAME",
-        help="Agent runtime: opencode | claude (aliasy: cloud, claudecode, oc).",
+        help="Agent runtime: opencode | claude | claude-p (aliasy: cloud, claudecode, oc, cp).",
     )
     parser.add_argument("--model", "-m", help="Model předaný agentovi.")
     parser.add_argument("--effort", "-e", help="Reasoning effort (Claude: --effort, OpenCode: --variant).")

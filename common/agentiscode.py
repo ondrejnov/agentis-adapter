@@ -55,6 +55,9 @@ from opencode.runner import OpenCodeEvent, OpenCodeRunConfig, OpenCodeRunner
 
 OPENCODE = "opencode"
 CLAUDE = "claude"
+#: Claude Code v "print" režimu — sdílí runner/translator s ``claude``, jen volá
+#: binárku ``claude-p`` (viz :meth:`ClaudeRunConfig.build_args`).
+CLAUDE_P = "claude-p"
 
 #: Uživatelsky zadané názvy adaptéru → kanonický klíč.
 ADAPTER_ALIASES: Dict[str, str] = {
@@ -65,11 +68,14 @@ ADAPTER_ALIASES: Dict[str, str] = {
     "claude-code": CLAUDE,
     "cloud": CLAUDE,
     "cc": CLAUDE,
+    "claude-p": CLAUDE_P,
+    "claudep": CLAUDE_P,
+    "cp": CLAUDE_P,
 }
 
 
 def normalize_adapter(name: str) -> str:
-    """Přeloží zadaný název adaptéru na kanonický (``opencode`` / ``claude``)."""
+    """Přeloží zadaný název adaptéru na kanonický (``opencode`` / ``claude`` / ``claude-p``)."""
     key = (name or "").strip().lower()
     if key not in ADAPTER_ALIASES:
         choices = ", ".join(sorted(set(ADAPTER_ALIASES)))
@@ -181,7 +187,8 @@ class _ClaudeTranslator:
     a per-message ``usage`` vydáme jako ``step`` jen jednou (``_steps_seen``).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, adapter: str = CLAUDE) -> None:
+        self._adapter = adapter
         self._steps_seen: set[str] = set()
 
     def __call__(self, event: ClaudeEvent) -> List[AgentEvent]:
@@ -193,7 +200,7 @@ class _ClaudeTranslator:
                 AgentEvent(
                     "session",
                     {
-                        "adapter": CLAUDE,
+                        "adapter": self._adapter,
                         "session_id": d.get("session_id"),
                         "model": d.get("model"),
                         "provider": "anthropic",
@@ -431,7 +438,7 @@ class AgentWrapper:
         self.config = config
         self.adapter = normalize_adapter(config.adapter)
         self._runner: Any = self._build_runner()
-        self._translate = _OpenCodeTranslator() if self.adapter == OPENCODE else _ClaudeTranslator()
+        self._translate = _OpenCodeTranslator() if self.adapter == OPENCODE else _ClaudeTranslator(self.adapter)
 
     # -- veřejné read-only summary z posledního běhu -----------------------
 
@@ -467,6 +474,7 @@ class AgentWrapper:
             )
         return ClaudeCodeClient(
             config=ClaudeRunConfig(
+                command="claude-p" if self.adapter == CLAUDE_P else "claude",
                 cwd=cfg.cwd,
                 model=cfg.model,
                 agent=cfg.agent,
@@ -508,6 +516,7 @@ class AgentWrapper:
 __all__ = [
     "OPENCODE",
     "CLAUDE",
+    "CLAUDE_P",
     "ADAPTER_ALIASES",
     "normalize_adapter",
     "AgentEvent",
