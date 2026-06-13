@@ -768,6 +768,57 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
         assert "AGENTIS_TOKEN" not in env
 
 
+def test_start_workflow_falls_back_to_bundled_workflow(tmp_path: Path) -> None:
+    # Projekt nemá vlastní `.agentis/workflows/default.yaml` → run sáhne po stejnojmenném
+    # souboru zabaleném v adapteru (`settings.bundled_workflow_dir`).
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    bundled = tmp_path / "bundled-workflows"
+    bundled.mkdir()
+    (bundled / "default.yaml").write_text(WORKFLOW_YAML, encoding="utf-8")
+
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "final-comment.md").write_text("Hotovo z bundled workflow.", encoding="utf-8")
+
+    runner = FakeRunner()
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()
+
+    result = manager.start_workflow(context, str(worktree), "udelej X")
+    assert result["action"] == "workflow_start"
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "success"
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert len(comment_calls) == 1
+    assert comment_calls[0]["body"] == "Hotovo z bundled workflow."
+
+
+def test_start_workflow_prefers_project_workflow_over_bundled(tmp_path: Path) -> None:
+    # Projektový `.agentis/workflows/default.yaml` má přednost před zabaleným fallbackem.
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+    bundled = tmp_path / "bundled-workflows"
+    bundled.mkdir()
+    # Záměrně nevalidní bundled soubor: kdyby se použil, run by spadl.
+    (bundled / "default.yaml").write_text("version: 1\nworkflow: {}\n", encoding="utf-8")
+
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "final-comment.md").write_text("Hotovo z projektu.", encoding="utf-8")
+
+    runner = FakeRunner()
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()
+
+    result = manager.start_workflow(context, str(worktree), "udelej X")
+    assert result["workflow_file"] == WORKFLOW_FILE_RELPATH
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "success"
+
+
 def test_task_headers_are_injected_as_env(tmp_path: Path) -> None:
     worktree = tmp_path / "wt"
     _write_workflow(worktree)
