@@ -56,6 +56,7 @@ Důležité vlastnosti:
 | --- | --- | --- |
 | `agentiscode` | `agentiscode.api` | CLI `agentiscode` (wrapper, sám si volí opencode/claude) |
 | `claude` / `claudecode` | `claude.api` | `claude --print --output-format stream-json` |
+| `claude-p` | `claude_p.api` | `claude-p ... --output-format stream-json` — stejný engine jako `claude`, ale prokládaný transkript na výstupu (`ClaudePClient` ho normalizuje na stejné eventy) |
 | `opencode` | `opencode.api` | `opencode run --format json` |
 | `slack` | `slack.api` | Pozůstatek — modul Slack ingestion adapteru byl z repa odstraněn; Slack integrace dnes běží přes workflow `.agentis/workflows/slack.yaml` + `scripts/slack_stream.py` |
 

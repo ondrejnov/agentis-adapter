@@ -9,6 +9,7 @@ packages = [
     { include = "agentiscode" },
     { include = "opencode" },
     { include = "claude" },
+    { include = "claude_p" },
     { include = "tui" },
 ]
 include = [

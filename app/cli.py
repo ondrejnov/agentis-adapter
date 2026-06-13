@@ -21,7 +21,7 @@ _ADAPTER_MODULES = {
     "opencode": "opencode.api",
     "claude": "claude.api",
     "claudecode": "claude.api",
-    "slack": "slack.api",
+    "claude-p": "claude_p.api",
 }
 
 

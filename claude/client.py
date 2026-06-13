@@ -82,16 +82,21 @@ class ClaudeRunConfig:
     timeout_sec: float = 0.0  # 0 = bez limitu
 
     def build_args(self) -> List[str]:
-        args = [
-            "--print",
-            "-",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--dangerously-skip-permissions",
-            "--disallowedTools",
-            "AskUserQuestion",
-        ]
+        if self.command != "claude-p":
+            args = ["--print", "-"]
+        else:
+            args = []
+
+        args.extend(
+            [
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--dangerously-skip-permissions",
+                "--disallowedTools",
+                "AskUserQuestion",
+            ]
+        )
         if self.resume_session_id:
             args += ["--resume", self.resume_session_id]
         if self.chrome:
@@ -201,6 +206,7 @@ class ClaudeCodeClient:
             return
 
         local_command = build_local_env_shell_command([cfg.command, *args], cwd=cfg.cwd)
+        print(local_command)
         proc = await asyncio.create_subprocess_exec(
             "bash",
             "-c",

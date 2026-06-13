@@ -7,8 +7,6 @@ from common.config import Settings, get_settings
 from common.models import (
     AddMessageParams,
     AbortParams,
-    ApproveParams,
-    QuestionParams,
     StartParams,
     UndoParams,
 )
@@ -21,8 +19,6 @@ from common.rpc.session_registry import SessionContextRegistry
 _DISPATCH: dict[str, JsonRpcRoute] = {
     "start": JsonRpcRoute(StartParams, "start"),
     "add_message": JsonRpcRoute(AddMessageParams, "add_message"),
-    "question": JsonRpcRoute(QuestionParams, "question"),
-    "approve": JsonRpcRoute(ApproveParams, "approve"),
     "abort": JsonRpcRoute(AbortParams, "abort"),
     "undo": JsonRpcRoute(UndoParams, "undo"),
 }
