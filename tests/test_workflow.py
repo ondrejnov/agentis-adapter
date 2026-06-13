@@ -1667,6 +1667,20 @@ def test_local_executor_from_settings_default_without_image(tmp_path: Path) -> N
     assert comment_calls[0]["body"] == "ok"
 
 
+def test_runtime_local_forces_local_executor_over_yaml(tmp_path: Path) -> None:
+    # YAML deklaruje kubernetes, ale runtime `local` v kontextu má přednost.
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)  # WORKFLOW_YAML používá executor kubernetes
+    manager, _ = _local_manager(tmp_path)
+    context = _context(adapter={"runtime": "local", "agent": "build"})
+
+    result = manager.start_workflow(context, str(worktree), "udelej X")
+    assert result["executor"] == "local"
+    _wait_done(manager, context.task_id)
+
+    assert isinstance(manager._runs[context.task_id].runner, LocalProcessRunner)
+
+
 def test_local_executor_failed_step_stops_workflow_and_reports_log_tail(tmp_path: Path) -> None:
     worktree = tmp_path / "wt"
     _write_workflow_yaml(worktree, LOCAL_FAILING_WORKFLOW_YAML)

@@ -24,6 +24,11 @@ from common.workflow.manager import WorkflowBusyError, WorkflowManager
 
 
 WORKFLOW_RUNTIME = "workflow"
+#: Runtime `local` se obsluhuje stejným workflow runtime jako `workflow`, jen
+#: vynutí lokální executor (bash procesy nad worktree) — viz WorkflowManager.
+LOCAL_RUNTIME = "local"
+#: Runtime hodnoty, které neběží jako CLI session, ale přes workflow runtime.
+_WORKFLOW_RUNTIMES = frozenset({WORKFLOW_RUNTIME, LOCAL_RUNTIME})
 
 
 class AgentJsonRpcException(Exception):
@@ -68,7 +73,7 @@ class AgentJsonRpcService:
         if context.adapter and context.adapter.workflow:
             return True
         runtime = context.adapter.runtime if context.adapter and context.adapter.runtime else None
-        return bool(runtime) and runtime.strip().lower() == WORKFLOW_RUNTIME
+        return bool(runtime) and runtime.strip().lower() in _WORKFLOW_RUNTIMES
 
     @staticmethod
     def _workflow_prompt(context: AgentExecutionContextPayload) -> str:
@@ -157,11 +162,7 @@ class AgentJsonRpcService:
 
     def start(self, params: StartParams) -> dict[str, Any]:
         context = params.context
-        get_status_registry().run_received(
-            context,
-            kind="workflow" if self._is_workflow_runtime(context) else "agent",
-            method="start",
-        )
+        get_status_registry().run_received(context, kind="workflow", method="start")
         run = RunStatePayload(run_id=context.run_id, context=context)
         run.events.append(
             RunEventPayload(
@@ -173,83 +174,7 @@ class AgentJsonRpcService:
                 },
             )
         )
-
-        if self._is_workflow_runtime(context):
-            return self._start_workflow_run(run, context, self._workflow_prompt(context))
-
-        adapter_steps: list[dict[str, Any]] = []
-        try:
-            adapter = self._adapter_factory(context)
-            is_project_scope = BaseAdapterService.is_project_scope(context)
-            if not is_project_scope:
-                adapter_steps.append(
-                    self._run_adapter_step(
-                        adapter,
-                        kind="create_worktree",
-                        success_message="Git worktree je připravený.",
-                        callback=adapter.create_worktree,
-                    )
-                )
-            init_agentis = getattr(adapter, "init_agentis", None)
-            if getattr(adapter, "requires_agentis_init", False) and callable(init_agentis):
-                init_agentis_callback = cast(Callable[[], dict[str, Any]], init_agentis)
-                adapter_steps.append(
-                    self._run_adapter_step(
-                        adapter,
-                        kind="init_agentis",
-                        success_message="Agentis konfigurace je připravená.",
-                        callback=init_agentis_callback,
-                    )
-                )
-            adapter_steps.append(
-                self._run_adapter_step(
-                    adapter,
-                    kind="deploy",
-                    started_message="Připravuji prostředí.",
-                    success_message="Prostředí je připravené.",
-                    callback=adapter.deploy,
-                )
-            )
-            wait_result = self._run_adapter_step(
-                adapter,
-                kind="wait_ready",
-                started_message="Čekám na připravenost prostředí.",
-                success_message="Prostředí běží.",
-                callback=adapter.wait_ready,
-            )
-            adapter_steps.append(wait_result)
-            pod_url = wait_result.get("url")
-            if not isinstance(pod_url, str) or not pod_url:
-                raise RuntimeError("wait_ready did not return a usable pod URL")
-            session_step = self._run_adapter_step(
-                adapter,
-                kind="start_session",
-                started_message="Zakládám Agent session.",
-                success_message="Agent session byla založena.",
-                callback=lambda: adapter.start_session(
-                    pod_url=pod_url, fork_from_session_id=params.fork_from_session_id
-                ),
-            )
-            adapter_steps.append(session_step)
-            session_id = context.session_id or session_step.get("session_id")
-            if isinstance(session_id, str) and session_id:
-                context.session_id = session_id
-                run.opencode_session_id = session_id
-                self.session_registry.register(session_id, context)
-                snapshot_key = session_step.get("snapshot_key")
-                if isinstance(snapshot_key, str):
-                    self.session_registry.set_snapshot_key(session_id, snapshot_key)
-        except Exception as exc:
-            run.status = "failed"
-            get_status_registry().run_finished(run.run_id, "failed")
-            raise AgentJsonRpcException(500, f"Adapter error: {exc}") from exc
-        return {
-            "run": run.safe_dump(),
-            "adapter": {
-                "executed": True,
-                "steps": adapter_steps,
-            },
-        }
+        return self._start_workflow_run(run, context, self._workflow_prompt(context))
 
     def _run_adapter_step(
         self,

@@ -106,6 +106,20 @@ class WorkflowManager:
             self._runners[executor] = runner
         return runner
 
+    def _resolve_executor(self, context: AgentExecutionContextPayload, workflow: WorkflowFile) -> str:
+        """Vybere executor pro run.
+
+        Runtime `local` (`context.adapter.runtime`) vynutí lokální executor bez
+        ohledu na `workflow.executor` / `WORKFLOW_EXECUTOR` — runtime je
+        autoritativní signál prostředí. Jinak platí YAML `executor`, pak env
+        default (`settings.workflow_executor`, default `kubernetes`).
+        """
+
+        runtime = (context.adapter.runtime if context.adapter and context.adapter.runtime else "").strip().lower()
+        if runtime == "local":
+            return "local"
+        return (workflow.workflow.executor or self.settings.workflow_executor).strip().lower()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -161,7 +175,7 @@ class WorkflowManager:
 
         values = self._interpolation_values(context, worktree_path, namespace, run_dir=run_dir)
         workflow = load_workflow_file(workflow_path, values)
-        executor = (workflow.workflow.executor or self.settings.workflow_executor).strip().lower()
+        executor = self._resolve_executor(context, workflow)
         runner = self._runner_for(executor)
         if executor == "kubernetes":
             self._require_images(workflow, workflow_relpath)
