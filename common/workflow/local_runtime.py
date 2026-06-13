@@ -98,6 +98,9 @@ class LocalProcessRunner:
                 self._processes.get(task_label, {}).pop(process.pid, None)
 
         log_tail = "" if status in {"succeeded", "aborted"} else self._log_tail(log_path)
+        if status not in {"succeeded", "aborted"}:
+            detail = f": {log_tail}" if log_tail else ""
+            sys.stderr.write(f"[workflow] krok '{name}' selhal ({status}, log {log_path}){detail}\n")
         return StepResult(status=status, log_tail=log_tail)
 
     def abort(self, namespace: str, labels: dict[str, str]) -> str:

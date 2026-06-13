@@ -1740,7 +1740,9 @@ def test_runtime_local_forces_local_executor_over_yaml(tmp_path: Path) -> None:
     assert isinstance(manager._runs[context.task_id].runner, LocalProcessRunner)
 
 
-def test_local_executor_failed_step_stops_workflow_and_reports_log_tail(tmp_path: Path) -> None:
+def test_local_executor_failed_step_stops_workflow_and_reports_log_tail(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
     worktree = tmp_path / "wt"
     _write_workflow_yaml(worktree, LOCAL_FAILING_WORKFLOW_YAML)
     manager, calls = _local_manager(tmp_path)
@@ -1751,6 +1753,10 @@ def test_local_executor_failed_step_stops_workflow_and_reports_log_tail(tmp_path
 
     run = manager._runs[context.task_id]
     assert run.status == "failed"
+    # selhání kroku jde i na stderr adapter procesu (lokální vývoj to tam vidí)
+    stderr = capfd.readouterr().err
+    assert "selhal (failed" in stderr
+    assert "neco se pokazilo" in stderr
     failed_events = [
         params
         for method, params in calls
