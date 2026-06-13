@@ -156,17 +156,27 @@ class WorkflowManager:
             workflow_relpath = workflow_file_relpath(workflow_name)
         else:
             workflow_relpath = PROJECT_WORKFLOW_FILE_RELPATH if is_project_scope else WORKFLOW_FILE_RELPATH
+        # Workflow soubor: přednost má projektový (`.agentis/workflows/...`), při jeho
+        # absenci fallback na předpřipravené workflow zabalené v adapteru
+        # (`settings.bundled_workflow_dir`, default `workflows/` v rootu repa) — hledá se
+        # podle basename. `extends: _base` se i ve fallbacku vyřeší relativně k souboru,
+        # takže `_base.yaml` v té samé složce funguje. Bez obou variant run nemá co
+        # spustit a vrací se chyba do Agentisu (žádný fallback na CLI session).
         workflow_path = worktree_path / workflow_relpath
-        # Vše běží přes workflow runtime — bez workflow souboru run nemá co spustit
-        # a vrací se chyba do Agentisu (žádný fallback na CLI session).
         if not workflow_path.is_file():
-            if workflow_name:
+            bundled_path = self.settings.bundled_workflow_dir / Path(workflow_relpath).name
+            if bundled_path.is_file():
+                workflow_path = bundled_path
+            elif workflow_name:
                 raise FileNotFoundError(
-                    f"Workflow {workflow_name!r} vyžaduje soubor {workflow_relpath}, ale {workflow_path} neexistuje"
+                    f"Workflow {workflow_name!r} vyžaduje soubor {workflow_relpath} v projektu nebo "
+                    f"zabalený v {self.settings.bundled_workflow_dir}, ale nikde neexistuje"
                 )
-            raise FileNotFoundError(
-                f"Projekt nemá workflow soubor {workflow_relpath}; run přes workflow runtime nelze spustit"
-            )
+            else:
+                raise FileNotFoundError(
+                    f"Projekt nemá workflow soubor {workflow_relpath} ani zabalený fallback "
+                    f"v {self.settings.bundled_workflow_dir}; run přes workflow runtime nelze spustit"
+                )
 
         external_run_files = is_project_scope or workflow_name is not None
         if external_run_files:

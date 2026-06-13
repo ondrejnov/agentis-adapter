@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from typing import Any
 
 from common.config import Settings
-from common.session_manager import BaseSessionManager, _AgentSession
 from common.shutdown import drain_running_work
 from common.workflow.manager import WorkflowManager, _WorkflowRun
 
@@ -28,21 +27,6 @@ def _running_thread(release: threading.Event) -> threading.Thread:
     thread = threading.Thread(target=release.wait, daemon=True)
     thread.start()
     return thread
-
-
-def test_session_manager_wait_idle_waits_for_running_threads():
-    manager = BaseSessionManager(settings=make_settings())
-    release = threading.Event()
-    sess = _AgentSession(session_id="sess-1", pending_key="pending-1", context=None, worktree="/tmp")
-    sess.thread = _running_thread(release)
-    manager._sessions["sess-1"] = sess
-
-    assert manager.active_count() == 1
-    assert manager.wait_idle(timeout=0.05) is False
-
-    release.set()
-    assert manager.wait_idle(timeout=5) is True
-    assert manager.active_count() == 0
 
 
 def test_workflow_manager_wait_idle_waits_for_running_threads():

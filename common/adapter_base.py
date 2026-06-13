@@ -122,76 +122,11 @@ class BaseAdapterService:
                 error=str(exc),
             )
 
-    def _persist_agentis_session_id(self, session_id: str) -> None:
-        if not self.settings.agentis_endpoint:
-            log_json(
-                "WARN",
-                "Agentis endpoint missing; skipping session persistence",
-                task_id=self.context.task_id,
-                run_id=self.context.run_id,
-                session_id=session_id,
-            )
-            return
-
-        log_json(
-            "INFO",
-            "Persisting adapter session in Agentis",
-            task_id=self.context.task_id,
-            run_id=self.context.run_id,
-            session_id=session_id,
-        )
-        try:
-            self._call_agentis_rpc(
-                "run.store_session_id",
-                {
-                    "run_id": self.context.run_id,
-                    "session_id": session_id,
-                },
-            )
-        except Exception as exc:
-            raise RuntimeError(f"Failed to persist adapter session for run {self.context.run_id}: {exc}") from exc
-
-        log_json(
-            "INFO",
-            "Adapter session persisted in Agentis",
-            task_id=self.context.task_id,
-            run_id=self.context.run_id,
-            session_id=session_id,
-        )
-
     # ------------------------------------------------------------------
-    # Agent lifecycle — implemented by concrete adapters
+    # Worktree lifecycle — implemented by GitAdapterService
     # ------------------------------------------------------------------
 
     def create_worktree(self) -> dict[str, Any]:
-        raise NotImplementedError
-
-    def deploy(self) -> dict[str, Any]:
-        raise NotImplementedError
-
-    def wait_ready(self, timeout: float = 300.0, interval: float = 2.0) -> dict[str, Any]:
-        raise NotImplementedError
-
-    def start_session(self, pod_url: str | None = None, fork_from_session_id: str | None = None) -> dict[str, Any]:
-        raise NotImplementedError
-
-    def add_message(
-        self,
-        message: str,
-        pod_url: str | None = None,
-        attachments: list[Any] | None = None,
-    ) -> dict[str, Any]:
-        raise NotImplementedError
-
-    def question_reply(
-        self,
-        request_id: str,
-        answers: list[list[str]],
-        pod_url: str | None = None,
-    ) -> dict[str, Any] | None:
-        pass  # empty function, ne kazdy adapter podporuje predani odpovedi a neni duvod na tom padat s chybou. Potichu se skipne.
-
-    def abort(self, session_id: str) -> dict[str, Any]:
         raise NotImplementedError
 
 

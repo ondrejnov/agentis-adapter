@@ -2,8 +2,7 @@
 
 Když ``agentiscode`` dostane ``--task-id`` + ``--agentis-api``, založí v Agentisu
 přes JSON-RPC nový **run** k danému tasku a průběžně do něj forwarduje aktivitu
-agenta — úplně stejně, jako to dělá WebSocket transport (:class:`BaseSessionManager`),
-jen pro sjednocený :class:`~common.agentiscode.AgentEvent` proud.
+agenta pro sjednocený :class:`~common.agentiscode.AgentEvent` proud.
 
 Posloupnost RPC volání zrcadlí websocket flow:
 

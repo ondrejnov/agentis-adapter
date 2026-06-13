@@ -3,8 +3,7 @@
 Přílohy přichází v ``context.attachments`` (task-level) nebo v ``attachments``
 parametru ``add_message`` (přílohy feedback zprávy). Adapter je uloží jako
 soubory do ``.agentis/attachments/`` ve worktree a do promptu přidá sekci
-s cestami, aby si je agent mohl prohlédnout z disku. Sdílí to CLI session
-runtime (:class:`common.cli_adapter.CliAdapterService`) i workflow runtime
+s cestami, aby si je agent mohl prohlédnout z disku. Používá to workflow runtime
 (:class:`common.rpc.jsonrpc.AgentJsonRpcService`).
 """
 

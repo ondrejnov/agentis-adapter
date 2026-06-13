@@ -10,7 +10,7 @@ JSON event ve tvaru::
     {"type": "error", "sessionID": "ses_..", "error": {..}}
 
 Eventy se normalizují na ``OpenCodeEvent`` tak, aby šly zpracovat stejnou
-session-loop logikou jako Claude Code (viz ``ClaudeSessionManager``):
+session-loop logikou jako Claude Code:
 
   - session_start: {session_id}              (jakmile je znám sessionID)
   - part: {part}                             (libovolný OpenCode message Part)

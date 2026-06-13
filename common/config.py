@@ -26,6 +26,9 @@ class Settings:
     project_run_root: Path = Path("/tmp/agentis")
     kubectl_command: str = "kubectl"
     workflow_executor: str = "kubernetes"
+    #: Předpřipravené workflow zabalené v adapteru; fallback, když projekt nemá vlastní
+    #: `.agentis/workflows/<soubor>`. Default `workflows/` v rootu repa.
+    bundled_workflow_dir: Path = Path("workflows")
     agentis_ws_endpoint: str | None = None
     agentis_adapter_id: str | None = None
     websocket_heartbeat_interval: float = 30.0
@@ -85,6 +88,10 @@ def _build_settings() -> Settings:
         project_run_root=Path(_get_env("ADAPTER_PROJECT_RUN_ROOT", "/tmp/agentis") or "/tmp/agentis").resolve(),
         kubectl_command=_get_env("KUBECTL_COMMAND", "kubectl") or "kubectl",
         workflow_executor=(_get_env("WORKFLOW_EXECUTOR", "kubernetes") or "kubernetes").strip().lower(),
+        bundled_workflow_dir=Path(
+            _get_env("ADAPTER_BUNDLED_WORKFLOW_DIR", str(project_root / "workflows"))
+            or str(project_root / "workflows")
+        ).resolve(),
         agentis_ws_endpoint=_get_env("AGENTIS_WS_ENDPOINT"),
         agentis_adapter_id=_get_env("AGENTIS_ADAPTER_ID"),
         websocket_heartbeat_interval=float(_get_env("AGENTIS_WS_HEARTBEAT_INTERVAL", "30") or "30"),

@@ -13,7 +13,6 @@ from common.models import (
 from common.rpc.jsonrpc import AgentJsonRpcService
 from common.rpc.session_registry import SessionContextRegistry
 from agentiscode.adapter import AgentisCodeAdapterService
-from agentiscode.session_manager import AgentisCodeSessionManager
 
 
 _DISPATCH: dict[str, JsonRpcRoute] = {
@@ -25,16 +24,10 @@ _DISPATCH: dict[str, JsonRpcRoute] = {
 
 
 def _configure_services(app: FastAPI, settings: Settings, session_registry: SessionContextRegistry) -> None:
-    agentiscode_session_manager = AgentisCodeSessionManager(settings=settings)
-    app.state.agentiscode_session_manager = agentiscode_session_manager
     app.state.agent_jsonrpc_service = AgentJsonRpcService(
         settings=settings,
         session_registry=session_registry,
-        adapter_factory=lambda context: AgentisCodeAdapterService(
-            context=context,
-            settings=settings,
-            session_manager=agentiscode_session_manager,
-        ),
+        adapter_factory=lambda context: AgentisCodeAdapterService(context=context, settings=settings),
     )
 
 

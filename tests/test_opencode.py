@@ -5,8 +5,6 @@ import json
 import re
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
-from uuid import UUID
 
 import pytest
 
@@ -16,8 +14,6 @@ from opencode.api import create_app, _DISPATCH
 from tests.support import RpcTestClient
 from opencode.adapter import OpenCodeAdapterService
 from opencode.runner import OpenCodeRunner, OpenCodeEvent, OpenCodeRunConfig
-from opencode.activity_mapper import OpenCodeActivityMapper
-from opencode.session_manager import OpenCodeSessionManager
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -370,245 +366,13 @@ def test_stream_parses_json_lines(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# OpenCodeActivityMapper
-# ---------------------------------------------------------------------------
-
-
-def test_mapper_seeds_user_prompt() -> None:
-    mapper = OpenCodeActivityMapper(prompt="Popis ukolu")
-    snapshot = mapper.snapshot()
-    assert snapshot[0]["info"]["role"] == "user"
-    assert UUID(snapshot[0]["info"]["id"]).version == 7
-    assert UUID(snapshot[0]["parts"][0]["id"]).version == 7
-    assert snapshot[0]["parts"][0]["messageID"] == snapshot[0]["info"]["id"]
-    assert snapshot[0]["parts"][0]["text"] == "Popis ukolu"
-
-
-def test_mapper_session_start_propagates_session_id() -> None:
-    mapper = OpenCodeActivityMapper(prompt="x")
-    changed = mapper.consume(OpenCodeEvent("session_start", {"session_id": "ses_1"}))
-    assert changed is True
-    assert mapper.session_id == "ses_1"
-    assert mapper.snapshot()[0]["info"]["sessionID"] == "ses_1"
-
-
-def test_mapper_builds_assistant_message_from_parts() -> None:
-    mapper = OpenCodeActivityMapper(prompt="x")
-    mapper.consume(OpenCodeEvent("session_start", {"session_id": "ses_1"}))
-
-    text_part = {"id": "prt_1", "messageID": "msg_1", "sessionID": "ses_1", "type": "text", "text": "hi"}
-    assert mapper.consume(OpenCodeEvent("part", {"part": text_part})) is True
-
-    # Same part id updates in place; new part id appends.
-    updated = {"id": "prt_1", "messageID": "msg_1", "sessionID": "ses_1", "type": "text", "text": "hi there"}
-    mapper.consume(OpenCodeEvent("part", {"part": updated}))
-
-    snapshot = mapper.snapshot()
-    assert len(snapshot) == 2
-    assistant = snapshot[1]
-    assert assistant["info"]["role"] == "assistant"
-    assert UUID(assistant["info"]["id"]).version == 7
-    assert len(assistant["parts"]) == 1
-    assert UUID(assistant["parts"][0]["id"]).version == 7
-    assert assistant["parts"][0]["id"] != "prt_1"
-    assert assistant["parts"][0]["messageID"] == assistant["info"]["id"]
-    assert assistant["parts"][0]["text"] == "hi there"
-
-
-def test_mapper_tool_before_emits_running_then_completed_updates_in_place() -> None:
-    mapper = OpenCodeActivityMapper(prompt="x")
-    mapper.consume(OpenCodeEvent("session_start", {"session_id": "ses_1"}))
-
-    # step-start fixuje aktuální assistant zprávu, na kterou se běžící tool naváže.
-    step_start = {"id": "prt_s", "messageID": "msg_1", "sessionID": "ses_1", "type": "step-start"}
-    mapper.consume(OpenCodeEvent("part", {"part": step_start}))
-
-    before = {
-        "callID": "call_abc",
-        "tool": "bash",
-        "input": {"command": "wc -l example.md"},
-    }
-    assert mapper.consume(OpenCodeEvent("tool_before", before)) is True
-
-    snapshot = mapper.snapshot()
-    assistant = snapshot[1]
-    tool_parts = [p for p in assistant["parts"] if p["type"] == "tool"]
-    assert len(tool_parts) == 1
-    running = tool_parts[0]
-    assert running["state"]["status"] == "running"
-    assert running["callID"] == "call_abc"
-    assert running["state"]["input"] == {"command": "wc -l example.md"}
-    assert UUID(running["id"]).version == 7
-    running_id = running["id"]
-
-    # Dokončený tool part nese vlastní part id, ale stejné callID — musí
-    # přepsat běžící placeholder, ne přidat druhý.
-    completed = {
-        "id": "prt_tool",
-        "messageID": "msg_1",
-        "sessionID": "ses_1",
-        "type": "tool",
-        "tool": "bash",
-        "callID": "call_abc",
-        "state": {"status": "completed", "input": {"command": "wc -l example.md"}, "output": "101\n"},
-    }
-    mapper.consume(OpenCodeEvent("part", {"part": completed}))
-
-    snapshot = mapper.snapshot()
-    assistant = snapshot[1]
-    tool_parts = [p for p in assistant["parts"] if p["type"] == "tool"]
-    assert len(tool_parts) == 1
-    done = tool_parts[0]
-    assert done["state"]["status"] == "completed"
-    assert done["state"]["output"] == "101\n"
-    # Veřejné part id zůstává stabilní napříč running -> completed.
-    assert done["id"] == running_id
-
-
-def test_mapper_tool_before_without_message_is_ignored() -> None:
-    mapper = OpenCodeActivityMapper(prompt="x")
-    mapper.consume(OpenCodeEvent("session_start", {"session_id": "ses_1"}))
-
-    before = {"callID": "call_abc", "tool": "bash", "input": {}}
-    assert mapper.consume(OpenCodeEvent("tool_before", before)) is False
-    assert len(mapper.snapshot()) == 1  # jen úvodní user zpráva
-
-
-def test_mapper_step_finish_updates_tokens_and_cost() -> None:
-    mapper = OpenCodeActivityMapper(prompt="x")
-    mapper.consume(OpenCodeEvent("session_start", {"session_id": "ses_1"}))
-    step = {
-        "id": "prt_f",
-        "messageID": "msg_1",
-        "type": "step-finish",
-        "reason": "stop",
-        "tokens": {"input": 10, "output": 2, "reasoning": 0, "cache": {"read": 1, "write": 0}},
-        "cost": 0.01,
-    }
-    mapper.consume(OpenCodeEvent("part", {"part": step}))
-
-    info = mapper.snapshot()[1]["info"]
-    assert info["cost"] == 0.01
-    assert info["finish"] == "stop"
-    assert info["tokens"] == {"input": 10, "output": 2, "reasoning": 0, "cache": {"read": 1, "write": 0}}
-
-
-# ---------------------------------------------------------------------------
-# OpenCodeAdapterService
-# ---------------------------------------------------------------------------
-
-
-def test_deploy_is_skipped_for_local_opencode() -> None:
-    adapter = OpenCodeAdapterService(
-        context=make_context(),
-        settings=make_settings(),
-        session_manager=MagicMock(spec=OpenCodeSessionManager),
-    )
-    assert adapter.deploy() == {
-        "action": "deploy",
-        "task_id": "task-1",
-        "status": "skipped",
-        "reason": "opencode_local",
-    }
-
-
-def test_wait_ready_returns_local_url() -> None:
-    adapter = OpenCodeAdapterService(
-        context=make_context(),
-        settings=make_settings(),
-        session_manager=MagicMock(spec=OpenCodeSessionManager),
-    )
-    assert adapter.wait_ready() == {
-        "action": "wait_ready",
-        "task_id": "task-1",
-        "url": "local://opencode",
-        "status": "skipped",
-    }
-
-
-def test_start_session_starts_session_manager(monkeypatch) -> None:
-    manager = MagicMock(spec=OpenCodeSessionManager)
-    manager.start.return_value = "ses_abc"
-    manager.get_snapshot_key.return_value = "snap-start"
-    monkeypatch.setattr(OpenCodeAdapterService, "_persist_agentis_session_id", lambda self, session_id: None)
-
-    context = make_context()
-    adapter = OpenCodeAdapterService(
-        context=context,
-        settings=make_settings(worktree_root=Path("/srv/worktrees")),
-        session_manager=manager,
-    )
-
-    result = adapter.start_session(pod_url="local://opencode")
-
-    assert result == {
-        "action": "start_session",
-        "task_id": "task-1",
-        "session_id": "ses_abc",
-        "snapshot_key": "snap-start",
-    }
-    kwargs = manager.start.call_args.kwargs
-    assert kwargs["worktree"] == "/srv/worktrees/task-1"
-    assert kwargs["prompt"] == "Popis ukolu"
-    assert "kubectl_target" not in kwargs
-    assert context.session_id == "ses_abc"
-
-
-def test_add_message_forwards_to_session_manager() -> None:
-    manager = MagicMock(spec=OpenCodeSessionManager)
-    manager.get_snapshot_key.return_value = "snap-send"
-    context = make_context(session_id="ses_abc")
-    adapter = OpenCodeAdapterService(
-        context=context,
-        settings=make_settings(worktree_root=Path("/srv/worktrees")),
-        session_manager=manager,
-    )
-
-    result = adapter.add_message("ahoj")
-
-    assert result == {
-        "action": "add_message",
-        "task_id": "task-1",
-        "session_id": "ses_abc",
-        "snapshot_key": "snap-send",
-    }
-    manager.send.assert_called_once_with(
-        session_id="ses_abc",
-        context=context,
-        worktree="/srv/worktrees/task-1",
-        prompt="ahoj",
-    )
-
-
-def test_abort_delegates_to_session_manager() -> None:
-    manager = MagicMock(spec=OpenCodeSessionManager)
-    adapter = OpenCodeAdapterService(
-        context=make_context(),
-        settings=make_settings(),
-        session_manager=manager,
-    )
-    assert adapter.abort("ses_abc") == {"action": "abort", "task_id": "task-1", "session_id": "ses_abc"}
-    manager.abort.assert_called_once_with("ses_abc")
-
-
-def test_session_manager_uses_opencode_label() -> None:
-    manager = OpenCodeSessionManager(settings=make_settings())
-    assert manager._AGENT_LABEL == "opencode"
-
-
-# ---------------------------------------------------------------------------
-# JSON-RPC integration via the FastAPI app
+# HTTP endpoints
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
 def opencode_client(monkeypatch):
-    fake_manager = MagicMock(spec=OpenCodeSessionManager)
-    fake_manager.start.return_value = "ses_abc123"
-
-    monkeypatch.setattr("opencode.api.OpenCodeSessionManager", lambda settings: fake_manager)
     monkeypatch.setattr("opencode.api.get_settings", lambda: make_settings())
-    monkeypatch.setattr(OpenCodeAdapterService, "_persist_agentis_session_id", lambda self, session_id: None)
     monkeypatch.setattr(
         OpenCodeAdapterService,
         "create_worktree",
@@ -623,7 +387,7 @@ def opencode_client(monkeypatch):
     )
 
     app = create_app()
-    return RpcTestClient(app, _DISPATCH), fake_manager
+    return RpcTestClient(app, _DISPATCH), None
 
 
 def test_health_endpoint(opencode_client):

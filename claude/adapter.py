@@ -1,18 +1,16 @@
-"""Adapter that runs the local `claude` CLI per task worktree.
+"""Adapter that prepares a git worktree for the local `claude` CLI.
 
-Thin specialisation of :class:`CliAdapterService`: only the CLI label differs.
-All the shared git/worktree/session plumbing lives in the base.
+Run lifecycle (agent execution, commit, PR) běží přes workflow runtime; adapter
+poskytuje jen git worktree/snapshot plumbing z :class:`~common.git_adapter.GitAdapterService`.
 """
 
 from __future__ import annotations
 
-from common.cli_adapter import CliAdapterService
+from common.git_adapter import GitAdapterService
 
 
-class ClaudeCodeAdapterService(CliAdapterService):
-    """Adapter driving the local `claude` CLI."""
-
-    runtime_label = "claude"
+class ClaudeCodeAdapterService(GitAdapterService):
+    """Adapter pro worktree lokálního `claude` CLI."""
 
 
 __all__ = ["ClaudeCodeAdapterService"]

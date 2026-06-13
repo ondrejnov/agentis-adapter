@@ -7,13 +7,10 @@ from common.config import Settings, get_settings
 from common.models import (
     AbortParams,
     AddMessageParams,
-    ApproveParams,
-    QuestionParams,
     StartParams,
     UndoParams,
 )
 from opencode.adapter import OpenCodeAdapterService
-from opencode.session_manager import OpenCodeSessionManager
 from common.rpc.jsonrpc import AgentJsonRpcService
 from common.rpc.session_registry import SessionContextRegistry
 
@@ -27,16 +24,10 @@ _DISPATCH: dict[str, JsonRpcRoute] = {
 
 
 def _configure_services(app: FastAPI, settings: Settings, session_registry: SessionContextRegistry) -> None:
-    opencode_session_manager = OpenCodeSessionManager(settings=settings)
-    app.state.opencode_session_manager = opencode_session_manager
     app.state.agent_jsonrpc_service = AgentJsonRpcService(
         settings=settings,
         session_registry=session_registry,
-        adapter_factory=lambda context: OpenCodeAdapterService(
-            context=context,
-            settings=settings,
-            session_manager=opencode_session_manager,
-        ),
+        adapter_factory=lambda context: OpenCodeAdapterService(context=context, settings=settings),
     )
 
 

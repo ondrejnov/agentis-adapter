@@ -149,6 +149,7 @@ def _settings(tmp_path: Path, workflow_executor: str = "kubernetes") -> Settings
         agentis_token=None,
         project_run_root=tmp_path / "tmp-agentis",
         workflow_executor=workflow_executor,
+        bundled_workflow_dir=tmp_path / "bundled-workflows",
     )
 
 

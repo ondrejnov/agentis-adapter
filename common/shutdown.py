@@ -1,7 +1,7 @@
 """Graceful shutdown: po zavření WebSocket transportu nechá doběhnout běžící práci.
 
-Adapter drží běžící CLI agenty (``BaseSessionManager``) a workflow runy
-(``WorkflowManager``) v daemon threadech — při okamžitém ukončení procesu by se
+Adapter drží běžící workflow runy (``WorkflowManager``) v daemon threadech —
+při okamžitém ukončení procesu by se
 jejich výsledky (commit, PR, agent comment, workflow outputs) ztratily.
 ``drain_running_work`` projde služby na ``app.state``, které umí ``wait_idle``,
 a počká, až všechny nahlásí idle nebo vyprší grace perioda.

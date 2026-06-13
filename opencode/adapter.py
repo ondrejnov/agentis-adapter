@@ -1,22 +1,16 @@
-"""Adapter that runs OpenCode through a one-shot `opencode run`.
+"""Adapter that prepares a git worktree for OpenCode.
 
-OpenCode zde nedeployuje žádný web server ani interní REST/API — `opencode run
---format json` se spustí na jedno zadání promptu a jeho streamovaný výstup
-forwardujeme do Agentisu (viz :class:`OpenCodeSessionManager`).
-
-Sourozenec :class:`ClaudeCodeAdapterService`: oba sdílejí lifecycle ze společné
-:class:`CliAdapterService` a liší se jen labelem.
+Run lifecycle (agent execution, commit, PR) běží přes workflow runtime; adapter
+poskytuje jen git worktree/snapshot plumbing z :class:`~common.git_adapter.GitAdapterService`.
 """
 
 from __future__ import annotations
 
-from common.cli_adapter import CliAdapterService
+from common.git_adapter import GitAdapterService
 
 
-class OpenCodeAdapterService(CliAdapterService):
-    """Adapter driving a local `opencode run`."""
-
-    runtime_label = "opencode"
+class OpenCodeAdapterService(GitAdapterService):
+    """Adapter pro worktree lokálního `opencode run`."""
 
 
 __all__ = ["OpenCodeAdapterService"]
