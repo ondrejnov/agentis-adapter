@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib
 import logging
 import os
 from collections.abc import Mapping, Sequence
@@ -15,14 +14,6 @@ from common.status import get_status_registry
 
 
 logger = logging.getLogger(__name__)
-
-_ADAPTER_MODULES = {
-    "agentiscode": "agentiscode.api",
-    "opencode": "opencode.api",
-    "claude": "claude.api",
-    "claudecode": "claude.api",
-    "claude-p": "claude_p.api",
-}
 
 
 async def _run_transports(
@@ -66,12 +57,6 @@ async def _run_transports(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentis-adapter")
-    parser.add_argument(
-        "--adapter",
-        choices=sorted(_ADAPTER_MODULES),
-        required=True,
-        help="Adapter runtime to serve.",
-    )
     parser.add_argument("--id", help="Agentis adapter id. Defaults to AGENTIS_ADAPTER_ID.")
     return parser
 
@@ -84,22 +69,17 @@ def run(argv: Sequence[str] | None = None) -> None:
     get_settings.cache_clear()
 
     settings = get_settings()
-    module = importlib.import_module(_ADAPTER_MODULES[args.adapter])
-    app = module.create_app()
-    get_status_registry().set_meta(adapter=args.adapter, adapter_id=settings.agentis_adapter_id)
+    # Konkrétní CLI agent se vybírá až v workflow kroku; serving adapter je jeden
+    # generický (worktree/snapshot plumbing), proto žádný `--adapter` výběr.
+    from app import adapter_api
 
-    # Ingestion adapters (e.g. Slack) drive their own foreground loop instead of
-    # the passive WebSocket transport: they push tasks into Agentis rather than
-    # receiving agent runtime JSON-RPC.
-    run_adapter = getattr(module, "run_adapter", None)
-    if run_adapter is not None:
-        run_adapter(settings=settings, service_container=app.state)
-        return
+    app = adapter_api.create_app()
+    get_status_registry().set_meta(adapter="agentis", adapter_id=settings.agentis_adapter_id)
 
     asyncio.run(
         _run_transports(
             settings=settings,
-            dispatch=module._DISPATCH,
+            dispatch=adapter_api._DISPATCH,
             app=app,
         )
     )

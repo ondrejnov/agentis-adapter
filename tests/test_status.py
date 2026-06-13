@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from common.models import AdapterOptionsPayload, AgentExecutionContextPayload
 from common.status import activity_from_event, get_status_registry, reset_status_registry
-from opencode.api import create_app
+from app.adapter_api import create_app
 
 
 @pytest.fixture(autouse=True)

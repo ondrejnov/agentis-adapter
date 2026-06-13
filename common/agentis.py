@@ -68,7 +68,9 @@ class AgentisJsonRpcClient:
             payload["params"] = params
 
         try:
-            response = self.session.post(self.endpoint, json=payload, timeout=timeout if timeout is not None else self.timeout)
+            response = self.session.post(
+                self.endpoint, json=payload, timeout=timeout if timeout is not None else self.timeout
+            )
         except requests.RequestException as exc:
             raise AgentisJsonRpcError(f"Agentis JSON-RPC request failed: {exc}") from exc
 
@@ -160,6 +162,16 @@ class AgentisRunLogger:
             raise RuntimeError("Agentis run logger is closed")
 
         normalized_event_id = event_id or f"{normalized_kind}:{uuid4().hex}"
+        print(
+            {
+                "run_id": self.run_id,
+                "kind": normalized_kind,
+                "status": normalized_status,
+                "event_id": normalized_event_id,
+                "message": message,
+                "data": data or {},
+            }
+        )
         return self._client.call(
             method="run.adapter_event",
             params={

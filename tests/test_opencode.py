@@ -6,42 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-import pytest
-
-from common.config import Settings
-from common.models import AdapterOptionsPayload, AgentExecutionContextPayload
-from opencode.api import create_app, _DISPATCH
-from tests.support import RpcTestClient
-from opencode.adapter import OpenCodeAdapterService
 from opencode.runner import OpenCodeRunner, OpenCodeEvent, OpenCodeRunConfig
-
-
-def make_settings(**overrides: Any) -> Settings:
-    values: dict[str, Any] = {
-        "host": "127.0.0.1",
-        "port": 8003,
-        "worktree_root": Path("/var/www/worktrees"),
-        "public_base_url": "http://adapter.internal:8003",
-        "agentis_endpoint": None,
-        "agentis_token": None,
-        "kubectl_command": "kubectl",
-    }
-    values.update(overrides)
-    return Settings(**values)
-
-
-def make_context(**overrides: Any) -> AgentExecutionContextPayload:
-    payload: dict[str, Any] = {
-        "run_id": "run-1",
-        "task_id": "task-1",
-        "title": "Implementace nove funkce",
-        "description": "Popis ukolu",
-        "project_slug": "agentis",
-        "working_dir": "/var/www/repo",
-        "adapter": AdapterOptionsPayload(agent="build", model="openrouter/openai/gpt-4.1-mini"),
-    }
-    payload.update(overrides)
-    return AgentExecutionContextPayload(**payload)
 
 
 # ---------------------------------------------------------------------------
@@ -363,37 +328,5 @@ def test_stream_parses_json_lines(monkeypatch) -> None:
 
     events = asyncio.run(collect_events())
     assert [e.type for e in events] == ["session_start", "part"]
-
-
-# ---------------------------------------------------------------------------
-# HTTP endpoints
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture()
-def opencode_client(monkeypatch):
-    monkeypatch.setattr("opencode.api.get_settings", lambda: make_settings())
-    monkeypatch.setattr(
-        OpenCodeAdapterService,
-        "create_worktree",
-        lambda self: {
-            "action": "create_worktree",
-            "task_id": self.context.task_id,
-            "branch": "task-task-1",
-            "base_branch": "master",
-            "working_dir": "/srv/worktrees/task-1",
-            "status": "created",
-        },
-    )
-
-    app = create_app()
-    return RpcTestClient(app, _DISPATCH), None
-
-
-def test_health_endpoint(opencode_client):
-    client, _manager = opencode_client
-    response = client.get("/health")
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
 
 

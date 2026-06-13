@@ -200,7 +200,6 @@ class OpenCodeRunner:
         else:
             args = cfg.build_args(prompt)
         local_command = build_local_env_shell_command([cfg.command, *args], cwd=cfg.cwd)
-        print(local_command)
         try:
             proc = await asyncio.create_subprocess_exec(
                 "bash",

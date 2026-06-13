@@ -1,95 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-import pytest
-
-from claude.api import create_app, _DISPATCH
-from claude.adapter import ClaudeCodeAdapterService
-from common.config import Settings
-from common.models import (
-    AdapterOptionsPayload,
-    AgentExecutionContextPayload,
-)
 from claude.activity_mapper import ClaudeActivityMapper
-from tests.support import RpcTestClient
-
-
-def make_settings(**overrides: Any) -> Settings:
-    values: dict[str, Any] = {
-        "host": "127.0.0.1",
-        "port": 8002,
-        "worktree_root": Path("/var/www/worktrees"),
-        "public_base_url": "http://adapter.internal:8002",
-        "agentis_endpoint": None,
-        "agentis_token": None,
-        "kubectl_command": "kubectl",
-    }
-    values.update(overrides)
-    return Settings(**values)
-
-
-def make_context(**overrides: Any) -> AgentExecutionContextPayload:
-    payload: dict[str, Any] = {
-        "run_id": "run-1",
-        "task_id": "task-1",
-        "title": "Implementace nove funkce",
-        "description": "Popis ukolu",
-        "project_slug": "agentis",
-        "working_dir": "/var/www/repo",
-        "adapter": AdapterOptionsPayload(agent="build", model="claude-haiku-4-5-20251001"),
-    }
-    payload.update(overrides)
-    return AgentExecutionContextPayload(**payload)
 
 
 # ---------------------------------------------------------------------------
-# ClaudeCodeAdapterService unit tests
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture()
-def claudecode_client(monkeypatch):
-    """FastAPI client; git worktree creation je nahrazené canned dictem."""
-
-    monkeypatch.setattr("claude.api.get_settings", lambda: make_settings())
-    monkeypatch.setattr(
-        ClaudeCodeAdapterService,
-        "create_worktree",
-        lambda self: {
-            "action": "create_worktree",
-            "task_id": self.context.task_id,
-            "branch": "task-task-1",
-            "base_branch": "master",
-            "working_dir": "/srv/worktrees/task-1",
-            "status": "created",
-        },
-    )
-
-    app = create_app()
-    return RpcTestClient(app, _DISPATCH), None
-
-
-def test_health_endpoint(claudecode_client):
-    client, _manager = claudecode_client
-    response = client.get("/health")
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
-
-
-def test_unknown_method_returns_404(claudecode_client):
-    client, _manager = claudecode_client
-    response = client.post(
-        "/api",
-        json={"jsonrpc": "2.0", "id": 1, "method": "missing", "params": {}},
-    )
-    assert response.status_code == 404
-    assert response.json()["error"]["code"] == -32601
-
-
-# ---------------------------------------------------------------------------
-# ClaudeSessionManager small unit tests
+# ClaudeActivityMapper unit tests
 # ---------------------------------------------------------------------------
 
 

@@ -4,7 +4,7 @@ from typing import Any
 
 
 from common.config import Settings
-from opencode.api import create_app, _DISPATCH
+from app.adapter_api import create_app, _DISPATCH
 from common.models import (
     AgentExecutionContextPayload,
     AdapterOptionsPayload,

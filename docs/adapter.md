@@ -46,21 +46,19 @@ Důležité vlastnosti:
 
 | Příkaz | Co dělá |
 | --- | --- |
-| `agentis-adapter --adapter <name> [--id <adapter-id>]` | Spustí adapter proces: FastAPI app (observabilita) + WebSocket transport |
+| `agentis-adapter [--id <adapter-id>]` | Spustí adapter proces: FastAPI app (observabilita) + WebSocket transport |
 | `agentiscode …` | Samostatný CLI wrapper nad OpenCode/Claude Code (viz níže) |
 | `agentis-top` | Textual TUI dashboard nad `/status` a `/log` endpointy adapteru |
 
-`--adapter` vybírá modul z `app/cli.py:_ADAPTER_MODULES`:
+Serving adapter je **jeden generický** (`app/adapter_api.py`), žádný `--adapter` výběr. Definuje `create_app()` (FastAPI app se službami na `app.state`) a tabulku `_DISPATCH` (JSON-RPC metody → handler) a `adapter_factory` instancuje `GitAdapterService` napřímo — adapter dělá jen git worktree/snapshot plumbing.
 
-| Adapter | Modul | Agent |
+Konkrétní CLI agent (`opencode` / `claude` / `claude-p`) se nevybírá na serving straně, ale až ve workflow kroku `run-agent` (`workflows/_base.yaml`), který podle modelu zavolá `agentiscode --adapter <X>`. Mapování názvů agenta žije v `common/agentiscode.py` (`ADAPTER_ALIASES`):
+
+| Adapter (`agentiscode -a`) | Aliasy | Agent |
 | --- | --- | --- |
-| `agentiscode` | `agentiscode.api` | CLI `agentiscode` (wrapper, sám si volí opencode/claude) |
-| `claude` / `claudecode` | `claude.api` | `claude --print --output-format stream-json` |
-| `claude-p` | `claude_p.api` | `claude-p ... --output-format stream-json` — stejný engine jako `claude`, ale prokládaný transkript na výstupu (`ClaudePClient` ho normalizuje na stejné eventy) |
-| `opencode` | `opencode.api` | `opencode run --format json` |
-| `slack` | `slack.api` | Pozůstatek — modul Slack ingestion adapteru byl z repa odstraněn; Slack integrace dnes běží přes workflow `.agentis/workflows/slack.yaml` + `scripts/slack_stream.py` |
-
-Každý modul `*.api` definuje `create_app()` (FastAPI app se službami na `app.state`) a tabulku `_DISPATCH` (JSON-RPC metody → handler). Všechny agentí adaptéry sdílí stejnou `AgentJsonRpcService`; liší se jen `adapter_factory` (která třída adapteru a session manageru se použije). CLI navíc podporuje ingestion adaptéry s vlastní foreground smyčkou (hook `run_adapter` místo WebSocket transportu) — tasky do Agentisu posílají, JSON-RPC nepřijímají.
+| `claude` | `claudecode`, `claude-code`, `cloud`, `cc` | `claude --print --output-format stream-json` |
+| `claude-p` | `claudep`, `cp` | `claude-p ... --output-format stream-json` — stejný engine jako `claude`, jen bez `--print -` |
+| `opencode` | `oc` | `opencode run --format json` |
 
 ## Transport: pasivní WebSocket
 
