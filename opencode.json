@@ -24,9 +24,7 @@
       "cwd": "/var/www/agentis-sdk",
       "type": "local",
       "environment": {
-        "PYTHONPATH": "/var/www/agentis-sdk",
-        "AGENTIS_API_URL": "https://agentis.cz/api",
-        "AGENTIS_API_TOKEN": "ai3OdoyeZvk2a1eEVmL7sLSCsBjkGBm3dH"
+        "PYTHONPATH": "/var/www/agentis-sdk"
       }
     }
   },
