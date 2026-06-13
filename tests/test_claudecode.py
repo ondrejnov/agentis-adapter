@@ -409,42 +409,6 @@ def test_health_endpoint(claudecode_client):
     assert response.json() == {"status": "ok"}
 
 
-def test_start_dispatches_to_claude_session_manager(claudecode_client):
-    client, manager = claudecode_client
-
-    response = client.post(
-        "/api",
-        json={
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "start",
-            "params": {
-                "context": {
-                    "run_id": "run-1",
-                    "task_id": "task-1",
-                    "title": "Implementace nove funkce",
-                    "description": "Popis ukolu",
-                    "project_slug": "agentis",
-                    "working_dir": "/var/www/repo",
-                    "adapter": {"agent": "build", "model": "claude-haiku-4-5-20251001"},
-                }
-            },
-        },
-    )
-
-    assert response.status_code == 200
-    payload = response.json()["result"]
-    steps = [step["action"] for step in payload["adapter"]["steps"]]
-    assert steps == ["create_worktree", "deploy", "wait_ready", "start_session"]
-    deploy_step = payload["adapter"]["steps"][1]
-    assert deploy_step["status"] == "skipped"
-    wait_step = payload["adapter"]["steps"][2]
-    assert wait_step["url"] == "local://claude"
-    session_step = payload["adapter"]["steps"][3]
-    assert session_step["session_id"] == "ses_abc123"
-    manager.start.assert_called_once()
-
-
 def test_unknown_method_returns_404(claudecode_client):
     client, _manager = claudecode_client
     response = client.post(

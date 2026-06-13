@@ -230,34 +230,3 @@ def agentiscode_client(monkeypatch):
     return RpcTestClient(app, _DISPATCH), fake_manager
 
 
-def test_start_dispatches_to_agentiscode_session_manager(agentiscode_client) -> None:
-    client, manager = agentiscode_client
-
-    response = client.post(
-        "/api",
-        json={
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "start",
-            "params": {
-                "context": {
-                    "run_id": "run-1",
-                    "task_id": "task-1",
-                    "title": "Implementace nove funkce",
-                    "description": "Popis ukolu",
-                    "project_slug": "agentis",
-                    "working_dir": "/var/www/repo",
-                    "adapter": {"agent": "build", "model": "openai/gpt-5"},
-                }
-            },
-        },
-    )
-
-    assert response.status_code == 200
-    payload = response.json()["result"]
-    steps = [step["action"] for step in payload["adapter"]["steps"]]
-    assert steps == ["create_worktree", "deploy", "wait_ready", "start_session"]
-    assert payload["adapter"]["steps"][1]["reason"] == "agentiscode_local"
-    assert payload["adapter"]["steps"][2]["url"] == "local://agentiscode"
-    assert payload["adapter"]["steps"][3]["session_id"] == "ses_agentiscode"
-    manager.start.assert_called_once()

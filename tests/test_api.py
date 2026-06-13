@@ -100,6 +100,25 @@ def fake_agentis_client_factory(captured_calls: list[dict[str, Any]]):
     return FakeAgentisClient
 
 
+class _StubWorkflowManager:
+    """Workflow manager stub — start jen ověří, že run doběhne k workflow dispatchi."""
+
+    def start_workflow(self, context: Any, worktree: str, prompt: str) -> dict[str, str]:
+        return {"action": "workflow_start", "status": "applied"}
+
+
+def _workflow_service(worktree: Path) -> AgentJsonRpcService:
+    class FakeAdapter:
+        def create_worktree(self) -> dict[str, str]:
+            return {"action": "create_worktree", "status": "created", "working_dir": str(worktree)}
+
+    return AgentJsonRpcService(
+        settings=make_settings(),
+        adapter_factory=cast(Any, lambda context: FakeAdapter()),
+        workflow_manager=cast(Any, _StubWorkflowManager()),
+    )
+
+
 def make_start_params(run_id: str = "run-1") -> dict[str, Any]:
     return {
         "context": {
@@ -326,223 +345,31 @@ def strip_event_id(params: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def test_jsonrpc_happy_path_flow_runs_adapter_without_dry_run():
-    events: list[tuple[str, str, str | None]] = []
+def test_add_message_rejects_mismatched_context_run_id():
+    client = make_client(AgentJsonRpcService(settings=make_settings(), adapter_factory=cast(Any, lambda context: None)))
+    context = make_start_params(run_id="run-2")["context"]
 
-    class FakeAdapter:
-        def post_agentis_event(
-            self,
-            *,
-            kind: str,
-            status: str,
-            event_id: str | None = None,
-            message: str | None = None,
-            data: dict | None = None,
-        ) -> None:
-            events.append((kind, status, message))
-
-        def create_worktree(self) -> dict[str, str]:
-            return {"action": "create_worktree", "status": "created"}
-
-        def deploy(self) -> dict[str, str]:
-            return {"action": "deploy", "status": "applied"}
-
-        def wait_ready(self) -> dict[str, str]:
-            return {"action": "wait_ready", "status": "ready", "url": "http://pod"}
-
-        def start_session(self, pod_url: str, fork_from_session_id: str | None = None) -> dict[str, str | None]:
-            return {
-                "action": "start_session",
-                "session_id": "sess-1",
-                "pod_url": pod_url,
-                "fork_from_session_id": fork_from_session_id,
-                "snapshot_key": "snap-start",
-            }
-
-        def add_message(self, message: str, pod_url: str, attachments: list[Any] | None = None) -> dict[str, str]:
-            return {"action": "add_message", "message": message, "pod_url": pod_url, "snapshot_key": "snap-feedback"}
-
-        def question_reply(self, request_id: str, answers: list[list[str]], pod_url: str) -> dict[str, Any]:
-            return {"action": "question_reply", "request_id": request_id, "answers": answers, "pod_url": pod_url}
-
-        def restore_snapshot(self, snapshot_key: str) -> dict[str, str]:
-            return {"action": "undo", "snapshot_key": snapshot_key}
-
-    service = AgentJsonRpcService(
-        settings=make_settings(),
-        adapter_factory=cast(Any, lambda context: FakeAdapter()),
-    )
-    client = make_client(service)
-
-    start_response = client.post(
+    response = client.post(
         "/api",
         json={
             "jsonrpc": "2.0",
-            "id": 1,
-            "method": "start",
-            "params": make_start_params(),
-        },
-    )
-
-    assert start_response.status_code == 200
-    start_payload = start_response.json()["result"]
-    assert start_payload["run"]["run_id"] == "run-1"
-    assert "dry_run" not in start_payload["run"]
-    assert "dry_run" not in start_payload["run"]["events"][0]["payload"]
-    assert start_payload["adapter"]["executed"] is True
-    assert [step["action"] for step in start_payload["adapter"]["steps"]] == [
-        "create_worktree",
-        "deploy",
-        "wait_ready",
-        "start_session",
-    ]
-    assert events == [
-        ("create_worktree", "success", "Git worktree je připravený."),
-        ("deploy", "started", "Připravuji prostředí."),
-        ("deploy", "success", "Prostředí je připravené."),
-        ("wait_ready", "started", "Čekám na připravenost prostředí."),
-        ("wait_ready", "success", "Prostředí běží."),
-        ("start_session", "started", "Zakládám Agent session."),
-        ("start_session", "success", "Agent session byla založena."),
-    ]
-    assert "super-secret-token" not in start_response.text
-    assert service.session_registry.get_snapshot_key("sess-1") == "snap-start"
-
-    message_response = client.post(
-        "/api",
-        json={
-            "jsonrpc": "2.0",
-            "id": 2,
+            "id": 21,
             "method": "add_message",
             "params": {
                 "run_id": "run-1",
-                "context": start_payload["run"]["context"],
+                "context": context,
                 "message": "Ahoj",
                 "role": "user",
             },
         },
     )
-    assert message_response.status_code == 200
-    message_payload = message_response.json()["result"]
-    assert message_payload["run"]["events"][0]["kind"] == "message"
-    assert [step["action"] for step in message_payload["adapter"]["steps"]] == [
-        "create_worktree",
-        "deploy",
-        "wait_ready",
-        "add_message",
-    ]
-    assert service.session_registry.get_snapshot_key("sess-1") == "snap-feedback"
 
-    undo_response = client.post(
-        "/api",
-        json={
-            "jsonrpc": "2.0",
-            "id": 5,
-            "method": "undo",
-            "params": {"context": message_payload["run"]["context"]},
-        },
-    )
-    assert undo_response.status_code == 200
-    undo_payload = undo_response.json()["result"]
-    assert undo_payload["adapter"]["steps"] == [{"action": "undo", "snapshot_key": "snap-feedback"}]
-
-    question_response = client.post(
-        "/api",
-        json={
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "question",
-            "params": {
-                "run_id": "run-1",
-                "context": start_payload["run"]["context"],
-                "request_id": "que_123",
-                "answers": [["Ano"], ["Custom odpoved"]],
-            },
-        },
-    )
-    assert question_response.status_code == 200
-    # question je vypnutá – vrací prázdný výsledek bez spuštění adapteru.
-    assert question_response.json()["result"] == {}
-
-    approve_response = client.post(
-        "/api",
-        json={
-            "jsonrpc": "2.0",
-            "id": 4,
-            "method": "approve",
-            "params": {"run_id": "run-1", "approved": True, "comment": "Pokracuj"},
-        },
-    )
-    assert approve_response.status_code == 200
-    assert approve_response.json()["result"]["approved"] is True
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32602
 
 
-def test_jsonrpc_start_runs_agentis_init_when_adapter_requires_it():
-    class FakeAdapter:
-        requires_agentis_init = True
-
-        def create_worktree(self) -> dict[str, str]:
-            return {"action": "create_worktree", "status": "created"}
-
-        def init_agentis(self) -> dict[str, str]:
-            return {"action": "init_agentis", "status": "copied"}
-
-        def deploy(self) -> dict[str, str]:
-            return {"action": "deploy", "status": "applied"}
-
-        def wait_ready(self) -> dict[str, str]:
-            return {"action": "wait_ready", "status": "ready", "url": "http://pod"}
-
-        def start_session(self, pod_url: str, fork_from_session_id: str | None = None) -> dict[str, str | None]:
-            return {
-                "action": "start_session",
-                "session_id": "sess-1",
-                "pod_url": pod_url,
-                "fork_from_session_id": fork_from_session_id,
-            }
-
-    service = AgentJsonRpcService(
-        settings=make_settings(),
-        adapter_factory=cast(Any, lambda context: FakeAdapter()),
-    )
-    response = make_client(service).post(
-        "/api",
-        json={"jsonrpc": "2.0", "id": 1, "method": "start", "params": make_start_params()},
-    )
-
-    assert response.status_code == 200
-    assert [step["action"] for step in response.json()["result"]["adapter"]["steps"]] == [
-        "create_worktree",
-        "init_agentis",
-        "deploy",
-        "wait_ready",
-        "start_session",
-    ]
-
-
-def test_start_accepts_extended_agent_execution_context_schema():
-    class FakeAdapter:
-        def create_worktree(self) -> dict[str, str]:
-            return {"action": "create_worktree", "status": "created"}
-
-        def deploy(self) -> dict[str, str]:
-            return {"action": "deploy", "status": "applied"}
-
-        def wait_ready(self) -> dict[str, str]:
-            return {"action": "wait_ready", "status": "ready", "url": "http://pod"}
-
-        def start_session(self, pod_url: str, fork_from_session_id: str | None = None) -> dict[str, str | None]:
-            return {
-                "action": "start_session",
-                "session_id": "sess-1",
-                "pod_url": pod_url,
-                "fork_from_session_id": fork_from_session_id,
-            }
-
-    service = AgentJsonRpcService(
-        settings=make_settings(),
-        adapter_factory=cast(Any, lambda context: FakeAdapter()),
-    )
+def test_start_accepts_extended_agent_execution_context_schema(tmp_path: Path):
+    service = _workflow_service(tmp_path)
     client = make_client(service)
 
     response = client.post(
@@ -607,177 +434,8 @@ def test_start_accepts_extended_agent_execution_context_schema():
     ]
 
 
-def test_abort_stops_opencode_session_and_removes_session():
-    events: list[tuple[str, str, str | None]] = []
-
-    class FakeAdapter:
-        def post_agentis_event(
-            self,
-            *,
-            kind: str,
-            status: str,
-            event_id: str | None = None,
-            message: str | None = None,
-            data: dict | None = None,
-        ) -> None:
-            events.append((kind, status, message))
-
-        def abort(self, session_id: str) -> dict[str, str]:
-            return {"action": "abort", "session_id": session_id, "status": "aborted"}
-
-    service = AgentJsonRpcService(
-        settings=make_settings(),
-        adapter_factory=cast(Any, lambda context: FakeAdapter()),
-    )
-    service.session_registry.register(
-        "sess-1",
-        AgentExecutionContextPayload.model_validate(
-            {
-                **make_start_params()["context"],
-                "session_id": "sess-1",
-            }
-        ),
-    )
-    client = make_client(service)
-
-    response = client.post(
-        "/api",
-        json={
-            "jsonrpc": "2.0",
-            "id": 5,
-            "method": "abort",
-            "params": {
-                "context": {
-                    **make_start_params()["context"],
-                    "session_id": "sess-1",
-                }
-            },
-        },
-    )
-
-    assert response.status_code == 200
-    payload = response.json()["result"]
-    assert payload["run"]["opencode_session_id"] == "sess-1"
-    assert payload["adapter"]["steps"] == [{"action": "abort", "session_id": "sess-1", "status": "aborted"}]
-    assert events == [
-        ("abort", "started", "Zastavuji bezici OpenCode session."),
-        ("abort", "success", "OpenCode session byla zastavena."),
-    ]
-    assert service.session_registry.get("sess-1") is None
-
-
-def test_abort_requires_session_id_in_context():
-    client = make_client(AgentJsonRpcService(settings=make_settings(), adapter_factory=cast(Any, lambda context: None)))
-
-    response = client.post(
-        "/api",
-        json={
-            "jsonrpc": "2.0",
-            "id": 6,
-            "method": "abort",
-            "params": {
-                "context": make_start_params()["context"],
-            },
-        },
-    )
-
-    assert response.status_code == 400
-    assert response.json()["error"] == {
-        "code": 400,
-        "message": "Context must include session_id to abort session",
-    }
-
-
-def test_add_message_registers_session_context():
-    class FakeAdapter:
-        def create_worktree(self) -> dict[str, str]:
-            return {"action": "create_worktree", "status": "created"}
-
-        def deploy(self) -> dict[str, str]:
-            return {"action": "deploy", "status": "applied"}
-
-        def wait_ready(self) -> dict[str, str]:
-            return {"action": "wait_ready", "status": "ready", "url": "http://pod"}
-
-        def add_message(self, message: str, pod_url: str, attachments: list[Any] | None = None) -> dict[str, str]:
-            return {"action": "add_message", "message": message, "pod_url": pod_url, "snapshot_key": "snap-feedback"}
-
-    service = AgentJsonRpcService(
-        settings=make_settings(),
-        adapter_factory=cast(Any, lambda context: FakeAdapter()),
-    )
-    client = make_client(service)
-    context = make_start_params()["context"]
-    context["session_id"] = "sess-1"
-
-    response = client.post(
-        "/api",
-        json={
-            "jsonrpc": "2.0",
-            "id": 20,
-            "method": "add_message",
-            "params": {
-                "run_id": "run-1",
-                "context": context,
-                "message": "Ahoj",
-                "role": "user",
-            },
-        },
-    )
-
-    assert response.status_code == 200
-    registered = service.session_registry.get("sess-1")
-    assert registered is not None
-    assert registered.run_id == "run-1"
-    assert service.session_registry.get_snapshot_key("sess-1") == "snap-feedback"
-
-
-def test_add_message_rejects_mismatched_context_run_id():
-    client = make_client(AgentJsonRpcService(settings=make_settings(), adapter_factory=cast(Any, lambda context: None)))
-    context = make_start_params(run_id="run-2")["context"]
-
-    response = client.post(
-        "/api",
-        json={
-            "jsonrpc": "2.0",
-            "id": 21,
-            "method": "add_message",
-            "params": {
-                "run_id": "run-1",
-                "context": context,
-                "message": "Ahoj",
-                "role": "user",
-            },
-        },
-    )
-
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == -32602
-
-
-def test_start_accepts_null_for_defaulted_context_fields():
-    class FakeAdapter:
-        def create_worktree(self) -> dict[str, str]:
-            return {"action": "create_worktree", "status": "created"}
-
-        def deploy(self) -> dict[str, str]:
-            return {"action": "deploy", "status": "applied"}
-
-        def wait_ready(self) -> dict[str, str]:
-            return {"action": "wait_ready", "status": "ready", "url": "http://pod"}
-
-        def start_session(self, pod_url: str, fork_from_session_id: str | None = None) -> dict[str, str | None]:
-            return {
-                "action": "start_session",
-                "session_id": "sess-1",
-                "pod_url": pod_url,
-                "fork_from_session_id": fork_from_session_id,
-            }
-
-    service = AgentJsonRpcService(
-        settings=make_settings(),
-        adapter_factory=cast(Any, lambda context: FakeAdapter()),
-    )
+def test_start_accepts_null_for_defaulted_context_fields(tmp_path: Path):
+    service = _workflow_service(tmp_path)
     client = make_client(service)
 
     response = client.post(

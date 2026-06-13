@@ -157,14 +157,15 @@ class WorkflowManager:
         else:
             workflow_relpath = PROJECT_WORKFLOW_FILE_RELPATH if is_project_scope else WORKFLOW_FILE_RELPATH
         workflow_path = worktree_path / workflow_relpath
-        if workflow_name and not workflow_path.is_file():
+        # Vše běží přes workflow runtime — bez workflow souboru run nemá co spustit
+        # a vrací se chyba do Agentisu (žádný fallback na CLI session).
+        if not workflow_path.is_file():
+            if workflow_name:
+                raise FileNotFoundError(
+                    f"Workflow {workflow_name!r} vyžaduje soubor {workflow_relpath}, ale {workflow_path} neexistuje"
+                )
             raise FileNotFoundError(
-                f"Workflow {workflow_name!r} vyžaduje soubor {workflow_relpath}, ale {workflow_path} neexistuje"
-            )
-        if is_project_scope and not workflow_path.is_file():
-            raise FileNotFoundError(
-                f"Project scope vyžaduje workflow soubor {PROJECT_WORKFLOW_FILE_RELPATH}, "
-                f"ale {workflow_path} neexistuje"
+                f"Projekt nemá workflow soubor {workflow_relpath}; run přes workflow runtime nelze spustit"
             )
 
         external_run_files = is_project_scope or workflow_name is not None
@@ -236,6 +237,13 @@ class WorkflowManager:
             "workflow_file": workflow_relpath,
             "steps": [step.name for step in workflow.workflow.steps],
         }
+
+    def snapshot_key_for_task(self, task_id: str) -> str | None:
+        """Klíč source snapshotu posledního runu tasku (pro `undo`); None pro pojmenovaná workflow."""
+
+        with self._lock:
+            run = self._runs.get(task_id)
+            return run.snapshot_key if run is not None else None
 
     def abort(self, context: AgentExecutionContextPayload) -> dict[str, Any]:
         """Zruší workflow: zastaví aktivní kroky podle labels (bez session_id)."""

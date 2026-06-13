@@ -13,7 +13,14 @@ import pytest
 from pydantic import ValidationError
 
 from common.config import Settings
-from common.models import AddMessageParams, AgentExecutionContextPayload, StartParams, AbortParams, QuestionParams
+from common.models import (
+    AddMessageParams,
+    AgentExecutionContextPayload,
+    StartParams,
+    AbortParams,
+    QuestionParams,
+    UndoParams,
+)
 from common.rpc.jsonrpc import AgentJsonRpcException, AgentJsonRpcService
 from common.workflow.local_runtime import LocalProcessRunner
 from common.workflow.manager import WorkflowBusyError, WorkflowManager
@@ -1780,6 +1787,9 @@ class FakeWorkflowAdapter:
     def _workspace_path(self) -> Path:
         return self._worktree
 
+    def restore_snapshot(self, snapshot_key: str) -> dict[str, Any]:
+        return {"action": "undo", "snapshot_key": snapshot_key}
+
 
 def _service(tmp_path: Path, runner: FakeRunner) -> tuple[AgentJsonRpcService, WorkflowManager, list]:
     settings = _settings(tmp_path)
@@ -1807,6 +1817,48 @@ def test_jsonrpc_start_with_named_workflow_implies_workflow_runtime(tmp_path: Pa
     assert [step["action"] for step in steps] == ["create_worktree", "workflow_start"]
     assert steps[-1]["workflow"] == "close"
     _wait_done(manager, context.task_id)
+
+
+def test_jsonrpc_undo_restores_workflow_run_snapshot(tmp_path: Path) -> None:
+    # Per-session snapshot vzniká na startu workflow runu; undo ho vrátí přes adapter.
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+    runner = FakeRunner()
+    service, manager, _calls = _service(tmp_path, runner)
+    context = _context(user_prompt="udelej X")
+
+    service.start(StartParams(context=context))
+    _wait_done(manager, context.task_id)
+
+    snapshot_key = manager._runs[context.task_id].snapshot_key
+    assert snapshot_key
+
+    result = service.undo(UndoParams(context=context))
+    step = result["adapter"]["steps"][0]
+    assert step["action"] == "undo"
+    assert step["snapshot_key"] == snapshot_key
+
+
+def test_jsonrpc_undo_without_run_returns_error(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    service, _manager, _calls = _service(tmp_path, runner)
+
+    with pytest.raises(AgentJsonRpcException) as excinfo:
+        service.undo(UndoParams(context=_context()))
+
+    assert excinfo.value.code == 400
+
+
+def test_jsonrpc_start_without_workflow_file_returns_error(tmp_path: Path) -> None:
+    # Vše běží přes workflow runtime — bez workflow souboru se vrací chyba do Agentisu.
+    runner = FakeRunner()
+    service, _manager, _calls = _service(tmp_path, runner)
+
+    with pytest.raises(AgentJsonRpcException) as excinfo:
+        service.start(StartParams(context=_context(user_prompt="udelej X")))
+
+    assert excinfo.value.code == 400
+    assert "workflow" in str(excinfo.value).lower()
 
 
 def test_jsonrpc_start_with_workflow_runtime_is_nonblocking(tmp_path: Path) -> None:

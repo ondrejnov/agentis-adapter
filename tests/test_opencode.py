@@ -633,34 +633,3 @@ def test_health_endpoint(opencode_client):
     assert response.json() == {"status": "ok"}
 
 
-def test_start_dispatches_to_opencode_session_manager(opencode_client):
-    client, manager = opencode_client
-
-    response = client.post(
-        "/api",
-        json={
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "start",
-            "params": {
-                "context": {
-                    "run_id": "run-1",
-                    "task_id": "task-1",
-                    "title": "Implementace nove funkce",
-                    "description": "Popis ukolu",
-                    "project_slug": "agentis",
-                    "working_dir": "/var/www/repo",
-                    "adapter": {"agent": "build", "model": "openrouter/openai/gpt-4.1-mini"},
-                }
-            },
-        },
-    )
-
-    assert response.status_code == 200
-    payload = response.json()["result"]
-    steps = [step["action"] for step in payload["adapter"]["steps"]]
-    assert steps == ["create_worktree", "deploy", "wait_ready", "start_session"]
-    assert payload["adapter"]["steps"][1]["status"] == "skipped"
-    assert payload["adapter"]["steps"][2]["url"] == "local://opencode"
-    assert payload["adapter"]["steps"][3]["session_id"] == "ses_abc123"
-    manager.start.assert_called_once()
