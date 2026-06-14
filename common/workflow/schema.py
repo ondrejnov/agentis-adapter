@@ -195,6 +195,9 @@ class WorkflowOutput(BaseModel):
     status: int | None = None
     path: str | None = None
     name: str | None = None
+    #: U `agent_comment` přetíží jméno autora obsahem souboru (počítané za běhu kroku,
+    #: např. „Agent - $MODEL“); má přednost před statickým `name`.
+    nameFrom: str | None = None
 
     @field_validator("status", mode="before")
     @classmethod

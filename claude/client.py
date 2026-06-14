@@ -144,6 +144,7 @@ class ClaudeCodeClient:
             config = ClaudeRunConfig(**kwargs)
         self.config = config
         # Souhrnný stav z posledního běhu — vyplní se postupně během streamu.
+        self._session_started = False
         self.session_id: Optional[str] = None
         self.model: Optional[str] = None
         self.last_result: Optional[Dict[str, Any]] = None
@@ -378,6 +379,7 @@ class ClaudeCodeClient:
         if etype == "system" and event.get("subtype") == "init":
             self.session_id = event.get("session_id") or self.session_id
             self.model = event.get("model") or self.model
+            self._session_started = True
             out.append(
                 ClaudeEvent(
                     "session_start",
@@ -392,6 +394,29 @@ class ClaudeCodeClient:
                 )
             )
             return out
+
+        # claude-p neposílá `system/init`; jeho úvodní událost je `mode` a
+        # session id nese v camelCase klíči `sessionId` (snake_case `session_id`
+        # má až finální `result`). Odvoď proto `session_start` z prvního eventu,
+        # který nese session id, ať telemetrie/konzumenti dostanou session včas.
+        session_id = event.get("session_id") or event.get("sessionId")
+        if not self._session_started and etype != "result" and isinstance(session_id, str) and session_id:
+            self.session_id = session_id
+            self.model = (event.get("message") or {}).get("model") or event.get("model") or self.model
+            self._session_started = True
+            out.append(
+                ClaudeEvent(
+                    "session_start",
+                    {"session_id": self.session_id, "model": self.model, "cwd": event.get("cwd")},
+                    raw=event,
+                )
+            )
+            # `mode`/`permission-mode`/`file-history-snapshot` nemají další obsah
+            # k normalizaci; `assistant`/`user` necháme propadnout do svých
+            # handlerů níž, ať se jejich obsah nezahodí. `result` má vlastní
+            # session id i handler, takže ho jako session-start signál nebereme.
+            if etype not in ("assistant", "user"):
+                return out
 
         if etype == "assistant":
             self.session_id = event.get("session_id") or self.session_id

@@ -28,8 +28,9 @@ workflow:
         OUTPUT_DIR="${RUN_AGENT_OUTPUT_DIR:-$AGENTIS_RUN_DIR/outputs}"
         mkdir -p "$OUTPUT_DIR"
         MODEL="${AGENTIS_MODEL:-openai/gpt-5.4-mini}"
+        printf 'Agent - %s' "$MODEL" > "$OUTPUT_DIR/agent-name"
         case "$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')" in
-          *claude*) ADAPTER=claude ;;
+          *claude*) ADAPTER=claude-p ;;
           *) ADAPTER=opencode ;;
         esac
         agentiscode ${RUN_AGENT_FLAGS:-} --adapter "$ADAPTER" \
@@ -45,6 +46,7 @@ workflow:
         - type: agent_comment
           bodyFrom: outputs/final-comment.md
           status: done
+          nameFrom: outputs/agent-name
         - type: session_id
           valueFrom: outputs/session-id
   env:

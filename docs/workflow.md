@@ -211,7 +211,7 @@ Kroky komunikují s adapterem přes soubory; cesty jsou relativní k output root
 
 | Typ | Pole | Význam |
 | --- | --- | --- |
-| `agent_comment` | `bodyFrom`, `status` | Tělo completion komentáře tasku + cílový status — číslo, nebo alias `backlog`/`todo`/`in_progress`/`in_review`/`done`/`cancelled`/`blocked` (číselník `Task.STATUS_*` v Agentisu) |
+| `agent_comment` | `bodyFrom`, `status`, `name`/`nameFrom` | Tělo completion komentáře tasku + cílový status — číslo, nebo alias `backlog`/`todo`/`in_progress`/`in_review`/`done`/`cancelled`/`blocked` (číselník `Task.STATUS_*` v Agentisu). Volitelné `name` (statické) nebo `nameFrom` (soubor počítaný za běhu kroku, např. „Agent - $MODEL“) přetíží jméno autora komentáře; `nameFrom` má přednost. Jinak se použije jméno odvozené z modelu/agenta. |
 | `session_id` | `valueFrom` | Uloží session id do runu (`run.store_session_id`) pro pozdější resume |
 | `url` / `text` | `label`, `valueFrom` | Příloha komentáře (odkaz / text) |
 | `artifact` | `name`, `path` | Soubor přiložený ke komentáři (base64) |

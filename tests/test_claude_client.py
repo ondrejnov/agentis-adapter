@@ -263,6 +263,37 @@ def test_result_usage_keeps_cache_creation_tokens() -> None:
     assert events[0].data["usage"] == client.last_usage
 
 
+def test_normalize_emits_session_start_for_claude_p_mode_event() -> None:
+    # claude-p neposílá `system/init`; úvodní událost je `mode` se session id v
+    # camelCase `sessionId`. Z ní musí vzniknout `session_start`, jinak telemetrie
+    # nikdy nenaváže run na session a do Agentisu se nic neuloží.
+    client = ClaudeCodeClient(config=ClaudeRunConfig(command="claude-p"))
+
+    events = client._normalize({"type": "mode", "mode": "normal", "sessionId": "sess-cp"})
+
+    assert len(events) == 1
+    assert events[0].type == "session_start"
+    assert events[0].data["session_id"] == "sess-cp"
+    assert client.session_id == "sess-cp"
+
+    # Další event se session id už `session_start` nezopakuje.
+    again = client._normalize({"type": "permission-mode", "permissionMode": "bypassPermissions", "sessionId": "sess-cp"})
+    assert all(e.type != "session_start" for e in again)
+
+
+def test_normalize_session_start_emitted_once_for_standard_claude() -> None:
+    # U `claude` (system/init) se chování nemění a `session_start` padne jen jednou.
+    client = ClaudeCodeClient(config=ClaudeRunConfig(command="claude"))
+
+    init = client._normalize({"type": "system", "subtype": "init", "session_id": "sess-cc", "model": "claude-x"})
+    assert [e.type for e in init] == ["session_start"]
+
+    follow = client._normalize(
+        {"type": "assistant", "session_id": "sess-cc", "message": {"id": "m1", "content": [{"type": "text", "text": "hi"}]}}
+    )
+    assert all(e.type != "session_start" for e in follow)
+
+
 def test_stream_stops_and_kills_when_process_hangs_after_result(monkeypatch) -> None:
     # Po `result` claude občas neuzavře stdout ani sám neskončí. Stream se na to
     # nesmí zaseknout — musí doběhnout (a viset zůstavší proces ukončit), jinak

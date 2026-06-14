@@ -82,17 +82,16 @@ def _build_settings() -> Settings:
             _get_env("ADAPTER_WORKTREE_ROOT", str(project_root / "worktrees")) or str(project_root / "worktrees")
         ).resolve(),
         public_base_url=_public_base_url(port),
-        agentis_endpoint=_get_env("AGENTIS_ENDPOINT", "http://127.0.0.1:8891"),
+        agentis_endpoint=_get_env("AGENTIS_ENDPOINT", "https://agentis.cz/api"),
         agentis_token=_get_env("AGENTIS_TOKEN", "1234"),
         namespace_prefix=_get_env("ADAPTER_NAMESPACE_PREFIX", "Task") or "Task",
         project_run_root=Path(_get_env("ADAPTER_PROJECT_RUN_ROOT", "/tmp/agentis") or "/tmp/agentis").resolve(),
         kubectl_command=_get_env("KUBECTL_COMMAND", "kubectl") or "kubectl",
         workflow_executor=(_get_env("WORKFLOW_EXECUTOR", "kubernetes") or "kubernetes").strip().lower(),
         bundled_workflow_dir=Path(
-            _get_env("ADAPTER_BUNDLED_WORKFLOW_DIR", str(project_root / "workflows"))
-            or str(project_root / "workflows")
+            _get_env("ADAPTER_BUNDLED_WORKFLOW_DIR", str(project_root / "workflows")) or str(project_root / "workflows")
         ).resolve(),
-        agentis_ws_endpoint=_get_env("AGENTIS_WS_ENDPOINT"),
+        agentis_ws_endpoint=_get_env("AGENTIS_WS_ENDPOINT", "wss://agentis.cz/api/adapters/passive/ws"),
         agentis_adapter_id=_get_env("AGENTIS_ADAPTER_ID"),
         websocket_heartbeat_interval=float(_get_env("AGENTIS_WS_HEARTBEAT_INTERVAL", "30") or "30"),
         websocket_max_message_size=int(

@@ -73,6 +73,7 @@ workflow:
         - type: agent_comment
           bodyFrom: .agentis/outputs/final-comment.md
           status: in_review
+          nameFrom: .agentis/outputs/agent-name
         - type: session_id
           valueFrom: .agentis/outputs/session-id
     - name: Create pull request
@@ -714,6 +715,7 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
     outputs_dir = worktree / ".agentis" / "outputs"
     outputs_dir.mkdir(parents=True)
     (outputs_dir / "final-comment.md").write_text("Hotovo, vše funguje.", encoding="utf-8")
+    (outputs_dir / "agent-name").write_text("Agent - openai/gpt-5", encoding="utf-8")
     (outputs_dir / "session-id").write_text("ses_42\n", encoding="utf-8")
     (outputs_dir / "pull-request-url").write_text("https://github.com/org/repo/pull/1\n", encoding="utf-8")
 
@@ -747,6 +749,8 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
     comment = comment_calls[0]
     assert comment["body"] == "Hotovo, vše funguje."
     assert comment["status"] == 4
+    # jméno autora se počítá za běhu kroku a čte přes `nameFrom`
+    assert comment["author_name"] == "Agent - openai/gpt-5"
     assert comment["attachments"] == [
         {"label": "Pull Request", "value": "https://github.com/org/repo/pull/1", "type": "url"}
     ]
@@ -845,7 +849,8 @@ def test_task_headers_are_injected_as_env(tmp_path: Path) -> None:
         env = record["env"]
         assert env["TASK_HEADER_X_TRACE_ID"] == "abc-123"
         assert env["TASK_HEADER_PRIORITY"] == "7"
-        assert env["TASK_HEADER_META"] == '{"a": 1}'
+        assert env["TASK_HEADER_META_A"] == "1"
+        assert "TASK_HEADER_META" not in env
         assert not any(key == "TASK_HEADER_" for key in env)
 
     # headers jsou i v context.json pro agenta

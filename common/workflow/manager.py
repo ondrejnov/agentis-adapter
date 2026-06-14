@@ -630,6 +630,7 @@ class WorkflowManager:
 
         comment_body: str | None = None
         comment_status: int | None = None
+        comment_name: str | None = None
         session_id: str | None = None
         attachments: list[dict[str, Any]] = []
         artifacts: list[dict[str, Any]] = []
@@ -650,6 +651,8 @@ class WorkflowManager:
                 if body and body.strip():
                     comment_body = body.strip()
                     comment_status = output.status
+                    name = self._read_output_file(run, output.nameFrom) if output.nameFrom else output.name
+                    comment_name = (name or "").strip() or None
             elif output.type == "session_id":
                 value = self._read_output_file(run, output.valueFrom)
                 if value and value.strip():
@@ -707,6 +710,7 @@ class WorkflowManager:
                     "status": comment_status,
                     "comment_type": "primary",
                     "actions": actions,
+                    "author_name": comment_name,
                 },
             )
         elif attachments or artifacts:

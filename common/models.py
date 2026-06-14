@@ -15,23 +15,34 @@ def task_header_env(headers: dict[str, Any] | None) -> dict[str, str]:
     """Převede hlavičky tasku na env proměnné ``TASK_HEADER_<KEY>``.
 
     Klíč se normalizuje na uppercase, nealfanumerické znaky na ``_``;
-    hlavičky s prázdným klíčem po normalizaci se přeskočí. Skalární
-    hodnoty se serializují přes ``str``, složené struktury jako JSON.
+    hlavičky s prázdným klíčem po normalizaci se přeskočí. Zanořené
+    objekty se rekurzivně rozbalí do vlastních klíčů spojených ``_``
+    (``{"slack": {"channel_id": ...}}`` → ``TASK_HEADER_SLACK_CHANNEL_ID``).
+    Skalární hodnoty se serializují přes ``str``, seznamy jako JSON.
     """
     env: dict[str, str] = {}
-    for key, value in (headers or {}).items():
-        name = _HEADER_ENV_SANITIZE_RE.sub("_", str(key).upper()).strip("_")
-        if not name:
-            continue
+
+    def add(prefix: str, value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                name = _HEADER_ENV_SANITIZE_RE.sub("_", str(key).upper()).strip("_")
+                if not name:
+                    continue
+                add(f"{prefix}_{name}" if prefix else name, nested)
+            return
+        if not prefix:
+            return
         if value is None:
             serialized = ""
         elif isinstance(value, str):
             serialized = value
-        elif isinstance(value, (dict, list)):
+        elif isinstance(value, list):
             serialized = json.dumps(value, ensure_ascii=False)
         else:
             serialized = str(value)
-        env[f"TASK_HEADER_{name}"] = serialized
+        env[f"TASK_HEADER_{prefix}"] = serialized
+
+    add("", headers or {})
     return env
 
 
