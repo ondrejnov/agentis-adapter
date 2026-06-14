@@ -180,9 +180,10 @@ Kromě `workflow.env` / `step.env` dostane každý krok od adapteru:
 Krok s `if` se spustí jen při splnění podmínky. Proměnnými podmínky jsou:
 
 - `var` outputs předchozích kroků,
-- built-in hodnoty runu — všechny interpolační tokeny z tabulky výše (`GITHUB_REPO`, `BRANCH`, `BASE_BRANCH`, `TASK_NUMBER`, …); stejná jména dostávají kroky i jako env proměnné.
+- built-in hodnoty runu — všechny interpolační tokeny z tabulky výše (`GITHUB_REPO`, `BRANCH`, `BASE_BRANCH`, `TASK_NUMBER`, …); stejná jména dostávají kroky i jako env proměnné,
+- env proměnné kroku — přesně to env, které krok dostane (`workflow.env`, runtime env od adapteru jako `AGENTIS_MODEL`/`AGENTIS_AGENT`/task header env, a `step.env`). Lze tak podmínit krok hodnotou env: `if: AGENTIS_MODEL == 'opus'` nebo `if: DEPLOY_ENV != 'prod'`.
 
-Při kolizi jmen vyhrává `var` output kroku nad built-in hodnotou (krok tak může built-in hodnotu pro zbytek workflow přepsat).
+Při kolizi jmen vyhrává `var` output kroku nad built-in hodnotou i nad env (krok tak může env/built-in hodnotu pro zbytek workflow přepsat); v env samotném platí pořadí `workflow.env` < runtime env < `step.env`.
 
 Gramatika: termy `VAR`, `!VAR`, `VAR == hodnota`, `VAR != 'hodnota'` spojené `&&` a `||`. `&&` má přednost před `||` — `A && B || C` se vyhodnotí jako `(A && B) || C`; závorky nejsou. Negace `!` platí jen na jednotlivý holý term, ne na porovnání ani skupinu. Hodnota porovnání s mezerami nebo se spojkou `&&` / `||` musí být v uvozovkách (`MODE == 'a && b'`).
 

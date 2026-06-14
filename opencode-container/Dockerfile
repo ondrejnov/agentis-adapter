@@ -91,15 +91,14 @@ RUN python -c "from fastembed import LateInteractionTextEmbedding, SparseTextEmb
 
 RUN npm install -g pyright
 
+COPY ./claude-p /root/.local/bin/claude-p
+
 RUN npm install -g @fission-ai/openspec@latest
 RUN curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.sh | bash
 COPY ./rtk /root/.local/bin
 
-COPY clarp /opt/clarp
-RUN cd /opt/clarp && npm install && npm run build && npm install -g .
-
 RUN npm install prettier -g
-RUN npm install -g @anthropic-ai/claude-code@2.1.170
+RUN npm install -g @anthropic-ai/claude-code@2.1.172
 RUN npm install -g opencode-ai@1.16.2 opencode-linux-x64-baseline@1.16.2
 
 # kubectl pro workflow kroky (apply DevServer CR pro agentis-kubernetes-operator)

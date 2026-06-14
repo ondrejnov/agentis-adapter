@@ -1036,6 +1036,62 @@ def test_if_condition_runs_step_on_nonempty_builtin_token(tmp_path: Path) -> Non
     assert step_indexes == ["0", "1", "2"]
 
 
+ENV_CONDITION_WORKFLOW_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 120
+  env:
+    DEPLOY_ENV: staging
+  steps:
+    - name: Run agent
+      run: agentiscode
+    - name: Only on gpt-5
+      if: AGENTIS_MODEL == 'openai/gpt-5'
+      run: echo gpt5
+    - name: Only on opus
+      if: AGENTIS_MODEL == 'opus'
+      run: echo opus
+    - name: Not on prod
+      if: DEPLOY_ENV != 'prod'
+      run: echo staging
+    - name: Step env override
+      if: DEPLOY_ENV == 'prod'
+      env:
+        DEPLOY_ENV: prod
+      run: echo prod
+"""
+
+
+def test_if_condition_evaluates_runtime_and_step_env(tmp_path: Path) -> None:
+    # AGENTIS_MODEL z adapteru i workflow.env / step.env jsou k dispozici v `if`
+    worktree = tmp_path / "wt"
+    path = worktree / WORKFLOW_FILE_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(ENV_CONDITION_WORKFLOW_YAML, encoding="utf-8")
+
+    runner = FakeRunner()
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()  # adapter.model == "openai/gpt-5"
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+    assert manager._runs[context.task_id].status == "success"
+
+    # "Only on opus" se přeskočí (runtime env AGENTIS_MODEL != opus),
+    # "Step env override" běží, protože step.env přepíše workflow.env DEPLOY_ENV na prod
+    step_names = [record["step"] for record in runner.steps]
+    assert step_names == ["Run agent", "Only on gpt-5", "Not on prod", "Step env override"]
+
+    skipped = [
+        params["data"]["step"]
+        for method, params in calls
+        if method == "run.adapter_event" and params["kind"] == "workflow_step" and params["data"].get("skipped")
+    ]
+    assert skipped == ["Only on opus"]
+
+
 CONDITIONAL_FOLLOWUPS_WORKFLOW_YAML = """
 version: 1
 workflow:

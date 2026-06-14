@@ -447,7 +447,17 @@ class WorkflowManager:
                     data={"step": step.name, "skipped": True, "failed_step": failed_step},
                 )
                 continue
-            if step.if_ is not None and not evaluate_condition(step.if_, {**builtin_vars, **run.vars}):
+            # Podmínka vidí stejné env jako samotný krok (workflow.env < runtime env <
+            # step.env) plus built-in hodnoty a `var` outparametry; `var` output runu
+            # vyhrává nad vším ostatním (krok tak může env/built-in pro `if` přepsat).
+            condition_vars = {
+                **run.workflow.workflow.env,
+                **env,
+                **step.env,
+                **builtin_vars,
+                **run.vars,
+            }
+            if step.if_ is not None and not evaluate_condition(step.if_, condition_vars):
                 run.skipped_steps.add(index)
                 self._emit_adapter_event(
                     run.context,
