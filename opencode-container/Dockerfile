@@ -105,5 +105,3 @@ RUN npm install -g opencode-ai@1.16.2 opencode-linux-x64-baseline@1.16.2
 RUN KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" \
     && curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
     && chmod +x /usr/local/bin/kubectl
-
-CMD ["opencode", "web", "--hostname", "0.0.0.0"]
