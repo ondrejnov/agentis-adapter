@@ -169,13 +169,13 @@ class WorkflowManager:
                 workflow_path = bundled_path
             elif workflow_name:
                 raise FileNotFoundError(
-                    f"Workflow {workflow_name!r} vyžaduje soubor {workflow_relpath} v projektu nebo "
-                    f"zabalený v {self.settings.bundled_workflow_dir}, ale nikde neexistuje"
+                    f"Workflow {workflow_name!r} vyžaduje soubor {workflow_relpath} v projektu "
+                    f"({workflow_path}) nebo zabalený fallback ({bundled_path}), ale ani jeden neexistuje"
                 )
             else:
                 raise FileNotFoundError(
-                    f"Projekt nemá workflow soubor {workflow_relpath} ani zabalený fallback "
-                    f"v {self.settings.bundled_workflow_dir}; run přes workflow runtime nelze spustit"
+                    f"Projekt nemá workflow soubor {workflow_relpath} ({workflow_path}) "
+                    f"ani zabalený fallback ({bundled_path}); run přes workflow runtime nelze spustit"
                 )
 
         external_run_files = is_project_scope or workflow_name is not None

@@ -486,11 +486,14 @@ def test_start_rejects_removed_dry_run_param():
     assert any(item["loc"] == ["dry_run"] for item in payload["error"]["data"])
 
 
-def test_jsonrpc_unknown_method_returns_error():
+def test_jsonrpc_unknown_method_returns_error(capsys):
     client = make_client()
     response = client.post("/api", json={"jsonrpc": "2.0", "id": 1, "method": "missing", "params": {}})
     assert response.status_code == 404
     assert response.json()["error"]["code"] == -32601
+    stderr = capsys.readouterr().err
+    assert "JSON-RPC method not found" in stderr
+    assert "method='missing'" in stderr
 
 
 def test_jsonrpc_http_dispatch_preserves_invalid_params_shape():
