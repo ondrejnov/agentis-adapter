@@ -6,11 +6,17 @@ Kubernetes-specifická pole workflow YAML (`image`, `volumes`, `volumeMounts`,
 `imagePullSecrets`, `resources`) se ignorují; kroky běží pod uživatelem
 adapter procesu bez izolace, se stejným bash wrapperem (`set -euo pipefail`,
 sourcing `envFiles`, `cd` do workingDir kroku, jinak `"$WORKDIR"`) jako v Kubernetes.
+
+Bash je potřeba i na Windows (wrapper je bash syntaxe) — hledá se v PATH
+(`shutil.which`), takže funguje přes Git Bash nebo WSL; spawn/kill se větví
+podle platformy (`start_new_session`+`killpg` na POSIX, `CREATE_NEW_PROCESS_GROUP`
++`taskkill /T` na Windows).
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -28,6 +34,23 @@ _SCRUBBED_HOST_ENV = frozenset({"AGENTIS_TOKEN"})
 
 #: Po SIGTERM dostane process group tolik sekund na úklid, pak přijde SIGKILL.
 _KILL_GRACE_SEC = 5.0
+
+#: Windows nemá POSIX process groups ani /bin/bash — spawn/kill se větví podle toho.
+_IS_WINDOWS = os.name == "nt"
+
+
+def _resolve_bash() -> str | None:
+    """Najde bash executable; POSIX `/bin/bash`, jinak z PATH (Git Bash/WSL). None = chybí."""
+
+    return shutil.which("bash") or ("/bin/bash" if not _IS_WINDOWS and Path("/bin/bash").exists() else None)
+
+
+def _spawn_kwargs() -> dict[str, object]:
+    """Platform-specific kwargs pro `Popen`, aby šla zabít celá process group / strom."""
+
+    if _IS_WINDOWS:
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
 
 
 class LocalProcessRunner:
@@ -76,18 +99,27 @@ class LocalProcessRunner:
         log_path = run_dir / "logs" / f"{name}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
+        bash = _resolve_bash()
+        if bash is None:
+            return self._spawn_failed(
+                name,
+                log_path,
+                "bash nenalezen v PATH (na Windows nainstaluj Git Bash nebo WSL a přidej ho do PATH)",
+            )
+
+        wrapper = build_bash_wrapper(spec.envFiles, step.run, workdir=step.workingDir or spec.workingDir)
         try:
             with log_path.open("wb") as log_file:
                 process = subprocess.Popen(
-                    ["/bin/bash", "-lc", build_bash_wrapper(spec.envFiles, step.run, workdir=step.workingDir or spec.workingDir)],
+                    [bash, "-lc", wrapper],
                     cwd=working_dir,
                     env=merged_env,
                     stdout=log_file,
                     stderr=subprocess.STDOUT,
-                    start_new_session=True,
+                    **_spawn_kwargs(),
                 )
         except OSError as exc:
-            return StepResult(status="failed", log_tail=f"(spawn failed: {exc})")
+            return self._spawn_failed(name, log_path, str(exc))
 
         with self._lock:
             self._processes.setdefault(task_label, {})[process.pid] = process
@@ -122,6 +154,19 @@ class LocalProcessRunner:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _spawn_failed(name: str, log_path: Path, reason: str) -> StepResult:
+        """Spawn kroku selhal (chybí bash / OSError) — zaloguj do stderru a vrať `failed`.
+
+        Tahle větva běží *před* spuštěním kroku, takže log soubor zůstane prázdný;
+        bez tohohle stderr zápisu by selhání (typicky chybějící bash na Windows) nikde
+        nebylo vidět, jen v `log_tail` Agentis eventu.
+        """
+
+        log_tail = f"(spawn failed: {reason})"
+        sys.stderr.write(f"[workflow] krok '{name}' selhal (spawn, log {log_path}): {log_tail}\n")
+        return StepResult(status="failed", log_tail=log_tail)
+
+    @staticmethod
     def _ignored_fields(workflow: WorkflowFile) -> list[str]:
         spec = workflow.workflow
         ignored: list[str] = []
@@ -154,9 +199,14 @@ class LocalProcessRunner:
                 return "timeout"
             time.sleep(self.poll_interval)
 
-    @staticmethod
-    def _kill(process: subprocess.Popen[bytes]) -> None:
-        # Celou process group: kroky typicky spouští další procesy (agent, git, ...).
+    @classmethod
+    def _kill(cls, process: subprocess.Popen[bytes]) -> None:
+        # Celý strom/process group: kroky typicky spouští další procesy (agent, git, ...).
+        if process.poll() is not None:
+            return
+        if _IS_WINDOWS:
+            cls._kill_windows(process)
+            return
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
@@ -166,6 +216,24 @@ class LocalProcessRunner:
         except subprocess.TimeoutExpired:
             with suppress(ProcessLookupError, PermissionError):
                 os.killpg(process.pid, signal.SIGKILL)
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=_KILL_GRACE_SEC)
+
+    @staticmethod
+    def _kill_windows(process: subprocess.Popen[bytes]) -> None:
+        # `taskkill /T` zabije bash i jeho potomky; CREATE_NEW_PROCESS_GROUP nestačí (jen Ctrl+Break).
+        with suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_KILL_GRACE_SEC,
+            )
+        with suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=_KILL_GRACE_SEC)
+        if process.poll() is None:
+            with suppress(OSError):
+                process.kill()
             with suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=_KILL_GRACE_SEC)
 

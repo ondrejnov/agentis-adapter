@@ -1831,6 +1831,34 @@ def test_local_executor_failed_step_stops_workflow_and_reports_log_tail(
     assert not any(method == "task.add_agent_comment" for method, _ in calls)
 
 
+def test_local_executor_missing_bash_reports_spawn_failure(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Simuluje Windows bez bash v PATH — spawn musí selhat čitelně (stderr + event), ne potichu.
+    monkeypatch.setattr("common.workflow.local_runtime._resolve_bash", lambda: None)
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, LOCAL_NO_EXECUTOR_YAML)
+    manager, calls = _local_manager(tmp_path, workflow_executor="local")
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    run = manager._runs[context.task_id]
+    assert run.status == "failed"
+    stderr = capfd.readouterr().err
+    assert "selhal (spawn" in stderr
+    assert "bash nenalezen" in stderr
+    failed_events = [
+        params
+        for method, params in calls
+        if method == "run.adapter_event" and params["kind"] == "workflow_step" and params["status"] == "failed"
+    ]
+    assert failed_events
+    assert "bash nenalezen" in failed_events[0]["data"]["log_tail"]
+    assert not any(method == "task.add_agent_comment" for method, _ in calls)
+
+
 def test_local_executor_step_timeout(tmp_path: Path) -> None:
     worktree = tmp_path / "wt"
     _write_workflow_yaml(worktree, LOCAL_SLEEPING_WORKFLOW_YAML.format(timeout=1))

@@ -55,6 +55,16 @@ def log_internal_error(message: str, exc: BaseException, request_id: Any, method
     sys.stderr.flush()
 
 
+def log_unknown_method(request_id: Any, method: Any, params: Any) -> None:
+    sanitized_params = AgentJsonRpcService._sanitize_for_log(params)
+    context = [f"request_id={request_id!r}", f"method={method!r}"]
+    if sanitized_params not in (None, {}):
+        context.append(f"params={sanitized_params!r}")
+
+    sys.stderr.write(f"JSON-RPC method not found ({', '.join(context)})\n")
+    sys.stderr.flush()
+
+
 def http_status_for_agent_error(code: int) -> int:
     if code == 404:
         return 404
@@ -88,6 +98,7 @@ async def dispatch_jsonrpc_payload(
 
     entry = dispatch.get(method)
     if entry is None:
+        log_unknown_method(request_id, method, params)
         return JsonRpcDispatchResult(error_response(request_id, METHOD_NOT_FOUND, f"Method not found '{method}'"), 404)
 
     try:

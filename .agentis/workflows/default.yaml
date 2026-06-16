@@ -69,6 +69,14 @@ workflow:
           status: in_review
         - type: session_id
           valueFrom: .agentis/outputs/session-id
+    - name: code review
+      run: |
+        agentiscode --adapter opencode --model openai/gpt-5.5 --effort medium \
+          --run-id "$AGENTIS_RUN_ID"  \
+          --task-id "$AGENTIS_TASK_ID" \
+          --final-output "$OUTPUT_DIR/review-comment.md" \
+          --session-output "$OUTPUT_DIR/session-review-id" \
+         "udelej code review"
     - name: Commit changes
       run: |
         git add -A
