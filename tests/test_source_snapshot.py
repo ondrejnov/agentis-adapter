@@ -166,6 +166,32 @@ def test_rsync_path_uses_cygpath_on_windows(monkeypatch):
     assert source_snapshot._rsync_path(Path(r"C:\Ondrej\vscodium\vscode")) == "/c/Ondrej/vscodium/vscode"
 
 
+def test_rsync_path_prefers_cygpath_next_to_rsync(monkeypatch, tmp_path: Path):
+    # rsync z cygwinu mapuje disky jinak (/cygdrive/c) než Git Bash cygpath na PATH (/c),
+    # takže se musí použít cygpath ze stejného adresáře jako rsync.
+    bindir = tmp_path / "cygwin" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "rsync").write_text("", encoding="utf-8")
+    (bindir / "cygpath").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(source_snapshot, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        source_snapshot.shutil,
+        "which",
+        lambda command: str(bindir / "rsync") if command == "rsync" else "/usr/bin/cygpath",
+    )
+
+    def fake_run(args: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        assert args[0] == str(bindir / "cygpath")
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout="/cygdrive/c/Ondrej/vscodium/vscode\n", stderr=""
+        )
+
+    monkeypatch.setattr(source_snapshot.subprocess, "run", fake_run)
+
+    assert source_snapshot._rsync_path(Path(r"C:\Ondrej\vscodium\vscode")) == "/cygdrive/c/Ondrej/vscodium/vscode"
+
+
 def test_rsync_path_falls_back_to_drive_form_without_cygpath(monkeypatch):
     monkeypatch.setattr(source_snapshot, "_IS_WINDOWS", True)
     monkeypatch.setattr(source_snapshot.shutil, "which", lambda command: None)

@@ -13,9 +13,24 @@ from pathlib import Path
 
 
 _IS_WINDOWS = os.name == "nt"
-#: Reálný temp adresář napříč platformami — na Windows nesmí být magické `/tmp`,
-#: protože rsync z Git Bash/MSYS2 ho mapuje jinam než nativní Python.
-SNAPSHOT_ROOT = Path(tempfile.gettempdir()) / "agentis-source-snapshots"
+
+
+def _temp_root() -> Path:
+    """Reálný, na disk ukotvený temp adresář.
+
+    Na Windows běží adapter často z bash prostředí, kde `tempfile.gettempdir()`
+    vrátí magické `/tmp` (unixový mount bez písmene disku). Takovou cestu nativní
+    Python a rsync z Git Bash/cygwin mapují na *jiné* reálné adresáře, takže
+    Python založí parent jinde, než kam pak rsync zapisuje (`mkdir ... failed:
+    No such file or directory`). Proto cestu ukotvíme na disk (`resolve()` →
+    `C:\\tmp\\...`), aby ji obě strany viděly stejně. Na POSIX necháváme `/tmp`.
+    """
+
+    root = Path(tempfile.gettempdir())
+    return root.resolve() if _IS_WINDOWS else root
+
+
+SNAPSHOT_ROOT = _temp_root() / "agentis-source-snapshots"
 CHANGES_DIFF_NAME = ".changes.diff"
 _EXCLUDES = (".git/", CHANGES_DIFF_NAME, "__pycache__/", ".pytest_cache/", ".ruff_cache/")
 
@@ -203,21 +218,41 @@ def _rsync_restore_filtered(source_dir: Path, target_dir: Path) -> subprocess.Co
     return subprocess.run(args, capture_output=True, text=True, check=False)
 
 
+def _cygpath_tool() -> str | None:
+    """`cygpath` ze stejné sady nástrojů jako rsync.
+
+    Mount konvence je per-toolchain: Git Bash/MSYS2 mapuje disky na `/c/...`,
+    cygwin/cwRsync na `/cygdrive/c/...`. cygpath z *jiného* balíku než rsync by
+    vyrobil cestu, kterou rsync nenajde (`change_dir "/c/..." failed`). Hledáme
+    proto cygpath nejdřív vedle rsync executable a teprve pak v PATH.
+    """
+
+    rsync = shutil.which("rsync")
+    if rsync:
+        rsync_dir = Path(rsync).parent
+        for name in ("cygpath.exe", "cygpath"):
+            candidate = rsync_dir / name
+            if candidate.is_file():
+                return str(candidate)
+    return shutil.which("cygpath")
+
+
 def _rsync_path(path: Path) -> str:
     """Cesta do rsync argumentu, bezpečná i na Windows.
 
     Worktree má na Windows drive-letter cestu (`C:\\Ondrej\\...`); rsync build z
     Git Bash/MSYS2/cygwin čte `C:` jako `host:path` a spustí ssh
     (`Could not resolve hostname c`). Převedeme proto cestu na POSIX mount form,
-    kterou rsync chápe jako lokální — přes `cygpath -u` (zná správný prefix:
-    `/c/...` pro MSYS2/Git Bash, `/cygdrive/c/...` pro cygwin), s fallbackem na
-    Git Bash tvar `/<drive>/...`. Na POSIX vrací `str(path)` beze změny.
+    kterou rsync chápe jako lokální — přes `cygpath -u` z téhož balíku jako
+    rsync (`_cygpath_tool`), aby seděl prefix (`/c/...` MSYS2 vs `/cygdrive/c/...`
+    cygwin). Když cygpath chybí, fallbackneme na MSYS2 tvar `/<drive>/...`. Na
+    POSIX vrací `str(path)` beze změny.
     """
 
     if not _IS_WINDOWS:
         return str(path)
     raw = str(path)
-    cygpath = shutil.which("cygpath")
+    cygpath = _cygpath_tool()
     if cygpath:
         with suppress(OSError, subprocess.SubprocessError):
             completed = subprocess.run([cygpath, "-u", raw], capture_output=True, text=True, check=True)
