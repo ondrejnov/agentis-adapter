@@ -12,22 +12,96 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-_IS_WINDOWS = os.name == "nt"
+def _detect_windows() -> bool:
+    """Windows i v cygwin/MSYS Pythonu (Git Bash), kde `os.name == "posix"`."""
+
+    return os.name == "nt" or sys.platform.startswith(("cygwin", "msys"))
+
+
+_IS_WINDOWS = _detect_windows()
+
+
+def _cygpath_tool() -> str | None:
+    """`cygpath` ze stejné sady nástrojů jako rsync.
+
+    Mount konvence je per-toolchain: Git Bash/MSYS2 mapuje disky na `/c/...`,
+    cygwin/cwRsync na `/cygdrive/c/...`. cygpath z *jiného* balíku než rsync by
+    vyrobil cestu, kterou rsync nenajde (`change_dir "/c/..." failed`). Hledáme
+    proto cygpath nejdřív vedle rsync executable a teprve pak v PATH.
+    """
+
+    rsync = shutil.which("rsync")
+    if rsync:
+        rsync_dir = Path(rsync).parent
+        for name in ("cygpath.exe", "cygpath"):
+            candidate = rsync_dir / name
+            if candidate.is_file():
+                return str(candidate)
+    return shutil.which("cygpath")
+
+
+def _drive_mount_prefix() -> str:
+    """Mount prefix disků pro fallback, když chybí cygpath.
+
+    cygwin/cwRsync (běží vedle `cygwin1.dll`) mapuje disky na `/cygdrive/c`,
+    MSYS2/Git Bash (vedle `msys-2.0.dll`) na `/c`. Rozlišíme to podle DLL u
+    rsync executable; default je MSYS2 tvar.
+    """
+
+    rsync = shutil.which("rsync")
+    if rsync and (Path(rsync).parent / "cygwin1.dll").exists():
+        return "/cygdrive"
+    return ""
+
+
+def _cygpath(raw: str, flag: str) -> str | None:
+    """Převod cesty přes `cygpath` z toolchainu u rsync; None když chybí/selže."""
+
+    tool = _cygpath_tool()
+    if not tool:
+        return None
+    with suppress(OSError, subprocess.SubprocessError):
+        completed = subprocess.run([tool, flag, raw], capture_output=True, text=True, check=True)
+        converted = completed.stdout.strip()
+        if converted:
+            return converted
+    return None
+
+
+def _windows_drive_path(raw: str) -> str:
+    """Driveless temp (`/tmp`) ukotvený na konkrétní disk, s forward slashy.
+
+    Forward slashe držíme schválně: `Path` joiny i `cygpath -u` je zvládnou
+    čistě i pod cygwin/MSYS Pythonem (kde `Path` je POSIX a backslash by zůstal
+    literálem). Disk-qualified vstup (`C:\\Users\\...\\Temp`) jen znormalizujeme,
+    driveless přeženeme přes `cygpath -w`; bez cygpathu vrátíme beze změny.
+    """
+
+    if ntpath.splitdrive(raw)[0]:
+        return raw.replace("\\", "/")
+    win = _cygpath(raw, "-w")
+    if win and ntpath.splitdrive(win)[0]:
+        return win.replace("\\", "/")
+    return raw
 
 
 def _temp_root() -> Path:
-    """Reálný, na disk ukotvený temp adresář.
+    """Reálný, na disk ukotvený temp adresář — společný pro Python i rsync.
 
-    Na Windows běží adapter často z bash prostředí, kde `tempfile.gettempdir()`
-    vrátí magické `/tmp` (unixový mount bez písmene disku). Takovou cestu nativní
-    Python a rsync z Git Bash/cygwin mapují na *jiné* reálné adresáře, takže
-    Python založí parent jinde, než kam pak rsync zapisuje (`mkdir ... failed:
-    No such file or directory`). Proto cestu ukotvíme na disk (`resolve()` →
-    `C:\\tmp\\...`), aby ji obě strany viděly stejně. Na POSIX necháváme `/tmp`.
+    Na Windows běží adapter typicky z Git Bash, kde `tempfile.gettempdir()`
+    vrátí *driveless* `/tmp` (TMP=/tmp). Takovou cestu si nativní Python mapuje
+    na aktuální disk (`C:\\tmp`), kdežto rsync z cygwinu/MSYS na úplně jiný
+    reálný adresář (`C:\\cygwin64\\tmp` resp. `C:\\msys64\\tmp`) — Python tedy
+    založí parent jinde, než kam rsync zapisuje (`mkdir ... failed:
+    No such file or directory`). Cestu proto ukotvíme na konkrétní disk přes
+    `cygpath -w` ze stejné sady nástrojů jako rsync; obě strany ji pak (po
+    `_rsync_path`) vidí jako tentýž adresář. Na POSIX necháváme `/tmp`.
     """
 
-    root = Path(tempfile.gettempdir())
-    return root.resolve() if _IS_WINDOWS else root
+    raw = tempfile.gettempdir()
+    if not _IS_WINDOWS:
+        return Path(raw)
+    return Path(_windows_drive_path(raw))
 
 
 SNAPSHOT_ROOT = _temp_root() / "agentis-source-snapshots"
