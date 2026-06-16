@@ -202,10 +202,6 @@ class ClaudeCodeClient:
         env = {**os.environ, **cfg.env}
         args = cfg.build_args()
 
-        if not shutil.which("bash"):
-            yield ClaudeEvent("error", {"message": "bash nenalezeno v PATH pro lokální spuštění claude"})
-            return
-
         local_command = build_local_env_shell_command([cfg.command, *args], cwd=cfg.cwd)
         proc = await asyncio.create_subprocess_exec(
             "bash",
