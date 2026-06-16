@@ -237,6 +237,20 @@ def _cygpath_tool() -> str | None:
     return shutil.which("cygpath")
 
 
+def _drive_mount_prefix() -> str:
+    """Mount prefix disků pro fallback, když chybí cygpath.
+
+    cygwin/cwRsync (běží vedle `cygwin1.dll`) mapuje disky na `/cygdrive/c`,
+    MSYS2/Git Bash (vedle `msys-2.0.dll`) na `/c`. Rozlišíme to podle DLL u
+    rsync executable; default je MSYS2 tvar.
+    """
+
+    rsync = shutil.which("rsync")
+    if rsync and (Path(rsync).parent / "cygwin1.dll").exists():
+        return "/cygdrive"
+    return ""
+
+
 def _rsync_path(path: Path) -> str:
     """Cesta do rsync argumentu, bezpečná i na Windows.
 
@@ -245,8 +259,8 @@ def _rsync_path(path: Path) -> str:
     (`Could not resolve hostname c`). Převedeme proto cestu na POSIX mount form,
     kterou rsync chápe jako lokální — přes `cygpath -u` z téhož balíku jako
     rsync (`_cygpath_tool`), aby seděl prefix (`/c/...` MSYS2 vs `/cygdrive/c/...`
-    cygwin). Když cygpath chybí, fallbackneme na MSYS2 tvar `/<drive>/...`. Na
-    POSIX vrací `str(path)` beze změny.
+    cygwin). Když cygpath chybí, prefix uhádneme z DLL u rsync
+    (`_drive_mount_prefix`). Na POSIX vrací `str(path)` beze změny.
     """
 
     if not _IS_WINDOWS:
@@ -262,7 +276,7 @@ def _rsync_path(path: Path) -> str:
     drive, tail = ntpath.splitdrive(raw)
     tail = tail.replace("\\", "/")
     if len(drive) == 2 and drive.endswith(":"):
-        return f"/{drive[0].lower()}{tail}"
+        return f"{_drive_mount_prefix()}/{drive[0].lower()}{tail}"
     return raw.replace("\\", "/")
 
 

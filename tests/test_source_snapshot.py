@@ -200,6 +200,25 @@ def test_rsync_path_falls_back_to_drive_form_without_cygpath(monkeypatch):
     assert source_snapshot._rsync_path(Path(r"C:\Ondrej\vscodium\vscode")) == "/c/Ondrej/vscodium/vscode"
 
 
+def test_rsync_path_fallback_uses_cygdrive_for_cygwin_rsync(monkeypatch, tmp_path: Path):
+    # cwRsync/cygwin rsync nemusí mít cygpath, ale pozná se podle cygwin1.dll vedle
+    # rsync.exe → disky se mapují na /cygdrive/c, ne /c.
+    bindir = tmp_path / "cwrsync" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "rsync.exe").write_text("", encoding="utf-8")
+    (bindir / "cygwin1.dll").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(source_snapshot, "_IS_WINDOWS", True)
+    # cygpath nikde (ani vedle rsync, ani v PATH) → spadne do fallbacku.
+    monkeypatch.setattr(
+        source_snapshot.shutil,
+        "which",
+        lambda command: str(bindir / "rsync.exe") if command == "rsync" else None,
+    )
+
+    assert source_snapshot._rsync_path(Path(r"C:\Ondrej\vscodium\vscode")) == "/cygdrive/c/Ondrej/vscodium/vscode"
+
+
 def _read_simple_gitignore(source: Path) -> set[str]:
     gitignore = source / ".gitignore"
     if not gitignore.is_file():
