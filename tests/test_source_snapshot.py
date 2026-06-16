@@ -148,6 +148,32 @@ def test_restore_source_snapshot_uses_rsync_without_delete_excluded(monkeypatch,
     ]
 
 
+def test_rsync_path_unchanged_on_posix(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(source_snapshot, "_IS_WINDOWS", False)
+    assert source_snapshot._rsync_path(tmp_path / "worktree") == str(tmp_path / "worktree")
+
+
+def test_rsync_path_uses_cygpath_on_windows(monkeypatch):
+    monkeypatch.setattr(source_snapshot, "_IS_WINDOWS", True)
+    monkeypatch.setattr(source_snapshot.shutil, "which", lambda command: "/usr/bin/cygpath" if command == "cygpath" else None)
+
+    def fake_run(args: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        assert args[:2] == ["/usr/bin/cygpath", "-u"]
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="/c/Ondrej/vscodium/vscode\n", stderr="")
+
+    monkeypatch.setattr(source_snapshot.subprocess, "run", fake_run)
+
+    assert source_snapshot._rsync_path(Path(r"C:\Ondrej\vscodium\vscode")) == "/c/Ondrej/vscodium/vscode"
+
+
+def test_rsync_path_falls_back_to_drive_form_without_cygpath(monkeypatch):
+    monkeypatch.setattr(source_snapshot, "_IS_WINDOWS", True)
+    monkeypatch.setattr(source_snapshot.shutil, "which", lambda command: None)
+
+    # Bez cygpathu nesmí padnout do ssh host:path tvaru `C:...`.
+    assert source_snapshot._rsync_path(Path(r"C:\Ondrej\vscodium\vscode")) == "/c/Ondrej/vscodium/vscode"
+
+
 def _read_simple_gitignore(source: Path) -> set[str]:
     gitignore = source / ".gitignore"
     if not gitignore.is_file():

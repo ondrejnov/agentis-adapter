@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import ntpath
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
 
-SNAPSHOT_ROOT = Path("/tmp/agentis-source-snapshots")
+_IS_WINDOWS = os.name == "nt"
+#: Reálný temp adresář napříč platformami — na Windows nesmí být magické `/tmp`,
+#: protože rsync z Git Bash/MSYS2 ho mapuje jinam než nativní Python.
+SNAPSHOT_ROOT = Path(tempfile.gettempdir()) / "agentis-source-snapshots"
 CHANGES_DIFF_NAME = ".changes.diff"
 _EXCLUDES = (".git/", CHANGES_DIFF_NAME, "__pycache__/", ".pytest_cache/", ".ruff_cache/")
 
@@ -184,7 +191,7 @@ def _rsync_filtered(source_dir: Path, target_dir: Path) -> subprocess.CompletedP
     args = ["rsync", "-a", "--delete", "--delete-excluded", "--filter", ":- .gitignore"]
     for pattern in _EXCLUDES:
         args.extend(["--exclude", pattern])
-    args.extend([f"{source_dir}/", f"{target_dir}/"])
+    args.extend([f"{_rsync_path(source_dir)}/", f"{_rsync_path(target_dir)}/"])
     return subprocess.run(args, capture_output=True, text=True, check=False)
 
 
@@ -192,8 +199,36 @@ def _rsync_restore_filtered(source_dir: Path, target_dir: Path) -> subprocess.Co
     args = ["rsync", "-a", "--delete", "--filter", ":- .gitignore"]
     for pattern in _EXCLUDES:
         args.extend(["--exclude", pattern])
-    args.extend([f"{source_dir}/", f"{target_dir}/"])
+    args.extend([f"{_rsync_path(source_dir)}/", f"{_rsync_path(target_dir)}/"])
     return subprocess.run(args, capture_output=True, text=True, check=False)
+
+
+def _rsync_path(path: Path) -> str:
+    """Cesta do rsync argumentu, bezpečná i na Windows.
+
+    Worktree má na Windows drive-letter cestu (`C:\\Ondrej\\...`); rsync build z
+    Git Bash/MSYS2/cygwin čte `C:` jako `host:path` a spustí ssh
+    (`Could not resolve hostname c`). Převedeme proto cestu na POSIX mount form,
+    kterou rsync chápe jako lokální — přes `cygpath -u` (zná správný prefix:
+    `/c/...` pro MSYS2/Git Bash, `/cygdrive/c/...` pro cygwin), s fallbackem na
+    Git Bash tvar `/<drive>/...`. Na POSIX vrací `str(path)` beze změny.
+    """
+
+    if not _IS_WINDOWS:
+        return str(path)
+    raw = str(path)
+    cygpath = shutil.which("cygpath")
+    if cygpath:
+        with suppress(OSError, subprocess.SubprocessError):
+            completed = subprocess.run([cygpath, "-u", raw], capture_output=True, text=True, check=True)
+            converted = completed.stdout.strip()
+            if converted:
+                return converted
+    drive, tail = ntpath.splitdrive(raw)
+    tail = tail.replace("\\", "/")
+    if len(drive) == 2 and drive.endswith(":"):
+        return f"/{drive[0].lower()}{tail}"
+    return raw.replace("\\", "/")
 
 
 def _remove_existing_changes_diff(worktree_path: Path) -> None:
