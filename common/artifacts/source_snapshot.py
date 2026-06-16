@@ -292,37 +292,18 @@ def _rsync_restore_filtered(source_dir: Path, target_dir: Path) -> subprocess.Co
     return subprocess.run(args, capture_output=True, text=True, check=False)
 
 
-def _cygpath_tool() -> str | None:
-    """`cygpath` ze stejné sady nástrojů jako rsync.
+def _is_windows_path(raw: str) -> bool:
+    """Cesta, kterou rsync nepřečte bez převodu na mount tvar (`/c/…`).
 
-    Mount konvence je per-toolchain: Git Bash/MSYS2 mapuje disky na `/c/...`,
-    cygwin/cwRsync na `/cygdrive/c/...`. cygpath z *jiného* balíku než rsync by
-    vyrobil cestu, kterou rsync nenajde (`change_dir "/c/..." failed`). Hledáme
-    proto cygpath nejdřív vedle rsync executable a teprve pak v PATH.
+    Drive letter (`C:\\…`, `C:/…`) je jednoznačný signál nezávislý na `os.name`,
+    takže worktree v nativním Windows tvaru převedeme i pod cygwin/MSYS Pythonem
+    (kde `os.name == "posix"`). Backslash bez disku řešíme jen na Windows, ať na
+    POSIXu nemrvíme legitimní jména souborů.
     """
 
-    rsync = shutil.which("rsync")
-    if rsync:
-        rsync_dir = Path(rsync).parent
-        for name in ("cygpath.exe", "cygpath"):
-            candidate = rsync_dir / name
-            if candidate.is_file():
-                return str(candidate)
-    return shutil.which("cygpath")
-
-
-def _drive_mount_prefix() -> str:
-    """Mount prefix disků pro fallback, když chybí cygpath.
-
-    cygwin/cwRsync (běží vedle `cygwin1.dll`) mapuje disky na `/cygdrive/c`,
-    MSYS2/Git Bash (vedle `msys-2.0.dll`) na `/c`. Rozlišíme to podle DLL u
-    rsync executable; default je MSYS2 tvar.
-    """
-
-    rsync = shutil.which("rsync")
-    if rsync and (Path(rsync).parent / "cygwin1.dll").exists():
-        return "/cygdrive"
-    return ""
+    if ntpath.splitdrive(raw)[0]:
+        return True
+    return _IS_WINDOWS and "\\" in raw
 
 
 def _rsync_path(path: Path) -> str:
@@ -330,23 +311,19 @@ def _rsync_path(path: Path) -> str:
 
     Worktree má na Windows drive-letter cestu (`C:\\Ondrej\\...`); rsync build z
     Git Bash/MSYS2/cygwin čte `C:` jako `host:path` a spustí ssh
-    (`Could not resolve hostname c`). Převedeme proto cestu na POSIX mount form,
-    kterou rsync chápe jako lokální — přes `cygpath -u` z téhož balíku jako
-    rsync (`_cygpath_tool`), aby seděl prefix (`/c/...` MSYS2 vs `/cygdrive/c/...`
-    cygwin). Když cygpath chybí, prefix uhádneme z DLL u rsync
-    (`_drive_mount_prefix`). Na POSIX vrací `str(path)` beze změny.
+    (`Could not resolve hostname c`), nebo si ji MSYS sám přemapuje na špatný
+    mount. Převedeme proto cestu na POSIX mount form přes `cygpath -u` z téhož
+    balíku jako rsync (`_cygpath`), aby seděl prefix (`/c/...` MSYS2 vs
+    `/cygdrive/c/...` cygwin). Když cygpath chybí, prefix uhádneme z DLL u rsync
+    (`_drive_mount_prefix`). POSIX cesty (`/tmp/...`) vracíme beze změny.
     """
 
-    if not _IS_WINDOWS:
-        return str(path)
     raw = str(path)
-    cygpath = _cygpath_tool()
-    if cygpath:
-        with suppress(OSError, subprocess.SubprocessError):
-            completed = subprocess.run([cygpath, "-u", raw], capture_output=True, text=True, check=True)
-            converted = completed.stdout.strip()
-            if converted:
-                return converted
+    if not _is_windows_path(raw):
+        return raw
+    converted = _cygpath(raw, "-u")
+    if converted:
+        return converted
     drive, tail = ntpath.splitdrive(raw)
     tail = tail.replace("\\", "/")
     if len(drive) == 2 and drive.endswith(":"):
