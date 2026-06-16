@@ -5,6 +5,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from common.artifacts import source_snapshot
 
 
@@ -16,7 +18,9 @@ def test_snapshot_sources_uses_rsync_and_removes_previous_changes_diff(monkeypat
     calls: list[list[str]] = []
 
     monkeypatch.setattr(source_snapshot, "SNAPSHOT_ROOT", tmp_path / "snapshots")
-    monkeypatch.setattr(source_snapshot.shutil, "which", lambda command: "/usr/bin/rsync" if command == "rsync" else None)
+    monkeypatch.setattr(
+        source_snapshot.shutil, "which", lambda command: "/usr/bin/rsync" if command == "rsync" else None
+    )
 
     def fake_run(args: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -54,7 +58,9 @@ def test_snapshot_sources_uses_rsync_and_removes_previous_changes_diff(monkeypat
 
 def test_write_changes_diff_records_modified_and_created_files(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(source_snapshot, "SNAPSHOT_ROOT", tmp_path / "snapshots")
-    monkeypatch.setattr(source_snapshot.shutil, "which", lambda command: "/usr/bin/rsync" if command == "rsync" else None)
+    monkeypatch.setattr(
+        source_snapshot.shutil, "which", lambda command: "/usr/bin/rsync" if command == "rsync" else None
+    )
     snapshot = tmp_path / "snapshots" / "snap-1" / "source"
     worktree = tmp_path / "worktree"
     snapshot.mkdir(parents=True)
@@ -113,7 +119,9 @@ def test_restore_source_snapshot_uses_rsync_without_delete_excluded(monkeypatch,
     calls: list[list[str]] = []
 
     monkeypatch.setattr(source_snapshot, "SNAPSHOT_ROOT", tmp_path / "snapshots")
-    monkeypatch.setattr(source_snapshot.shutil, "which", lambda command: "/usr/bin/rsync" if command == "rsync" else None)
+    monkeypatch.setattr(
+        source_snapshot.shutil, "which", lambda command: "/usr/bin/rsync" if command == "rsync" else None
+    )
 
     def fake_run(args: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         calls.append(args)
@@ -155,7 +163,9 @@ def test_rsync_path_unchanged_on_posix(monkeypatch, tmp_path: Path):
 
 def test_rsync_path_uses_cygpath_on_windows(monkeypatch):
     monkeypatch.setattr(source_snapshot, "_IS_WINDOWS", True)
-    monkeypatch.setattr(source_snapshot.shutil, "which", lambda command: "/usr/bin/cygpath" if command == "cygpath" else None)
+    monkeypatch.setattr(
+        source_snapshot.shutil, "which", lambda command: "/usr/bin/cygpath" if command == "cygpath" else None
+    )
 
     def fake_run(args: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         assert args[:2] == ["/usr/bin/cygpath", "-u"]
@@ -198,6 +208,98 @@ def test_rsync_path_falls_back_to_drive_form_without_cygpath(monkeypatch):
 
     # Bez cygpathu nesmí padnout do ssh host:path tvaru `C:...`.
     assert source_snapshot._rsync_path(Path(r"C:\Ondrej\vscodium\vscode")) == "/c/Ondrej/vscodium/vscode"
+
+
+def test_detect_windows_covers_cygwin_and_msys(monkeypatch):
+    # Git Bash spouští adapter v cygwin/MSYS Pythonu, kde os.name == "posix".
+    monkeypatch.setattr(source_snapshot.os, "name", "posix")
+    for platform in ("msys", "cygwin"):
+        monkeypatch.setattr(source_snapshot.sys, "platform", platform)
+        assert source_snapshot._detect_windows() is True
+    monkeypatch.setattr(source_snapshot.sys, "platform", "linux")
+    assert source_snapshot._detect_windows() is False
+    monkeypatch.setattr(source_snapshot.os, "name", "nt")
+    assert source_snapshot._detect_windows() is True
+
+
+def test_rsync_path_converts_drive_form_even_when_not_flagged_windows(monkeypatch):
+    # Pod cygwin/MSYS Pythonem (_IS_WINDOWS klidně False) musí drive cesta worktree
+    # projít převodem, jinak ji MSYS přemapuje na špatný mount.
+    monkeypatch.setattr(source_snapshot, "_IS_WINDOWS", False)
+    monkeypatch.setattr(
+        source_snapshot.shutil, "which", lambda command: "/usr/bin/cygpath" if command == "cygpath" else None
+    )
+
+    def fake_run(args: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        assert args[:2] == ["/usr/bin/cygpath", "-u"]
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout="/cygdrive/c/Ondrej/vscodium/vscode\n", stderr=""
+        )
+
+    monkeypatch.setattr(source_snapshot.subprocess, "run", fake_run)
+
+    assert source_snapshot._rsync_path(Path(r"C:\Ondrej\vscodium\vscode")) == "/cygdrive/c/Ondrej/vscodium/vscode"
+
+
+def test_rsync_path_passes_through_posix_snapshot_root(monkeypatch):
+    # Snapshot root v POSIX tvaru (`/tmp/...`) se nesmí na Windows zmršit.
+    monkeypatch.setattr(source_snapshot, "_IS_WINDOWS", True)
+    path = "/tmp/agentis-source-snapshots/workflow-x/source"
+    assert source_snapshot._rsync_path(Path(path)) == path
+
+
+def test_windows_drive_path_anchors_driveless_via_cygpath(monkeypatch):
+    monkeypatch.setattr(
+        source_snapshot.shutil, "which", lambda command: "/usr/bin/cygpath" if command == "cygpath" else None
+    )
+
+    def fake_run(args: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        assert args[:2] == ["/usr/bin/cygpath", "-w"]
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="C:\\msys64\\tmp\n", stderr="")
+
+    monkeypatch.setattr(source_snapshot.subprocess, "run", fake_run)
+
+    assert source_snapshot._windows_drive_path("/tmp") == "C:/msys64/tmp"
+
+
+def test_windows_drive_path_normalizes_existing_drive(monkeypatch):
+    # Disk-qualified temp už cygpath nepotřebuje, jen sjednotí slashe.
+    monkeypatch.setattr(
+        source_snapshot.subprocess, "run", lambda *a, **k: pytest.fail("cygpath must not run for drive path")
+    )
+
+    assert source_snapshot._windows_drive_path(r"C:\Users\x\AppData\Local\Temp") == "C:/Users/x/AppData/Local/Temp"
+
+
+def test_windows_drive_path_uses_system_drive_without_cygpath(monkeypatch):
+    monkeypatch.setattr(source_snapshot.shutil, "which", lambda command: None)
+    for env_name in ("TEMP", "TMP", "LOCALAPPDATA", "USERPROFILE"):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setenv("SystemDrive", "D:")
+
+    assert source_snapshot._windows_drive_path("/tmp") == "D:/tmp"
+
+
+def test_rsync_path_ignores_foreign_path_cygpath_for_cygwin_rsync(monkeypatch, tmp_path: Path):
+    # Když je rsync z cwRsync/Cygwin a cygpath jen z Git Bash PATH, `/c/...` by rsync neviděl.
+    bindir = tmp_path / "cwrsync" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "rsync.exe").write_text("", encoding="utf-8")
+    (bindir / "cygwin1.dll").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(source_snapshot, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        source_snapshot.shutil,
+        "which",
+        lambda command: str(bindir / "rsync.exe") if command == "rsync" else "/usr/bin/cygpath",
+    )
+    monkeypatch.setattr(
+        source_snapshot.subprocess,
+        "run",
+        lambda *a, **k: pytest.fail("foreign cygpath must not run for rsync paths"),
+    )
+
+    assert source_snapshot._rsync_path(Path(r"C:\Ondrej\vscodium\vscode")) == "/cygdrive/c/Ondrej/vscodium/vscode"
 
 
 def test_rsync_path_fallback_uses_cygdrive_for_cygwin_rsync(monkeypatch, tmp_path: Path):

@@ -21,22 +21,36 @@ def _detect_windows() -> bool:
 _IS_WINDOWS = _detect_windows()
 
 
-def _cygpath_tool() -> str | None:
+def _rsync_dir() -> Path | None:
+    rsync = shutil.which("rsync")
+    if not rsync:
+        return None
+    return Path(rsync).parent
+
+
+def _rsync_uses_cygwin_mounts() -> bool:
+    rsync_dir = _rsync_dir()
+    return bool(rsync_dir and (rsync_dir / "cygwin1.dll").exists())
+
+
+def _cygpath_tool(*, for_rsync: bool) -> str | None:
     """`cygpath` ze stejné sady nástrojů jako rsync.
 
     Mount konvence je per-toolchain: Git Bash/MSYS2 mapuje disky na `/c/...`,
     cygwin/cwRsync na `/cygdrive/c/...`. cygpath z *jiného* balíku než rsync by
     vyrobil cestu, kterou rsync nenajde (`change_dir "/c/..." failed`). Hledáme
-    proto cygpath nejdřív vedle rsync executable a teprve pak v PATH.
+    proto cygpath nejdřív vedle rsync executable. U Cygwin/cwRsync bez vlastního
+    cygpathu nesmíme pro rsync argument použít cizí Git Bash cygpath z PATH.
     """
 
-    rsync = shutil.which("rsync")
-    if rsync:
-        rsync_dir = Path(rsync).parent
+    rsync_dir = _rsync_dir()
+    if rsync_dir:
         for name in ("cygpath.exe", "cygpath"):
             candidate = rsync_dir / name
             if candidate.is_file():
                 return str(candidate)
+        if for_rsync and _rsync_uses_cygwin_mounts():
+            return None
     return shutil.which("cygpath")
 
 
@@ -48,16 +62,15 @@ def _drive_mount_prefix() -> str:
     rsync executable; default je MSYS2 tvar.
     """
 
-    rsync = shutil.which("rsync")
-    if rsync and (Path(rsync).parent / "cygwin1.dll").exists():
+    if _rsync_uses_cygwin_mounts():
         return "/cygdrive"
     return ""
 
 
-def _cygpath(raw: str, flag: str) -> str | None:
+def _cygpath(raw: str, flag: str, *, for_rsync: bool = True) -> str | None:
     """Převod cesty přes `cygpath` z toolchainu u rsync; None když chybí/selže."""
 
-    tool = _cygpath_tool()
+    tool = _cygpath_tool(for_rsync=for_rsync)
     if not tool:
         return None
     with suppress(OSError, subprocess.SubprocessError):
@@ -74,14 +87,36 @@ def _windows_drive_path(raw: str) -> str:
     Forward slashe držíme schválně: `Path` joiny i `cygpath -u` je zvládnou
     čistě i pod cygwin/MSYS Pythonem (kde `Path` je POSIX a backslash by zůstal
     literálem). Disk-qualified vstup (`C:\\Users\\...\\Temp`) jen znormalizujeme,
-    driveless přeženeme přes `cygpath -w`; bez cygpathu vrátíme beze změny.
+    driveless přeženeme přes `cygpath -w`; bez cygpathu použijeme diskový fallback.
     """
 
     if ntpath.splitdrive(raw)[0]:
         return raw.replace("\\", "/")
-    win = _cygpath(raw, "-w")
+    win = _cygpath(raw, "-w", for_rsync=False)
     if win and ntpath.splitdrive(win)[0]:
         return win.replace("\\", "/")
+    return _windows_drive_path_fallback(raw)
+
+
+def _windows_drive_path_fallback(raw: str) -> str:
+    """Nouzově ukotví POSIX temp na Windows disk, když `cygpath -w` není k dispozici."""
+
+    candidates = [os.environ.get("TEMP"), os.environ.get("TMP")]
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        candidates.append(ntpath.join(local_app_data, "Temp"))
+    user_profile = os.environ.get("USERPROFILE")
+    if user_profile:
+        candidates.append(ntpath.join(user_profile, "AppData", "Local", "Temp"))
+
+    for candidate in candidates:
+        if candidate and ntpath.splitdrive(candidate)[0]:
+            return candidate.replace("\\", "/")
+
+    drive = os.environ.get("SystemDrive") or ntpath.splitdrive(os.getcwd())[0]
+    if len(drive) == 2 and drive.endswith(":"):
+        tail = raw.replace("\\", "/").lstrip("/") or "tmp"
+        return f"{drive}/{tail}"
     return raw
 
 
@@ -94,8 +129,8 @@ def _temp_root() -> Path:
     reálný adresář (`C:\\cygwin64\\tmp` resp. `C:\\msys64\\tmp`) — Python tedy
     založí parent jinde, než kam rsync zapisuje (`mkdir ... failed:
     No such file or directory`). Cestu proto ukotvíme na konkrétní disk přes
-    `cygpath -w` ze stejné sady nástrojů jako rsync; obě strany ji pak (po
-    `_rsync_path`) vidí jako tentýž adresář. Na POSIX necháváme `/tmp`.
+    `cygpath -w` nebo diskový fallback; obě strany ji pak (po `_rsync_path`) vidí
+    jako tentýž adresář. Na POSIX necháváme `/tmp`.
     """
 
     raw = tempfile.gettempdir()

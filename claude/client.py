@@ -25,7 +25,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shutil
 import signal
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence

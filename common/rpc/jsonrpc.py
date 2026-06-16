@@ -10,6 +10,7 @@ from common.models import (
     AddMessageParams,
     AgentExecutionContextPayload,
     AbortParams,
+    QuestionParams,
     RunEventPayload,
     RunStatePayload,
     StartParams,
@@ -21,8 +22,6 @@ from common.attachments import build_attachments_block, materialize_attachments,
 from common.rpc.session_registry import SessionContextRegistry
 from common.status import get_status_registry
 from common.workflow.manager import WorkflowBusyError, WorkflowManager
-
-
 
 
 class AgentJsonRpcException(Exception):
@@ -250,6 +249,9 @@ class AgentJsonRpcService:
             )
         )
         return self._start_workflow_run(run, context, params.message, message_attachments=params.attachments)
+
+    def question(self, params: QuestionParams) -> dict[str, Any]:
+        return {}
 
     def abort(self, params: AbortParams) -> dict[str, Any]:
         context = params.context

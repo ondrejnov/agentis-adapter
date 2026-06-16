@@ -44,7 +44,6 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
 
 import asyncio
-import os
 
 from claude.client import ClaudeCodeClient, ClaudeEvent, ClaudeRunConfig
 from opencode.runner import OpenCodeEvent, OpenCodeRunConfig, OpenCodeRunner
