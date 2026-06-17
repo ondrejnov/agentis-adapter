@@ -156,6 +156,75 @@ def test_restore_source_snapshot_uses_rsync_without_delete_excluded(monkeypatch,
     ]
 
 
+def test_snapshot_sources_prefers_robocopy_on_windows(monkeypatch, tmp_path: Path):
+    worktree = tmp_path / "worktree"
+    snapshot_dir = tmp_path / "snapshots" / "snap-1" / "source"
+    worktree.mkdir()
+    (worktree / ".gitignore").write_text(".env\n.venv/\n", encoding="utf-8")
+    stale_git = snapshot_dir / ".git"
+    stale_git.mkdir(parents=True)
+    stale_env = snapshot_dir / ".env"
+    stale_env.write_text("secret", encoding="utf-8")
+    stale_venv = snapshot_dir / ".venv"
+    stale_venv.mkdir()
+    old_diff = worktree / source_snapshot.CHANGES_DIFF_NAME
+    old_diff.write_text("previous diff", encoding="utf-8")
+    calls: list[list[str]] = []
+    envs: list[dict[str, str]] = []
+
+    monkeypatch.setattr(source_snapshot, "_IS_WINDOWS", True)
+    monkeypatch.setattr(source_snapshot, "SNAPSHOT_ROOT", tmp_path / "snapshots")
+    monkeypatch.setattr(source_snapshot, "_robocopy_path", lambda path: f"WIN:{path}")
+    monkeypatch.setattr(
+        source_snapshot.shutil,
+        "which",
+        lambda command: "C:\\Windows\\System32\\robocopy.exe"
+        if command == "robocopy"
+        else "/usr/bin/rsync"
+        if command == "rsync"
+        else None,
+    )
+    monkeypatch.setenv("MSYS_NO_PATHCONV", "0")
+
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        envs.append(kwargs["env"])
+        return subprocess.CompletedProcess(args=args, returncode=1, stdout="copied", stderr="")
+
+    monkeypatch.setattr(source_snapshot.subprocess, "run", fake_run)
+
+    result = source_snapshot.snapshot_sources(worktree, "snap-1")
+
+    assert result.status == "success"
+    assert not old_diff.exists()
+    assert not stale_git.exists()
+    assert not stale_env.exists()
+    assert not stale_venv.exists()
+    assert envs[0]["MSYS_NO_PATHCONV"] == "1"
+    assert calls == [
+        [
+            "robocopy",
+            f"WIN:{worktree}",
+            f"WIN:{snapshot_dir}",
+            "/MIR",
+            "/R:2",
+            "/W:1",
+            "/XJ",
+            "/NP",
+            "/XD",
+            ".git",
+            "__pycache__",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".env",
+            ".venv",
+            "/XF",
+            ".changes.diff",
+            ".env",
+        ]
+    ]
+
+
 def test_rsync_path_unchanged_on_posix(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(source_snapshot, "_IS_WINDOWS", False)
     assert source_snapshot._rsync_path(tmp_path / "worktree") == str(tmp_path / "worktree")
@@ -278,6 +347,51 @@ def test_windows_drive_path_uses_system_drive_without_cygpath(monkeypatch):
     monkeypatch.setenv("SystemDrive", "D:")
 
     assert source_snapshot._windows_drive_path("/tmp") == "D:/tmp"
+
+
+def test_windows_drive_path_converts_msys_drive_without_cygpath(monkeypatch):
+    monkeypatch.setattr(source_snapshot.shutil, "which", lambda command: None)
+
+    assert source_snapshot._windows_drive_path("/c/Ondrej/vscodium/vscode") == "C:/Ondrej/vscodium/vscode"
+    assert source_snapshot._windows_drive_path("/cygdrive/d/tmp") == "D:/tmp"
+
+
+def test_robocopy_path_keeps_native_windows_drive(monkeypatch):
+    monkeypatch.setattr(
+        source_snapshot.subprocess, "run", lambda *a, **k: pytest.fail("cygpath must not run for drive path")
+    )
+
+    assert source_snapshot._robocopy_path(Path(r"C:\Ondrej\vscodium\vscode")) == r"C:\Ondrej\vscodium\vscode"
+
+
+def test_robocopy_excludes_include_root_gitignore(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / ".gitignore").write_text(
+        "\n".join(
+            [
+                "# comment",
+                ".env",
+                ".venv/",
+                "dist",
+                "opencode-container/registry-secret.yaml",
+                "!keep.env",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    dir_excludes, file_excludes = source_snapshot._robocopy_excludes(source)
+
+    assert ".git" in dir_excludes
+    assert ".env" in dir_excludes
+    assert ".venv" in dir_excludes
+    assert "dist" in dir_excludes
+    assert ".changes.diff" in file_excludes
+    assert ".env" in file_excludes
+    assert "dist" in file_excludes
+    assert r"opencode-container\registry-secret.yaml" in file_excludes
+    assert "keep.env" not in file_excludes
 
 
 def test_rsync_path_ignores_foreign_path_cygpath_for_cygwin_rsync(monkeypatch, tmp_path: Path):

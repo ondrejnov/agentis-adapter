@@ -101,6 +101,16 @@ def _windows_drive_path(raw: str) -> str:
 def _windows_drive_path_fallback(raw: str) -> str:
     """Nouzově ukotví POSIX temp na Windows disk, když `cygpath -w` není k dispozici."""
 
+    normalized = raw.replace("\\", "/")
+    cygdrive_match = re.match(r"^/cygdrive/([A-Za-z])(?:/(.*))?$", normalized)
+    if cygdrive_match:
+        tail = cygdrive_match.group(2) or ""
+        return f"{cygdrive_match.group(1).upper()}:/{tail}"
+    msys_drive_match = re.match(r"^/([A-Za-z])(?:/(.*))?$", normalized)
+    if msys_drive_match:
+        tail = msys_drive_match.group(2) or ""
+        return f"{msys_drive_match.group(1).upper()}:/{tail}"
+
     candidates = [os.environ.get("TEMP"), os.environ.get("TMP")]
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
@@ -171,13 +181,14 @@ def snapshot_sources(worktree: str | Path, snapshot_key: str) -> SourceSnapshotR
     if not worktree_path.is_dir():
         return SourceSnapshotResult(status="skipped", reason="missing_worktree", **result_base)
     _remove_existing_changes_diff(worktree_path)
-    if shutil.which("rsync") is None:
-        return SourceSnapshotResult(status="skipped", reason="missing_rsync", **result_base)
+    copy_tool = _snapshot_copy_tool()
+    if copy_tool is None:
+        return SourceSnapshotResult(status="skipped", reason=_missing_copy_tool_reason(), **result_base)
 
     snapshot_dir.parent.mkdir(parents=True, exist_ok=True)
-    completed = _rsync_filtered(worktree_path, snapshot_dir)
-    if completed.returncode != 0:
-        reason = (completed.stderr or completed.stdout or "rsync failed").strip()
+    completed = _copy_filtered(copy_tool, worktree_path, snapshot_dir, delete_excluded=True)
+    if not _copy_succeeded(copy_tool, completed):
+        reason = _copy_failure_reason(copy_tool, completed)
         return SourceSnapshotResult(status="failed", reason=reason, **result_base)
     return SourceSnapshotResult(status="success", **result_base)
 
@@ -197,13 +208,14 @@ def write_changes_diff(worktree: str | Path, snapshot_key: str) -> SourceSnapsho
         return SourceSnapshotResult(status="skipped", reason="missing_worktree", **result_base)
     if not snapshot_dir.is_dir():
         return SourceSnapshotResult(status="skipped", reason="missing_snapshot", **result_base)
-    if shutil.which("rsync") is None:
-        return SourceSnapshotResult(status="skipped", reason="missing_rsync", **result_base)
+    copy_tool = _snapshot_copy_tool()
+    if copy_tool is None:
+        return SourceSnapshotResult(status="skipped", reason=_missing_copy_tool_reason(), **result_base)
 
     current_dir.parent.mkdir(parents=True, exist_ok=True)
-    rsync_completed = _rsync_filtered(worktree_path, current_dir)
-    if rsync_completed.returncode != 0:
-        reason = (rsync_completed.stderr or rsync_completed.stdout or "rsync failed").strip()
+    copy_completed = _copy_filtered(copy_tool, worktree_path, current_dir, delete_excluded=True)
+    if not _copy_succeeded(copy_tool, copy_completed):
+        reason = _copy_failure_reason(copy_tool, copy_completed)
         return SourceSnapshotResult(status="failed", reason=reason, **result_base)
 
     args = ["diff", "-ruN"]
@@ -232,13 +244,14 @@ def restore_source_snapshot(worktree: str | Path, snapshot_key: str) -> SourceSn
         return SourceSnapshotResult(status="skipped", reason="missing_worktree", **result_base)
     if not snapshot_dir.is_dir():
         return SourceSnapshotResult(status="skipped", reason="missing_snapshot", **result_base)
-    if shutil.which("rsync") is None:
-        return SourceSnapshotResult(status="skipped", reason="missing_rsync", **result_base)
+    copy_tool = _snapshot_copy_tool()
+    if copy_tool is None:
+        return SourceSnapshotResult(status="skipped", reason=_missing_copy_tool_reason(), **result_base)
 
-    completed = _rsync_restore_filtered(snapshot_dir, worktree_path)
+    completed = _copy_filtered(copy_tool, snapshot_dir, worktree_path, delete_excluded=False)
     _remove_existing_changes_diff(worktree_path)
-    if completed.returncode != 0:
-        reason = (completed.stderr or completed.stdout or "rsync failed").strip()
+    if not _copy_succeeded(copy_tool, completed):
+        reason = _copy_failure_reason(copy_tool, completed)
         return SourceSnapshotResult(status="failed", reason=reason, **result_base)
     return SourceSnapshotResult(status="success", **result_base)
 
@@ -311,20 +324,142 @@ def _snapshot_current_dir(snapshot_key: str) -> Path:
     return SNAPSHOT_ROOT / build_snapshot_key(snapshot_key) / "current"
 
 
-def _rsync_filtered(source_dir: Path, target_dir: Path) -> subprocess.CompletedProcess[str]:
-    args = ["rsync", "-a", "--delete", "--delete-excluded", "--filter", ":- .gitignore"]
+def _snapshot_copy_tool() -> str | None:
+    if _IS_WINDOWS and shutil.which("robocopy") is not None:
+        return "robocopy"
+    if shutil.which("rsync") is not None:
+        return "rsync"
+    return None
+
+
+def _missing_copy_tool_reason() -> str:
+    if _IS_WINDOWS:
+        return "missing_robocopy_or_rsync"
+    return "missing_rsync"
+
+
+def _copy_filtered(
+    copy_tool: str, source_dir: Path, target_dir: Path, *, delete_excluded: bool
+) -> subprocess.CompletedProcess[str]:
+    if copy_tool == "robocopy":
+        return _robocopy_filtered(source_dir, target_dir, delete_excluded=delete_excluded)
+    return _rsync_filtered(source_dir, target_dir, delete_excluded=delete_excluded)
+
+
+def _copy_succeeded(copy_tool: str, completed: subprocess.CompletedProcess[str]) -> bool:
+    if copy_tool == "robocopy":
+        return 0 <= completed.returncode < 8
+    return completed.returncode == 0
+
+
+def _copy_failure_reason(copy_tool: str, completed: subprocess.CompletedProcess[str]) -> str:
+    fallback = f"{copy_tool} failed"
+    return (completed.stderr or completed.stdout or fallback).strip()
+
+
+def _rsync_filtered(source_dir: Path, target_dir: Path, *, delete_excluded: bool) -> subprocess.CompletedProcess[str]:
+    args = ["rsync", "-a", "--delete"]
+    if delete_excluded:
+        args.append("--delete-excluded")
+    args.extend(["--filter", ":- .gitignore"])
     for pattern in _EXCLUDES:
         args.extend(["--exclude", pattern])
     args.extend([f"{_rsync_path(source_dir)}/", f"{_rsync_path(target_dir)}/"])
     return subprocess.run(args, capture_output=True, text=True, check=False)
 
 
-def _rsync_restore_filtered(source_dir: Path, target_dir: Path) -> subprocess.CompletedProcess[str]:
-    args = ["rsync", "-a", "--delete", "--filter", ":- .gitignore"]
-    for pattern in _EXCLUDES:
-        args.extend(["--exclude", pattern])
-    args.extend([f"{_rsync_path(source_dir)}/", f"{_rsync_path(target_dir)}/"])
-    return subprocess.run(args, capture_output=True, text=True, check=False)
+def _robocopy_filtered(
+    source_dir: Path, target_dir: Path, *, delete_excluded: bool
+) -> subprocess.CompletedProcess[str]:
+    dir_excludes, file_excludes = _robocopy_excludes(source_dir)
+    if delete_excluded:
+        _remove_robocopy_excluded_paths(target_dir, dir_excludes, file_excludes)
+
+    args = [
+        "robocopy",
+        _robocopy_path(source_dir),
+        _robocopy_path(target_dir),
+        "/MIR",
+        "/R:2",
+        "/W:1",
+        "/XJ",
+        "/NP",
+    ]
+    if dir_excludes:
+        args.extend(["/XD", *dir_excludes])
+    if file_excludes:
+        args.extend(["/XF", *file_excludes])
+    return subprocess.run(args, capture_output=True, text=True, check=False, env=_native_windows_tool_env())
+
+
+def _robocopy_path(path: Path) -> str:
+    return _windows_drive_path(str(path)).replace("/", "\\")
+
+
+def _native_windows_tool_env() -> dict[str, str]:
+    return {**os.environ, "MSYS_NO_PATHCONV": "1"}
+
+
+def _robocopy_excludes(source_dir: Path) -> tuple[list[str], list[str]]:
+    dir_excludes = [pattern.rstrip("/") for pattern in _EXCLUDES if pattern.endswith("/")]
+    file_excludes = [pattern for pattern in _EXCLUDES if not pattern.endswith("/")]
+    gitignore = source_dir / ".gitignore"
+    if gitignore.is_file():
+        try:
+            lines = gitignore.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            sys.stderr.write(f"[source-snapshot] failed to read gitignore excludes {gitignore}: {exc}\n")
+            lines = []
+        for line in lines:
+            parsed = _robocopy_gitignore_exclude(line)
+            if parsed is None:
+                continue
+            kind, pattern = parsed
+            if kind in ("dir", "both"):
+                dir_excludes.append(pattern)
+            if kind in ("file", "both"):
+                file_excludes.append(pattern)
+    return _dedupe(dir_excludes), _dedupe(file_excludes)
+
+
+def _robocopy_gitignore_exclude(line: str) -> tuple[str, str] | None:
+    pattern = line.strip()
+    if not pattern or pattern.startswith("#") or pattern.startswith("!"):
+        return None
+    if pattern.startswith((r"\#", r"\!")):
+        pattern = pattern[1:]
+
+    is_dir = pattern.endswith("/")
+    pattern = pattern.strip("/")
+    if not pattern:
+        return None
+
+    pattern = pattern.replace("/", "\\")
+    if is_dir:
+        return "dir", pattern
+    if "\\" not in pattern:
+        return "both", pattern
+    return "file", pattern
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+def _remove_robocopy_excluded_paths(target_dir: Path, dir_excludes: list[str], file_excludes: list[str]) -> None:
+    for pattern in _dedupe([*dir_excludes, *file_excludes]):
+        if any(wildcard in pattern for wildcard in "*?"):
+            continue
+        path = target_dir / pattern.replace("\\", "/")
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            sys.stderr.write(f"[source-snapshot] failed to remove excluded path {path}: {exc}\n")
 
 
 def _is_windows_path(raw: str) -> bool:
