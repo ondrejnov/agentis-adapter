@@ -765,11 +765,17 @@ def _restore_metadata(
     mtime_ns = entry["mtime_ns"]
     if not isinstance(mode, int) or not isinstance(mtime_ns, int):
         raise SnapshotError("Snapshot manifest metadata is invalid")
+    filesystem_path = _filesystem_path(path)
     try:
-        os.chmod(_filesystem_path(path), mode, follow_symlinks=follow_symlinks)
+        os.chmod(filesystem_path, mode, follow_symlinks=follow_symlinks)
     except (NotImplementedError, PermissionError):
         pass
-    os.utime(_filesystem_path(path), ns=(mtime_ns, mtime_ns), follow_symlinks=follow_symlinks)
+    try:
+        os.utime(filesystem_path, ns=(mtime_ns, mtime_ns), follow_symlinks=follow_symlinks)
+    except NotImplementedError:
+        if not follow_symlinks and _is_symlink(path):
+            return
+        os.utime(filesystem_path, ns=(mtime_ns, mtime_ns))
 
 
 def _write_manifest(path: Path, manifest: dict[str, object]) -> None:

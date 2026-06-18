@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from common.artifacts import source_snapshot
+from common.artifacts import source_snapshot, work_snapshot
 
 
 def test_snapshot_sources_uses_native_snapshot_and_removes_previous_changes_diff(monkeypatch, tmp_path: Path):
@@ -113,6 +113,26 @@ def test_restore_source_snapshot_restores_snapshot_and_preserves_ignored(monkeyp
     assert not (worktree / "extra.txt").exists()
     assert (worktree / "ignored.log").read_text(encoding="utf-8") == "ignored\n"
     assert not changes_diff.exists()
+
+
+def test_restore_metadata_falls_back_when_utime_follow_symlinks_is_unavailable(monkeypatch, tmp_path: Path):
+    path = tmp_path / "tracked.txt"
+    path.write_text("tracked\n", encoding="utf-8")
+    entry: dict[str, object] = {"mode": path.stat().st_mode, "mtime_ns": path.stat().st_mtime_ns}
+    calls: list[bool | None] = []
+    original_utime = work_snapshot.os.utime
+
+    def fake_utime(path_arg, *args, **kwargs):
+        calls.append(kwargs.get("follow_symlinks"))
+        if kwargs.get("follow_symlinks") is False:
+            raise NotImplementedError("follow_symlinks unavailable on this platform")
+        return original_utime(path_arg, *args, **kwargs)
+
+    monkeypatch.setattr(work_snapshot.os, "utime", fake_utime)
+
+    work_snapshot._restore_metadata(path, entry, follow_symlinks=False)
+
+    assert calls == [False, None]
 
 
 def test_snapshot_sources_skips_missing_worktree(monkeypatch, tmp_path: Path):
