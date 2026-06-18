@@ -321,13 +321,14 @@ async def _run(
             return 130 if terminating_signal["signum"] == signal.SIGINT else 143
         raise
     finally:
+        interrupted = bool(terminating_signal)
         for signum in installed_handlers:
             with contextlib.suppress(Exception):
                 loop.remove_signal_handler(signum)
         renderer.finish()
-        if recorder is not None:
+        if recorder is not None and not interrupted:
             recorder.finish()
-        if telemetry is not None:
+        if telemetry is not None and not interrupted:
             telemetry.finish()
     return exit_code
 

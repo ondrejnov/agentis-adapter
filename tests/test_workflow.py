@@ -24,7 +24,14 @@ from common.models import (
 from common.rpc.jsonrpc import AgentJsonRpcException, AgentJsonRpcService
 from common.workflow.local_runtime import LocalProcessRunner
 from common.workflow.manager import WorkflowBusyError, WorkflowManager
-from common.workflow.runtime import StepResult, build_bash_wrapper, build_job_manifest, job_labels, job_name
+from common.workflow.runtime import (
+    KubectlJobRunner,
+    StepResult,
+    build_bash_wrapper,
+    build_job_manifest,
+    job_labels,
+    job_name,
+)
 from common.workflow.schema import (
     COMMENT_STATUS_ALIASES,
     PROJECT_WORKFLOW_FILE_RELPATH,
@@ -1664,6 +1671,47 @@ def test_abort_deletes_jobs_by_labels_without_session_id(tmp_path: Path) -> None
     namespace, labels = runner.deleted[0]
     assert labels == {"agentis.task_id": "task-77", "agentis.run_id": "run-12345678"}
     assert namespace
+
+
+def test_kubernetes_abort_force_deletes_pods_without_waiting(tmp_path: Path) -> None:
+    class RecordingKubectlRunner(KubectlJobRunner):
+        def __init__(self) -> None:
+            super().__init__(_settings(tmp_path))
+            self.commands: list[tuple[str, ...]] = []
+
+        def _run(self, *args: str, stdin: str | None = None, timeout: float = 60.0) -> str:
+            self.commands.append(args)
+            return "deleted"
+
+    runner = RecordingKubectlRunner()
+
+    result = runner.abort("task-77", {"agentis.task_id": "task-77", "agentis.run_id": "run-12345678"})
+
+    assert result == "jobs: deleted; pods: deleted"
+    assert runner.commands == [
+        (
+            "delete",
+            "job",
+            "-n",
+            "task-77",
+            "-l",
+            "agentis.task_id=task-77,agentis.run_id=run-12345678",
+            "--ignore-not-found",
+            "--wait=false",
+        ),
+        (
+            "delete",
+            "pod",
+            "-n",
+            "task-77",
+            "-l",
+            "agentis.task_id=task-77,agentis.run_id=run-12345678",
+            "--ignore-not-found",
+            "--grace-period=0",
+            "--force",
+            "--wait=false",
+        ),
+    ]
 
 
 # ---------------------------------------------------------------------------

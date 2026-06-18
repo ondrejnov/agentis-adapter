@@ -200,7 +200,9 @@ class KubectlJobRunner:
         return StepResult(status=status, log_tail=log_tail)
 
     def abort(self, namespace: str, labels: dict[str, str]) -> str:
-        return self.delete_jobs_by_labels(namespace, labels)
+        jobs = self.delete_jobs_by_labels(namespace, labels)
+        pods = self.delete_pods_by_labels(namespace, labels)
+        return f"jobs: {jobs}; pods: {pods}".strip()
 
     def delete_namespace(self, namespace: str) -> None:
         # --wait=false: poslední Job workflow běžel v mazaném namespace; na finalizery nečekáme.
@@ -274,7 +276,31 @@ class KubectlJobRunner:
 
     def delete_jobs_by_labels(self, namespace: str, labels: dict[str, str]) -> str:
         selector = ",".join(f"{key}={value}" for key, value in labels.items())
-        return self._run("delete", "job", "-n", namespace, "-l", selector, "--ignore-not-found").strip()
+        return self._run(
+            "delete",
+            "job",
+            "-n",
+            namespace,
+            "-l",
+            selector,
+            "--ignore-not-found",
+            "--wait=false",
+        ).strip()
+
+    def delete_pods_by_labels(self, namespace: str, labels: dict[str, str]) -> str:
+        selector = ",".join(f"{key}={value}" for key, value in labels.items())
+        return self._run(
+            "delete",
+            "pod",
+            "-n",
+            namespace,
+            "-l",
+            selector,
+            "--ignore-not-found",
+            "--grace-period=0",
+            "--force",
+            "--wait=false",
+        ).strip()
 
     def has_active_jobs(self, namespace: str, task_label: str) -> bool:
         try:
