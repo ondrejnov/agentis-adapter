@@ -22,6 +22,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
+from common.artifacts.screenshots import collect_screenshot_images
 from common.artifacts.source_snapshot import (
     build_snapshot_key,
     changes_diff_attachment,
@@ -213,9 +214,7 @@ class WorkflowManager:
             executor=executor,
             runner=runner,
             snapshot_key=(
-                None
-                if workflow_name
-                else build_snapshot_key("workflow", context.run_id, context.task_id, attempt_id)
+                None if workflow_name else build_snapshot_key("workflow", context.run_id, context.task_id, attempt_id)
             ),
         )
         with self._lock:
@@ -716,6 +715,7 @@ class WorkflowManager:
                     "run_id": run.context.run_id,
                     "body": comment_body,
                     "attachments": attachments,
+                    "images": collect_screenshot_images(run.worktree),
                     "artifacts": artifacts,
                     "status": comment_status,
                     "comment_type": "primary",
