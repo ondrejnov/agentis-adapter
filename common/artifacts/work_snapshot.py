@@ -807,7 +807,7 @@ def _manifest_entries(manifest: dict[str, object]) -> list[dict[str, object]]:
 
 def _resolve_workers(workers: int | None) -> int:
     if workers is None:
-        return min(32, (os.cpu_count() or 1) + 4)
+        return min(32, (os.cpu_count() or 1) + 1)
     if workers < 1:
         raise SnapshotError("Worker count must be at least 1")
     return workers
@@ -858,7 +858,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument(
         "--workers",
         type=int,
-        help="parallel copy worker count; default is min(32, os.cpu_count() + 4)",
+        help="parallel copy worker count; default is min(32, os.cpu_count() + 1)",
     )
 
     list_command = subparsers.add_parser("list", help="list snapshots for a directory")
@@ -872,7 +872,7 @@ def build_parser() -> argparse.ArgumentParser:
     restore.add_argument(
         "--workers",
         type=int,
-        help="parallel copy worker count; default is min(32, os.cpu_count() + 4)",
+        help="parallel copy worker count; default is min(32, os.cpu_count() + 1)",
     )
     restore.add_argument(
         "--delete",

@@ -5,6 +5,12 @@ from pathlib import Path
 from common.artifacts import source_snapshot, work_snapshot
 
 
+def _changes_diff_path(worktree: Path) -> Path:
+    path = worktree / source_snapshot.CHANGES_DIFF_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def test_snapshot_sources_uses_native_snapshot_and_removes_previous_changes_diff(monkeypatch, tmp_path: Path):
     worktree = tmp_path / "worktree"
     worktree.mkdir()
@@ -13,7 +19,7 @@ def test_snapshot_sources_uses_native_snapshot_and_removes_previous_changes_diff
     (worktree / "ignored.log").write_text("ignored\n", encoding="utf-8")
     (worktree / ".git").mkdir()
     (worktree / ".git" / "config").write_text("[core]\n", encoding="utf-8")
-    old_diff = worktree / source_snapshot.CHANGES_DIFF_NAME
+    old_diff = _changes_diff_path(worktree)
     old_diff.write_text("previous diff", encoding="utf-8")
 
     monkeypatch.setattr(source_snapshot, "SNAPSHOT_ROOT", tmp_path / "snapshots")
@@ -60,12 +66,14 @@ def test_write_changes_diff_records_modified_and_created_files(monkeypatch, tmp_
     (worktree / "changed.txt").write_text("new\n", encoding="utf-8")
     (worktree / "created.txt").write_text("created\n", encoding="utf-8")
     (worktree / "ignored.log").write_text("ignored\n", encoding="utf-8")
-    (worktree / source_snapshot.CHANGES_DIFF_NAME).write_text("previous diff must be ignored\n", encoding="utf-8")
+    diff_path = _changes_diff_path(worktree)
+    diff_path.write_text("previous diff must be ignored\n", encoding="utf-8")
 
     result = source_snapshot.write_changes_diff(worktree, "snap-1")
 
     assert result.status == "success"
-    diff = (worktree / source_snapshot.CHANGES_DIFF_NAME).read_text(encoding="utf-8")
+    assert diff_path == worktree / ".agentis" / ".local.changes"
+    diff = diff_path.read_text(encoding="utf-8")
     assert "-old" in diff
     assert "+new" in diff
     assert "created.txt" in diff
@@ -103,7 +111,7 @@ def test_restore_source_snapshot_restores_snapshot_and_preserves_ignored(monkeyp
     (worktree / "tracked.txt").write_text("after\n", encoding="utf-8")
     (worktree / "extra.txt").write_text("extra\n", encoding="utf-8")
     (worktree / "ignored.log").write_text("ignored\n", encoding="utf-8")
-    changes_diff = worktree / source_snapshot.CHANGES_DIFF_NAME
+    changes_diff = _changes_diff_path(worktree)
     changes_diff.write_text("diff", encoding="utf-8")
 
     result = source_snapshot.restore_source_snapshot(worktree, "snap-1")
@@ -135,12 +143,78 @@ def test_restore_metadata_falls_back_when_utime_follow_symlinks_is_unavailable(m
     assert calls == [False, None]
 
 
+def test_copy2_uses_reflink_clone_when_available(monkeypatch, tmp_path: Path):
+    source = tmp_path / "source.txt"
+    target = tmp_path / "target.txt"
+    source.write_text("source\n", encoding="utf-8")
+    clone_calls: list[tuple[Path, Path]] = []
+
+    def fake_clone_file(source_arg: Path, target_arg: Path) -> bool:
+        clone_calls.append((source_arg, target_arg))
+        target_arg.write_bytes(source_arg.read_bytes())
+        return True
+
+    def fail_copy2(*args, **kwargs):
+        raise AssertionError("fallback copy should not be used when reflink clone succeeds")
+
+    monkeypatch.setattr(work_snapshot, "_clone_file", fake_clone_file)
+    monkeypatch.setattr(work_snapshot.shutil, "copy2", fail_copy2)
+
+    work_snapshot._copy2(source, target)
+
+    assert clone_calls == [(source, target)]
+    assert target.read_text(encoding="utf-8") == "source\n"
+
+
+def test_copy2_falls_back_when_reflink_clone_is_unavailable(monkeypatch, tmp_path: Path):
+    source = tmp_path / "source.txt"
+    target = tmp_path / "target.txt"
+    source.write_text("source\n", encoding="utf-8")
+    copy_calls: list[tuple[str, str, bool]] = []
+
+    def fake_copy2(source_arg: str, target_arg: str, *, follow_symlinks: bool) -> None:
+        copy_calls.append((source_arg, target_arg, follow_symlinks))
+        Path(target_arg).write_bytes(Path(source_arg).read_bytes())
+
+    monkeypatch.setattr(work_snapshot, "_clone_file", lambda _source, _target: False)
+    monkeypatch.setattr(work_snapshot.shutil, "copy2", fake_copy2)
+
+    work_snapshot._copy2(source, target)
+
+    assert copy_calls == [(str(source), str(target), False)]
+    assert target.read_text(encoding="utf-8") == "source\n"
+
+
 def test_snapshot_sources_skips_missing_worktree(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(source_snapshot, "SNAPSHOT_ROOT", tmp_path / "snapshots")
 
     result = source_snapshot.snapshot_sources(tmp_path / "missing", "snap-1")
     assert result.status == "skipped"
     assert result.reason == "missing_worktree"
+
+
+def test_source_snapshots_can_be_disabled_by_project_settings(monkeypatch, tmp_path: Path):
+    worktree = tmp_path / "worktree"
+    settings_dir = worktree / ".agentis"
+    settings_dir.mkdir(parents=True)
+    (settings_dir / "settings.json").write_text('{"snapshots": false}\n', encoding="utf-8")
+    (worktree / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    old_diff = _changes_diff_path(worktree)
+    old_diff.write_text("previous diff", encoding="utf-8")
+    monkeypatch.setattr(source_snapshot, "SNAPSHOT_ROOT", tmp_path / "snapshots")
+
+    snapshot_result = source_snapshot.snapshot_sources(worktree, "snap-1")
+    diff_result = source_snapshot.write_changes_diff(worktree, "snap-1")
+    restore_result = source_snapshot.restore_source_snapshot(worktree, "snap-1")
+
+    assert snapshot_result.status == "skipped"
+    assert snapshot_result.reason == "disabled_by_project_settings"
+    assert diff_result.status == "skipped"
+    assert diff_result.reason == "disabled_by_project_settings"
+    assert restore_result.status == "skipped"
+    assert restore_result.reason == "disabled_by_project_settings"
+    assert not old_diff.exists()
+    assert not (tmp_path / "snapshots").exists()
 
 
 def test_build_snapshot_key_sanitizes_parts():

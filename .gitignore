@@ -4,7 +4,7 @@ __pycache__/
 .ruff_cache/
 .env
 .screenshots
-.changes.diff
+.agentis/.local.changes
 .code-review-graph
 dist
 opencode-container/registry-secret.yaml

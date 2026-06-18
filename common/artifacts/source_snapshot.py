@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -9,12 +10,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict
+
 from common.artifacts import work_snapshot
 
 SNAPSHOT_ROOT = Path(tempfile.gettempdir()) / "agentis-source-snapshots"
-CHANGES_DIFF_NAME = ".changes.diff"
-_DIFF_EXCLUDES = (CHANGES_DIFF_NAME, "__pycache__", ".pytest_cache", ".ruff_cache")
+CHANGES_DIFF_RELPATH = Path(".agentis/.local.changes")
+CHANGES_DIFF_NAME = CHANGES_DIFF_RELPATH.as_posix()
+PROJECT_SETTINGS_RELPATH = Path(".agentis/settings.json")
+_DIFF_EXCLUDES = (CHANGES_DIFF_RELPATH.name, "__pycache__", ".pytest_cache", ".ruff_cache")
 _MAX_SNAPSHOT_KEY_DIR_LENGTH = 48
+
+
+class ProjectSettings(BaseModel):
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    snapshots: bool = True
 
 
 @dataclass(frozen=True)
@@ -43,6 +54,13 @@ def snapshot_sources(worktree: str | Path, snapshot_key: str) -> SourceSnapshotR
     }
     if not worktree_path.is_dir():
         return SourceSnapshotResult(status="skipped", reason="missing_worktree", **result_base)
+    try:
+        source_snapshots_enabled = _source_snapshots_enabled(worktree_path)
+    except Exception as exc:  # noqa: BLE001
+        return SourceSnapshotResult(status="failed", reason=str(exc), **result_base)
+    if not source_snapshots_enabled:
+        _remove_existing_changes_diff(worktree_path)
+        return SourceSnapshotResult(status="skipped", reason="disabled_by_project_settings", **result_base)
 
     _remove_existing_changes_diff(worktree_path)
     work_snapshot.remove_tree(store_dir, ignore_errors=True)
@@ -67,6 +85,13 @@ def write_changes_diff(worktree: str | Path, snapshot_key: str) -> SourceSnapsho
     }
     if not worktree_path.is_dir():
         return SourceSnapshotResult(status="skipped", reason="missing_worktree", **result_base)
+    try:
+        source_snapshots_enabled = _source_snapshots_enabled(worktree_path)
+    except Exception as exc:  # noqa: BLE001
+        return SourceSnapshotResult(status="failed", reason=str(exc), **result_base)
+    if not source_snapshots_enabled:
+        _remove_existing_changes_diff(worktree_path)
+        return SourceSnapshotResult(status="skipped", reason="disabled_by_project_settings", **result_base)
 
     try:
         snapshot_dir = _latest_snapshot_dir(worktree_path, store_dir)
@@ -93,6 +118,7 @@ def write_changes_diff(worktree: str | Path, snapshot_key: str) -> SourceSnapsho
         return SourceSnapshotResult(status="failed", reason=reason, **result_base)
 
     diff_content = _normalize_changes_diff_paths(completed.stdout, snapshot_dir / "files", current_dir / "files")
+    diff_path.parent.mkdir(parents=True, exist_ok=True)
     diff_path.write_text(diff_content, encoding="utf-8")
     return SourceSnapshotResult(status="success", snapshot_dir=str(snapshot_dir), **_without_snapshot_dir(result_base))
 
@@ -107,6 +133,12 @@ def restore_source_snapshot(worktree: str | Path, snapshot_key: str) -> SourceSn
     }
     if not worktree_path.is_dir():
         return SourceSnapshotResult(status="skipped", reason="missing_worktree", **result_base)
+    try:
+        source_snapshots_enabled = _source_snapshots_enabled(worktree_path)
+    except Exception as exc:  # noqa: BLE001
+        return SourceSnapshotResult(status="failed", reason=str(exc), **result_base)
+    if not source_snapshots_enabled:
+        return SourceSnapshotResult(status="skipped", reason="disabled_by_project_settings", **result_base)
 
     try:
         snapshot_dir = _latest_snapshot_dir(worktree_path, store_dir)
@@ -203,6 +235,15 @@ def _snapshot_key_dir(snapshot_key: str) -> str:
     return f"{prefix}-{digest}" if prefix else digest
 
 
+def _source_snapshots_enabled(worktree_path: Path) -> bool:
+    settings_path = worktree_path / PROJECT_SETTINGS_RELPATH
+    if not settings_path.is_file():
+        return True
+
+    settings = ProjectSettings.model_validate(json.loads(settings_path.read_text(encoding="utf-8")))
+    return settings.snapshots
+
+
 def _latest_snapshot_dir(worktree_path: Path, store_dir: Path) -> Path | None:
     snapshots = work_snapshot.list_snapshots(worktree_path, store=store_dir)
     if not snapshots:
@@ -264,12 +305,19 @@ def _relative_snapshot_path(path: str, bases: tuple[Path, Path]) -> str | None:
 
 
 def _remove_existing_changes_diff(worktree_path: Path) -> None:
+    diff_path = worktree_path / CHANGES_DIFF_NAME
     try:
-        (worktree_path / CHANGES_DIFF_NAME).unlink()
+        diff_path.unlink()
     except FileNotFoundError:
         return
     except OSError as exc:
         sys.stderr.write(f"[source-snapshot] failed to remove existing {CHANGES_DIFF_NAME}: {exc}\n")
+        return
+
+    try:
+        diff_path.parent.rmdir()
+    except OSError:
+        return
 
 
 def _log_result(label: str, result: SourceSnapshotResult) -> None:

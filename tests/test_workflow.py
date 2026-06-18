@@ -601,7 +601,9 @@ def test_bash_wrapper_sets_pipefail_and_sources_env_files() -> None:
 def test_job_manifest_generation(tmp_path: Path) -> None:
     _write_workflow(tmp_path)
     workflow = load_workflow_file(tmp_path / WORKFLOW_FILE_RELPATH, _values(tmp_path))
-    labels = job_labels(task_id="task-77", run_id="run-12345678", attempt_id="abcd1234", step_index=1, step_name="Create pull request")
+    labels = job_labels(
+        task_id="task-77", run_id="run-12345678", attempt_id="abcd1234", step_index=1, step_name="Create pull request"
+    )
     name = job_name("run-12345678", "abcd1234", 1, "Create pull request")
     manifest = build_job_manifest(
         workflow,
@@ -759,7 +761,10 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
         ("start", "merge"),
         ("start", "close"),
     ]
-    assert any(method == "run.adapter_event" and params["kind"] == "idle" and params["status"] == "success" for method, params in calls)
+    assert any(
+        method == "run.adapter_event" and params["kind"] == "idle" and params["status"] == "success"
+        for method, params in calls
+    )
 
     # prompt ani token nejdou do prostředí kroků — jen cesta k prompt souboru
     assert len(runner.steps) == 2
@@ -901,7 +906,7 @@ def test_workflow_outputs_add_directory_link_and_changes_diff(monkeypatch, tmp_p
     assert diff_attachment["type"] == "diff"
     assert "-old" in diff_attachment["value"]
     assert "+new" in diff_attachment["value"]
-    # diff soubor zůstává ve worktree jako dřív
+    # diff soubor zůstává ve worktree pod .agentis
     assert (worktree / source_snapshot.CHANGES_DIFF_NAME).is_file()
 
 
@@ -993,7 +998,9 @@ workflow:
 """
 
 
-def _start_builtin_condition_workflow(tmp_path: Path, context: AgentExecutionContextPayload) -> tuple[FakeRunner, list[tuple[str, dict[str, Any]]]]:
+def _start_builtin_condition_workflow(
+    tmp_path: Path, context: AgentExecutionContextPayload
+) -> tuple[FakeRunner, list[tuple[str, dict[str, Any]]]]:
     worktree = tmp_path / "wt"
     path = worktree / WORKFLOW_FILE_RELPATH
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1354,7 +1361,12 @@ def test_repo_action_workflows_parse(tmp_path: Path) -> None:
     for name in ("merge", "close"):
         workflow = load_workflow_file(repo_root / workflow_file_relpath(name), _values(tmp_path))
         assert workflow.workflow.steps
-        statuses = [output.status for step in workflow.workflow.steps for output in step.outputs if output.type == "agent_comment"]
+        statuses = [
+            output.status
+            for step in workflow.workflow.steps
+            for output in step.outputs
+            if output.type == "agent_comment"
+        ]
         assert statuses, f"workflow {name} musí postnout agent_comment"
     close = load_workflow_file(repo_root / workflow_file_relpath("close"), _values(tmp_path))
     assert close.workflow.deleteNamespace, "close workflow má po úspěchu smazat Kubernetes namespace"
@@ -1540,9 +1552,7 @@ def test_failed_step_runs_always_steps_and_delivers_failure_comment(tmp_path: Pa
     assert comment_calls[0]["body"] == "Workflow selhalo, uklizeno."
     assert comment_calls[0]["actions"] == []
 
-    idle_events = [
-        params for method, params in calls if method == "run.adapter_event" and params["kind"] == "idle"
-    ]
+    idle_events = [params for method, params in calls if method == "run.adapter_event" and params["kind"] == "idle"]
     assert len(idle_events) == 1
     assert idle_events[0]["status"] == "failed"
     assert idle_events[0]["data"]["failed_step"] == "Run agent"
