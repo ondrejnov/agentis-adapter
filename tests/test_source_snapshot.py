@@ -126,3 +126,17 @@ def test_snapshot_sources_skips_missing_worktree(monkeypatch, tmp_path: Path):
 def test_build_snapshot_key_sanitizes_parts():
     assert source_snapshot.build_snapshot_key(" task/42 ", "run:7") == "task-42-run-7"
     assert source_snapshot.build_snapshot_key(None, "...") == "snapshot"
+
+
+def test_snapshot_store_dir_hashes_long_keys(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(source_snapshot, "SNAPSHOT_ROOT", tmp_path / "snapshots")
+    long_key = "workflow-" + "a" * 120
+
+    key_dir = source_snapshot._snapshot_key_dir(long_key)
+
+    assert key_dir != source_snapshot.build_snapshot_key(long_key)
+    assert key_dir.startswith("workflow-")
+    assert len(key_dir) <= source_snapshot._MAX_SNAPSHOT_KEY_DIR_LENGTH
+    assert source_snapshot._snapshot_store_dir(long_key) == tmp_path / "snapshots" / key_dir / "source-store"
+    assert source_snapshot._snapshot_current_store_dir(long_key) == tmp_path / "snapshots" / key_dir / "current-store"
+    assert source_snapshot._snapshot_key_dir("snap-1") == "snap-1"

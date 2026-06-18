@@ -37,6 +37,64 @@ class SnapshotError(RuntimeError):
     """Raised when creating or restoring a snapshot cannot continue."""
 
 
+def remove_tree(path: str | os.PathLike[str], *, ignore_errors: bool = False) -> None:
+    """Remove a directory tree, using Windows extended-length paths when needed."""
+
+    shutil.rmtree(_filesystem_path(path), ignore_errors=ignore_errors)
+
+
+def _filesystem_path(path: str | os.PathLike[str]) -> str:
+    path_string = os.fspath(path)
+    if os.name != "nt" or path_string.startswith("\\\\?\\"):
+        return path_string
+
+    absolute = os.path.abspath(path_string)
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute.lstrip("\\")
+    return "\\\\?\\" + absolute
+
+
+def _mkdir(path: Path, *, parents: bool = False, exist_ok: bool = False) -> None:
+    if parents:
+        os.makedirs(_filesystem_path(path), exist_ok=exist_ok)
+        return
+
+    try:
+        os.mkdir(_filesystem_path(path))
+    except FileExistsError:
+        if not exist_ok or not _is_dir(path):
+            raise
+
+
+def _stat(path: Path, *, follow_symlinks: bool) -> os.stat_result:
+    return os.stat(_filesystem_path(path), follow_symlinks=follow_symlinks)
+
+
+def _copy2(source: Path, target: Path) -> None:
+    shutil.copy2(_filesystem_path(source), _filesystem_path(target), follow_symlinks=False)
+
+
+def _read_text(path: Path, *, encoding: str, errors: str | None = None) -> str:
+    with open(_filesystem_path(path), encoding=encoding, errors=errors) as file:
+        return file.read()
+
+
+def _is_file(path: Path) -> bool:
+    return os.path.isfile(_filesystem_path(path))
+
+
+def _is_dir(path: Path) -> bool:
+    return os.path.isdir(_filesystem_path(path))
+
+
+def _is_symlink(path: Path) -> bool:
+    return os.path.islink(_filesystem_path(path))
+
+
+def _exists_or_symlink(path: Path) -> bool:
+    return os.path.exists(_filesystem_path(path)) or _is_symlink(path)
+
+
 @dataclass(frozen=True)
 class IgnoreRule:
     """A single .gitignore rule, scoped to the directory that defined it."""
@@ -93,7 +151,7 @@ def create_snapshot(
         raise SnapshotError(f"Snapshot already exists: {snapshot_dir}")
 
     files_dir = temp_dir / SNAPSHOT_FILES_DIR
-    files_dir.mkdir(parents=True)
+    _mkdir(files_dir, parents=True)
 
     manifest: dict[str, object] = {
         "version": SNAPSHOT_VERSION,
@@ -115,15 +173,15 @@ def create_snapshot(
                 rel = entry.rel_path
                 source = entry.path
                 target = files_dir / rel
-                stat = source.stat(follow_symlinks=False)
+                stat = _stat(source, follow_symlinks=False)
 
                 if entry.kind == "dir":
-                    target.mkdir(parents=True, exist_ok=True)
+                    _mkdir(target, parents=True, exist_ok=True)
                     entries.append((order, _manifest_entry("dir", rel, stat)))
                     order += 1
                     continue
 
-                target.parent.mkdir(parents=True, exist_ok=True)
+                _mkdir(target.parent, parents=True, exist_ok=True)
 
                 if entry.kind == "symlink":
                     future = executor.submit(
@@ -151,9 +209,9 @@ def create_snapshot(
 
         manifest["entries"] = [entry for _, entry in sorted(entries, key=lambda item: item[0])]
         _write_manifest(temp_dir / MANIFEST_NAME, manifest)
-        temp_dir.replace(snapshot_dir)
+        os.replace(_filesystem_path(temp_dir), _filesystem_path(snapshot_dir))
     except Exception:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        remove_tree(temp_dir, ignore_errors=True)
         raise
 
     return snapshot_dir
@@ -204,14 +262,14 @@ def restore_snapshot(
     """
 
     target_path = Path(target).expanduser().resolve()
-    target_path.mkdir(parents=True, exist_ok=True)
+    _mkdir(target_path, parents=True, exist_ok=True)
 
     worker_count = _resolve_workers(workers)
     snapshot_dir = resolve_snapshot(snapshot, target_path, store=store)
     manifest = _read_manifest(snapshot_dir)
     entries = _manifest_entries(manifest)
     files_dir = snapshot_dir / SNAPSHOT_FILES_DIR
-    if not files_dir.is_dir():
+    if not _is_dir(files_dir):
         raise SnapshotError(f"Snapshot files directory is missing: {files_dir}")
 
     expected_paths = {str(entry["path"]) for entry in entries}
@@ -237,12 +295,12 @@ def restore_snapshot(
             destination = target_path / rel
 
             if kind == "dir":
-                destination.mkdir(parents=True, exist_ok=True)
+                _mkdir(destination, parents=True, exist_ok=True)
                 dir_entries.append(entry)
                 continue
 
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if destination.exists() or destination.is_symlink():
+            _mkdir(destination.parent, parents=True, exist_ok=True)
+            if _exists_or_symlink(destination):
                 _remove_path(destination)
 
             if kind == "symlink":
@@ -321,7 +379,7 @@ def _copy_file_to_snapshot(
     rel_path: str,
     stat: os.stat_result,
 ) -> dict[str, object]:
-    shutil.copy2(source, target, follow_symlinks=False)
+    _copy2(source, target)
     return _manifest_entry("file", rel_path, stat)
 
 
@@ -331,8 +389,8 @@ def _copy_symlink_to_snapshot(
     rel_path: str,
     stat: os.stat_result,
 ) -> dict[str, object]:
-    link_target = os.readlink(source)
-    os.symlink(link_target, target)
+    link_target = os.readlink(_filesystem_path(source))
+    os.symlink(link_target, _filesystem_path(target))
     return _manifest_entry("symlink", rel_path, stat, link_target=link_target)
 
 
@@ -360,12 +418,12 @@ def _restore_file_from_snapshot(
     destination: Path,
     entry: dict[str, object],
 ) -> None:
-    shutil.copy2(source, destination, follow_symlinks=False)
+    _copy2(source, destination)
     _restore_metadata(destination, entry, follow_symlinks=False)
 
 
 def _restore_symlink_from_snapshot(link_target: str, destination: Path) -> None:
-    os.symlink(link_target, destination)
+    os.symlink(link_target, _filesystem_path(destination))
 
 
 def _wait_for_restore_results(
@@ -404,11 +462,11 @@ def _walk_directory(
     rules = list(inherited_rules)
     rules.extend(_load_gitignore(directory / ".gitignore", rel_dir))
 
-    with os.scandir(directory) as scan:
+    with os.scandir(_filesystem_path(directory)) as scan:
         entries = sorted(scan, key=lambda item: item.name)
 
     for entry in entries:
-        path = Path(entry.path)
+        path = directory / entry.name
         rel_path = _join_rel(rel_dir, entry.name)
 
         if entry.name == ".git" or _is_excluded_path(path, excluded_paths):
@@ -457,11 +515,11 @@ def _delete_extra_paths_in_directory(
     rules = list(inherited_rules)
     rules.extend(_load_gitignore(directory / ".gitignore", rel_dir))
 
-    with os.scandir(directory) as scan:
+    with os.scandir(_filesystem_path(directory)) as scan:
         entries = sorted(scan, key=lambda item: item.name)
 
     for entry in entries:
-        path = Path(entry.path)
+        path = directory / entry.name
         rel_path = _join_rel(rel_dir, entry.name)
 
         if entry.name == ".git" or _is_excluded_path(path, excluded_paths):
@@ -488,27 +546,27 @@ def _delete_extra_paths_in_directory(
         )
         if rel_path not in expected_paths:
             try:
-                path.rmdir()
+                os.rmdir(_filesystem_path(path))
             except OSError:
                 pass
 
 
 def _remove_path(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink()
-    elif path.is_dir():
-        shutil.rmtree(path)
+    if _is_symlink(path) or _is_file(path):
+        os.unlink(_filesystem_path(path))
+    elif _is_dir(path):
+        remove_tree(path)
 
 
 def _load_gitignore(path: Path, base: str) -> list[IgnoreRule]:
-    if not path.is_file():
+    if not _is_file(path):
         return []
 
     rules: list[IgnoreRule] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = _read_text(path, encoding="utf-8").splitlines()
     except UnicodeDecodeError:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = _read_text(path, encoding="utf-8", errors="replace").splitlines()
 
     for raw_line in lines:
         rule = _parse_gitignore_line(raw_line, base)
@@ -708,17 +766,15 @@ def _restore_metadata(
     if not isinstance(mode, int) or not isinstance(mtime_ns, int):
         raise SnapshotError("Snapshot manifest metadata is invalid")
     try:
-        os.chmod(path, mode, follow_symlinks=follow_symlinks)
+        os.chmod(_filesystem_path(path), mode, follow_symlinks=follow_symlinks)
     except (NotImplementedError, PermissionError):
         pass
-    os.utime(path, ns=(mtime_ns, mtime_ns), follow_symlinks=follow_symlinks)
+    os.utime(_filesystem_path(path), ns=(mtime_ns, mtime_ns), follow_symlinks=follow_symlinks)
 
 
 def _write_manifest(path: Path, manifest: dict[str, object]) -> None:
-    path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    with open(_filesystem_path(path), "w", encoding="utf-8") as file:
+        file.write(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
 
 def _read_manifest(snapshot_dir: Path) -> dict[str, object]:
@@ -727,7 +783,7 @@ def _read_manifest(snapshot_dir: Path) -> dict[str, object]:
         raise SnapshotError(f"Snapshot manifest is missing: {manifest_path}")
 
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(_read_text(manifest_path, encoding="utf-8"))
     except json.JSONDecodeError as error:
         raise SnapshotError(f"Snapshot manifest is invalid: {manifest_path}") from error
 

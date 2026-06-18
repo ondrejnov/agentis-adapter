@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import hashlib
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +14,7 @@ from common.artifacts import work_snapshot
 SNAPSHOT_ROOT = Path(tempfile.gettempdir()) / "agentis-source-snapshots"
 CHANGES_DIFF_NAME = ".changes.diff"
 _DIFF_EXCLUDES = (CHANGES_DIFF_NAME, "__pycache__", ".pytest_cache", ".ruff_cache")
+_MAX_SNAPSHOT_KEY_DIR_LENGTH = 48
 
 
 @dataclass(frozen=True)
@@ -44,7 +45,7 @@ def snapshot_sources(worktree: str | Path, snapshot_key: str) -> SourceSnapshotR
         return SourceSnapshotResult(status="skipped", reason="missing_worktree", **result_base)
 
     _remove_existing_changes_diff(worktree_path)
-    shutil.rmtree(store_dir, ignore_errors=True)
+    work_snapshot.remove_tree(store_dir, ignore_errors=True)
     try:
         snapshot_dir = work_snapshot.create_snapshot(worktree_path, store=store_dir, name="source")
     except Exception as exc:  # noqa: BLE001
@@ -75,7 +76,7 @@ def write_changes_diff(worktree: str | Path, snapshot_key: str) -> SourceSnapsho
         return SourceSnapshotResult(status="skipped", reason="missing_snapshot", **result_base)
 
     _remove_existing_changes_diff(worktree_path)
-    shutil.rmtree(current_store_dir, ignore_errors=True)
+    work_snapshot.remove_tree(current_store_dir, ignore_errors=True)
     try:
         current_dir = work_snapshot.create_snapshot(worktree_path, store=current_store_dir, name="current")
     except Exception as exc:  # noqa: BLE001
@@ -185,11 +186,21 @@ def changes_diff_attachment(result: SourceSnapshotResult) -> dict[str, str] | No
 
 
 def _snapshot_store_dir(snapshot_key: str) -> Path:
-    return SNAPSHOT_ROOT / build_snapshot_key(snapshot_key) / "source-store"
+    return SNAPSHOT_ROOT / _snapshot_key_dir(snapshot_key) / "source-store"
 
 
 def _snapshot_current_store_dir(snapshot_key: str) -> Path:
-    return SNAPSHOT_ROOT / build_snapshot_key(snapshot_key) / "current-store"
+    return SNAPSHOT_ROOT / _snapshot_key_dir(snapshot_key) / "current-store"
+
+
+def _snapshot_key_dir(snapshot_key: str) -> str:
+    key = build_snapshot_key(snapshot_key)
+    if len(key) <= _MAX_SNAPSHOT_KEY_DIR_LENGTH:
+        return key
+
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    prefix = key[: _MAX_SNAPSHOT_KEY_DIR_LENGTH - len(digest) - 1].rstrip(".-")
+    return f"{prefix}-{digest}" if prefix else digest
 
 
 def _latest_snapshot_dir(worktree_path: Path, store_dir: Path) -> Path | None:
