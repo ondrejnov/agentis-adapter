@@ -233,6 +233,13 @@ def _parser() -> argparse.ArgumentParser:
         help="Po skončení běhu pošli poslední odpověď agenta jako primary komentář do Agentisu.",
     )
     parser.add_argument(
+        "--primary-session",
+        type=_parse_bool,
+        default=True,
+        metavar="BOOL",
+        help="Označ agent session jako primární v Agentisu (true/false, default: true).",
+    )
+    parser.add_argument(
         "--agentis-api",
         metavar="URL",
         default=os.environ.get("AGENTIS_ENDPOINT"),
@@ -268,6 +275,15 @@ def _read_prompt(parts: Sequence[str]) -> str:
     if not sys.stdin.isatty():
         return sys.stdin.read().strip()
     return ""
+
+
+def _parse_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError("expected true/false")
 
 
 async def _run(
@@ -385,6 +401,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             run_id=args.run_id,
             task_status=args.task_status,
             last_message_to_comment=args.last_message_to_comment,
+            primary_session=args.primary_session,
             endpoint=args.agentis_api,
             token=args.agentis_token,
             on_error=_telemetry_error,

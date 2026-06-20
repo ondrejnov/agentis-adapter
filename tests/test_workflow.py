@@ -1966,6 +1966,64 @@ def test_kubernetes_abort_force_deletes_pods_without_waiting(tmp_path: Path) -> 
     ]
 
 
+def test_kubernetes_run_step_abort_deletes_created_job_and_pods(tmp_path: Path) -> None:
+    _write_workflow(tmp_path)
+    workflow = load_workflow_file(tmp_path / WORKFLOW_FILE_RELPATH, _values(tmp_path))
+
+    class RecordingKubectlRunner(KubectlJobRunner):
+        def __init__(self) -> None:
+            super().__init__(_settings(tmp_path))
+            self.commands: list[tuple[str, ...]] = []
+
+        def _run(self, *args: str, stdin: str | None = None, timeout: float = 60.0) -> str:
+            self.commands.append(args)
+            return "deleted"
+
+    runner = RecordingKubectlRunner()
+    labels = {"agentis.task_id": "task-77", "agentis.run_id": "run-12345678"}
+    abort_event = threading.Event()
+    abort_event.set()
+
+    result = runner.run_step(
+        workflow,
+        workflow.workflow.steps[0],
+        namespace="task-77",
+        name="wf-run12345-abcd1234-0-run-agent",
+        labels=labels,
+        env={"WORKDIR": str(tmp_path)},
+        timeout=30,
+        abort_event=abort_event,
+        run_dir=tmp_path,
+    )
+
+    assert result.status == "aborted"
+    assert runner.commands[0][:3] == ("apply", "-f", "-")
+    assert runner.commands[1:] == [
+        (
+            "delete",
+            "job",
+            "-n",
+            "task-77",
+            "-l",
+            "agentis.task_id=task-77,agentis.run_id=run-12345678",
+            "--ignore-not-found",
+            "--wait=false",
+        ),
+        (
+            "delete",
+            "pod",
+            "-n",
+            "task-77",
+            "-l",
+            "agentis.task_id=task-77,agentis.run_id=run-12345678",
+            "--ignore-not-found",
+            "--grace-period=0",
+            "--force",
+            "--wait=false",
+        ),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Local executor (LocalProcessRunner, skutečné bash procesy)
 # ---------------------------------------------------------------------------

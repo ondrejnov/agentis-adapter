@@ -96,6 +96,7 @@ class AgentisTelemetry:
         run_id: Optional[str] = None,
         task_status: Optional[int] = None,
         last_message_to_comment: bool = False,
+        primary_session: bool = True,
         endpoint: Optional[str] = None,
         token: Optional[str] = None,
         timeout: float = 10.0,
@@ -112,6 +113,7 @@ class AgentisTelemetry:
         self.run_id = run_id.strip() if isinstance(run_id, str) and run_id.strip() else None
         self.task_status = task_status
         self.last_message_to_comment = last_message_to_comment
+        self.primary_session = primary_session
         self._on_error = on_error or (lambda message: None)
 
         self._client = client
@@ -240,7 +242,10 @@ class AgentisTelemetry:
     def _bind_session(self, session_id: str) -> None:
         # Agentis hledá run podle session_id, takže binding musí proběhnout dřív,
         # než dává smysl posílat `session.store_activity_log`.
-        result = self._call("run.store_session_id", {"run_id": self.run_id, "session_id": session_id})
+        result = self._call(
+            "run.store_session_id",
+            {"run_id": self.run_id, "session_id": session_id, "primary": self.primary_session},
+        )
         self._session_bound = result is not None
         if self._session_bound and self._dirty:
             self._push_activity_log()

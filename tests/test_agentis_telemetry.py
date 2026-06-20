@@ -85,7 +85,7 @@ def test_telemetry_full_run_creates_run_binds_session_and_pushes_logs() -> None:
     # session binding proběhne při session eventu, před prvním store_activity_log
     assert "run.store_session_id" in methods
     assert methods.index("run.store_session_id") < methods.index("session.store_activity_log")
-    assert client.params_for("run.store_session_id") == {"run_id": "run-9", "session_id": "ses_1"}
+    assert client.params_for("run.store_session_id") == {"run_id": "run-9", "session_id": "ses_1", "primary": True}
 
     adapter_events = [c["params"] for c in client.calls if c["method"] == "run.adapter_event"]
     # běh spuštěn — agentiscode krok se posílá rovnou jako success (bez started spinneru)
@@ -118,7 +118,9 @@ def test_telemetry_records_per_turn_tokens_across_messages() -> None:
     telemetry.handle(AgentEvent("text", {"text": "Second"}))
     telemetry.handle(AgentEvent("step", {"usage": {"input_tokens": 20, "output_tokens": 6}, "cost_usd": 0.02}))
     telemetry.handle(
-        AgentEvent("result", {"session_id": "ses_1", "usage": {"input_tokens": 20}, "cost_usd": 0.02, "is_error": False})
+        AgentEvent(
+            "result", {"session_id": "ses_1", "usage": {"input_tokens": 20}, "cost_usd": 0.02, "is_error": False}
+        )
     )
     telemetry.finish()
 
@@ -145,6 +147,27 @@ def test_telemetry_uses_existing_run_id_without_starting_new_run() -> None:
     assert run_id == "run-existing"
     assert client.methods() == ["run.adapter_event"]
     assert client.calls[0]["params"]["run_id"] == "run-existing"
+
+
+def test_telemetry_can_bind_secondary_session() -> None:
+    client = FakeClient()
+    telemetry = AgentisTelemetry(
+        task_id="task-1",
+        prompt="udelej X",
+        adapter="claude",
+        run_id="run-existing",
+        primary_session=False,
+        client=client,
+    )
+
+    telemetry.start()
+    telemetry.handle(AgentEvent("session", {"session_id": "ses-secondary"}))
+
+    assert client.params_for("run.store_session_id") == {
+        "run_id": "run-existing",
+        "session_id": "ses-secondary",
+        "primary": False,
+    }
 
 
 def test_telemetry_final_comment_can_set_task_status() -> None:

@@ -194,6 +194,8 @@ class KubectlJobRunner:
         manifest = build_job_manifest(workflow, step, namespace=namespace, name=name, labels=labels, env=env)
         self.apply_job(manifest)
         status = self.wait_for_job(namespace, name, timeout=timeout, abort_event=abort_event)
+        if status == "aborted":
+            self.abort(namespace, labels)
         log_tail = ""
         if status not in {"succeeded", "aborted"}:
             log_tail = self.job_log_tail(namespace, name, lines=LOG_TAIL_LINES)

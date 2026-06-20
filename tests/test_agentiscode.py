@@ -383,6 +383,59 @@ def test_cli_task_id_drives_telemetry(monkeypatch) -> None:
     assert events["kwargs"]["token"] == "secret"
     assert events["kwargs"]["adapter"] == "opencode"
     assert events["kwargs"]["last_message_to_comment"] is False
+    assert events["kwargs"]["primary_session"] is True
+
+
+def test_cli_primary_session_false_drives_telemetry(monkeypatch) -> None:
+    lines = [
+        json.dumps(
+            {
+                "type": "text",
+                "sessionID": "ses_1",
+                "part": {"id": "p1", "messageID": "m1", "type": "text", "text": "Hello"},
+            }
+        )
+        + "\n",
+    ]
+    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
+
+    events: dict[str, Any] = {"kwargs": None}
+
+    class FakeTelemetry:
+        def __init__(self, **kwargs: Any) -> None:
+            events["kwargs"] = kwargs
+
+        def start(self) -> str:
+            return "run-1"
+
+        def handle(self, event: AgentEvent) -> None:
+            return None
+
+        def finish(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("app.agentiscode.AgentisTelemetry", FakeTelemetry)
+
+    exit_code = run(
+        [
+            "--adapter",
+            "opencode",
+            "--task-id",
+            "task-1",
+            "--agentis-api",
+            "http://agentis.local/api",
+            "--primary-session",
+            "false",
+            "udelej",
+            "X",
+        ]
+    )
+
+    assert exit_code == 0
+    assert events["kwargs"]["primary_session"] is False
 
 
 def test_cli_last_message_to_comment_enables_final_comment(monkeypatch) -> None:
