@@ -16,6 +16,7 @@ import re
 import sys
 import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -35,7 +36,14 @@ from common.namespaces import namespace_for_context
 from common.models import AgentExecutionContextPayload, task_header_env
 from common.status import get_status_registry
 from common.workflow.local_runtime import LocalProcessRunner
-from common.workflow.runtime import KubectlJobRunner, WorkflowStepRunner, job_labels, job_name, safe_step_name
+from common.workflow.runtime import (
+    StepResult,
+    KubectlJobRunner,
+    WorkflowStepRunner,
+    job_labels,
+    job_name,
+    safe_step_name,
+)
 from common.workflow.schema import (
     PROJECT_WORKFLOW_FILE_RELPATH,
     WORKFLOW_EXECUTORS,
@@ -83,6 +91,15 @@ class _WorkflowRun:
     @property
     def active(self) -> bool:
         return self.status == "running" and (self.thread is None or self.thread.is_alive())
+
+
+@dataclass(frozen=True)
+class _StepExecutionResult:
+    index: int
+    step_name: str
+    job_name: str
+    result: StepResult
+    attempts: int
 
 
 class WorkflowManager:
@@ -427,133 +444,125 @@ class WorkflowManager:
             data={"attempt": run.attempt_id, "namespace": run.namespace, "executor": run.executor},
         )
 
+        steps = run.workflow.workflow.steps
+        dependencies = self._step_dependencies(steps)
+        step_vars: dict[int, dict[str, str]] = {}
+        terminal_steps: set[int] = set()
+        pending_steps: set[int] = set(range(len(steps)))
+        running_steps: dict[Future[_StepExecutionResult], int] = {}
+
         #: Jméno prvního fatálně selhaného kroku; po selhání běží už jen `always` kroky.
         failed_step: str | None = None
-        for index, step in enumerate(run.workflow.workflow.steps):
-            if run.abort_event.is_set():
-                run.status = "aborted"
-                return
-
-            step_event_id = f"workflow_step:{run.context.run_id}:{run.attempt_id}:{index}"
-            if failed_step is not None and not step.always:
-                run.skipped_steps.add(index)
-                self._emit_adapter_event(
-                    run.context,
-                    kind="workflow_step",
-                    status="skipped",
-                    event_id=step_event_id,
-                    message=f"Krok přeskočen (workflow selhalo): {step.name}",
-                    data={"step": step.name, "skipped": True, "failed_step": failed_step},
-                )
-                continue
-            # Podmínka vidí stejné env jako samotný krok (workflow.env < runtime env <
-            # step.env) plus built-in hodnoty a `var` outparametry; `var` output runu
-            # vyhrává nad vším ostatním (krok tak může env/built-in pro `if` přepsat).
-            condition_vars = {
-                **run.workflow.workflow.env,
-                **env,
-                **step.env,
-                **builtin_vars,
-                **run.vars,
-            }
-            if step.if_ is not None and not evaluate_condition(step.if_, condition_vars):
-                run.skipped_steps.add(index)
-                self._emit_adapter_event(
-                    run.context,
-                    kind="workflow_step",
-                    status="skipped",
-                    event_id=step_event_id,
-                    message=f"Krok přeskočen (if: {step.if_}): {step.name}",
-                    data={"step": step.name, "skipped": True, "condition": step.if_, "vars": dict(run.vars)},
-                )
-                continue
-
-            labels = job_labels(
-                task_id=run.context.task_id,
-                run_id=run.context.run_id,
-                attempt_id=run.attempt_id,
-                step_index=index,
-                step_name=step.name,
-            )
-            name = job_name(run.context.run_id, run.attempt_id, index, step.name)
-            self._emit_adapter_event(
-                run.context,
-                kind="workflow_step",
-                status="started",
-                event_id=step_event_id,
-                message=step.name,
-                data={"step": step.name, "job": name},
-            )
-
-            # `always` kroky dostanou stav workflow, aby šel složit failure komentář.
-            step_env = env
-            if step.always:
-                step_env = dict(env)
-                step_env["AGENTIS_WORKFLOW_STATUS"] = "failed" if failed_step else "success"
-                step_env["AGENTIS_FAILED_STEP"] = failed_step or ""
-
-            timeout = step.timeoutSeconds if step.timeoutSeconds is not None else run.workflow.workflow.timeoutSeconds
-            # Retry smyčka: hlásí se jen finální výsledek s počtem pokusů; opakovaný
-            # pokus dostane unikátní jméno (selhaný K8s Job s původním jménem existuje).
-            attempt = 0
-            while True:
-                attempt += 1
-                attempt_name = name if attempt == 1 else f"{name[:60].rstrip('-')}-r{attempt}"
-                result = run.runner.run_step(
-                    run.workflow,
-                    step,
-                    namespace=run.namespace,
-                    name=attempt_name,
-                    labels=labels,
-                    env=step_env,
-                    timeout=float(timeout),
-                    abort_event=run.abort_event,
-                    run_dir=run.run_dir,
-                )
-                if result.status == "aborted":
-                    run.status = "aborted"
-                    return
-                if result.status == "succeeded" or attempt > step.retries:
-                    break
+        max_parallel = run.workflow.workflow.maxParallel
+        with ThreadPoolExecutor(max_workers=max_parallel, thread_name_prefix="workflow-step") as executor:
+            while pending_steps or running_steps:
                 if run.abort_event.is_set():
-                    run.status = "aborted"
-                    return
+                    pending_steps.clear()
+                    if not running_steps:
+                        run.status = "aborted"
+                        return
 
-            if result.status != "succeeded":
-                run.failed_steps.add(index)
-                self._emit_adapter_event(
-                    run.context,
-                    kind="workflow_step",
-                    status="failed",
-                    event_id=step_event_id,
-                    message=f"Krok selhal ({result.status}): {step.name}",
-                    data={
-                        "step": step.name,
-                        "job": name,
-                        "result": result.status,
-                        "log_tail": result.log_tail,
-                        "attempts": attempt,
-                        "continueOnError": step.continueOnError,
-                    },
-                )
-                if not step.continueOnError and failed_step is None:
-                    failed_step = step.name
-                continue
+                progressed = False
+                if failed_step is not None:
+                    for index in sorted(list(pending_steps)):
+                        step = steps[index]
+                        if step.always:
+                            continue
+                        pending_steps.remove(index)
+                        terminal_steps.add(index)
+                        run.skipped_steps.add(index)
+                        self._emit_step_skipped(run, index, step, dependencies, failed_step=failed_step)
+                        progressed = True
 
-            self._emit_adapter_event(
-                run.context,
-                kind="workflow_step",
-                status="success",
-                event_id=step_event_id,
-                message=step.name,
-                data={"step": step.name, "job": name},
-            )
+                active_regular_steps = any(not steps[index].always for index in running_steps.values())
+                for index in sorted(list(pending_steps)):
+                    if len(running_steps) >= max_parallel:
+                        break
+                    step = steps[index]
+                    if failed_step is not None and not step.always:
+                        continue
+                    if failed_step is not None and step.always and active_regular_steps:
+                        continue
+                    if any(dependency not in terminal_steps for dependency in dependencies[index]):
+                        continue
 
-            # `var` outputs jsou k dispozici hned: pro `if` podmínky i jako env dalších kroků.
-            new_vars = self._collect_step_vars(run, step)
-            if new_vars:
-                run.vars.update(new_vars)
-                env.update(new_vars)
+                    dependency_vars = self._dependency_vars(index, dependencies, step_vars)
+                    condition_vars = {
+                        **run.workflow.workflow.env,
+                        **env,
+                        **step.env,
+                        **builtin_vars,
+                        **dependency_vars,
+                    }
+                    if step.if_ is not None and not evaluate_condition(step.if_, condition_vars):
+                        pending_steps.remove(index)
+                        terminal_steps.add(index)
+                        run.skipped_steps.add(index)
+                        self._emit_step_skipped(
+                            run,
+                            index,
+                            step,
+                            dependencies,
+                            condition=step.if_,
+                            visible_vars=dependency_vars,
+                        )
+                        progressed = True
+                        continue
+
+                    self._emit_step_started(run, index, step, dependencies)
+                    step_env = {**env, **dependency_vars}
+                    if step.always:
+                        step_env = dict(step_env)
+                        step_env["AGENTIS_WORKFLOW_STATUS"] = "failed" if failed_step else "success"
+                        step_env["AGENTIS_FAILED_STEP"] = failed_step or ""
+                    future = executor.submit(self._run_step_with_retries, run, index, step, step_env)
+                    running_steps[future] = index
+                    pending_steps.remove(index)
+                    progressed = True
+
+                if not running_steps:
+                    if pending_steps and not progressed:
+                        raise RuntimeError("workflow scheduler deadlocked; no runnable pending steps")
+                    continue
+
+                if progressed and len(running_steps) < max_parallel and pending_steps:
+                    continue
+
+                done, _pending = wait(running_steps, return_when=FIRST_COMPLETED)
+                for future in done:
+                    index = running_steps.pop(future)
+                    terminal_steps.add(index)
+                    step = steps[index]
+                    try:
+                        completed = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        completed = _StepExecutionResult(
+                            index=index,
+                            step_name=step.name,
+                            job_name=job_name(run.context.run_id, run.attempt_id, index, step.name),
+                            result=StepResult(status="failed", log_tail=str(exc)),
+                            attempts=1,
+                        )
+                    if completed.result.status == "aborted":
+                        run.abort_event.set()
+                        pending_steps.clear()
+                        run.status = "aborted"
+                        continue
+                    if completed.result.status != "succeeded":
+                        run.failed_steps.add(index)
+                        self._emit_step_failed(run, completed, step, dependencies)
+                        if not step.continueOnError and failed_step is None:
+                            failed_step = step.name
+                        continue
+
+                    self._emit_step_succeeded(run, completed, step, dependencies)
+                    new_vars = self._collect_step_vars(run, step)
+                    if new_vars:
+                        step_vars[index] = new_vars
+                        run.vars.update(new_vars)
+
+        if run.status == "aborted":
+            return
 
         # Outputs úspěšně doběhlých kroků se aplikují i po selhání workflow —
         # `always` krok tak může doručit failure komentář do ticketu.
@@ -580,6 +589,192 @@ class WorkflowManager:
             event_id=workflow_event_id,
             message="Workflow doběhlo.",
             data={"attempt": run.attempt_id},
+        )
+
+    @staticmethod
+    def _step_dependencies(steps: list[WorkflowStep]) -> list[list[int]]:
+        name_to_index: dict[str, int] = {}
+        dependencies: list[list[int]] = []
+        for index, step in enumerate(steps):
+            if step.needs is None:
+                dependencies.append([index - 1] if index > 0 else [])
+            else:
+                dependencies.append([name_to_index[name] for name in step.needs])
+            name_to_index[step.name] = index
+        return dependencies
+
+    @staticmethod
+    def _dependency_names(index: int, steps: list[WorkflowStep], dependencies: list[list[int]]) -> list[str]:
+        return [steps[dependency].name for dependency in dependencies[index]]
+
+    @staticmethod
+    def _dependency_vars(
+        index: int,
+        dependencies: list[list[int]],
+        step_vars: dict[int, dict[str, str]],
+    ) -> dict[str, str]:
+        values: dict[str, str] = {}
+        seen: set[int] = set()
+
+        def visit(dependency: int) -> None:
+            if dependency in seen:
+                return
+            for parent in dependencies[dependency]:
+                visit(parent)
+            seen.add(dependency)
+            values.update(step_vars.get(dependency, {}))
+
+        for dependency in dependencies[index]:
+            visit(dependency)
+        return values
+
+    def _run_step_with_retries(
+        self,
+        run: _WorkflowRun,
+        index: int,
+        step: WorkflowStep,
+        step_env: dict[str, str],
+    ) -> _StepExecutionResult:
+        labels = job_labels(
+            task_id=run.context.task_id,
+            run_id=run.context.run_id,
+            attempt_id=run.attempt_id,
+            step_index=index,
+            step_name=step.name,
+        )
+        name = job_name(run.context.run_id, run.attempt_id, index, step.name)
+        timeout = step.timeoutSeconds if step.timeoutSeconds is not None else run.workflow.workflow.timeoutSeconds
+        attempt = 0
+        while True:
+            attempt += 1
+            attempt_name = name if attempt == 1 else f"{name[:60].rstrip('-')}-r{attempt}"
+            result = run.runner.run_step(
+                run.workflow,
+                step,
+                namespace=run.namespace,
+                name=attempt_name,
+                labels=labels,
+                env=step_env,
+                timeout=float(timeout),
+                abort_event=run.abort_event,
+                run_dir=run.run_dir,
+            )
+            if result.status == "aborted" or result.status == "succeeded" or attempt > step.retries:
+                return _StepExecutionResult(
+                    index=index,
+                    step_name=step.name,
+                    job_name=name,
+                    result=result,
+                    attempts=attempt,
+                )
+            if run.abort_event.is_set():
+                return _StepExecutionResult(
+                    index=index,
+                    step_name=step.name,
+                    job_name=name,
+                    result=StepResult(status="aborted"),
+                    attempts=attempt,
+                )
+
+    def _emit_step_started(
+        self,
+        run: _WorkflowRun,
+        index: int,
+        step: WorkflowStep,
+        dependencies: list[list[int]],
+    ) -> None:
+        name = job_name(run.context.run_id, run.attempt_id, index, step.name)
+        self._emit_adapter_event(
+            run.context,
+            kind="workflow_step",
+            status="started",
+            event_id=f"workflow_step:{run.context.run_id}:{run.attempt_id}:{index}",
+            message=step.name,
+            data={
+                "step": step.name,
+                "step_index": index,
+                "needs": self._dependency_names(index, run.workflow.workflow.steps, dependencies),
+                "job": name,
+            },
+        )
+
+    def _emit_step_succeeded(
+        self,
+        run: _WorkflowRun,
+        completed: _StepExecutionResult,
+        step: WorkflowStep,
+        dependencies: list[list[int]],
+    ) -> None:
+        self._emit_adapter_event(
+            run.context,
+            kind="workflow_step",
+            status="success",
+            event_id=f"workflow_step:{run.context.run_id}:{run.attempt_id}:{completed.index}",
+            message=step.name,
+            data={
+                "step": completed.step_name,
+                "step_index": completed.index,
+                "needs": self._dependency_names(completed.index, run.workflow.workflow.steps, dependencies),
+                "job": completed.job_name,
+            },
+        )
+
+    def _emit_step_failed(
+        self,
+        run: _WorkflowRun,
+        completed: _StepExecutionResult,
+        step: WorkflowStep,
+        dependencies: list[list[int]],
+    ) -> None:
+        self._emit_adapter_event(
+            run.context,
+            kind="workflow_step",
+            status="failed",
+            event_id=f"workflow_step:{run.context.run_id}:{run.attempt_id}:{completed.index}",
+            message=f"Krok selhal ({completed.result.status}): {step.name}",
+            data={
+                "step": completed.step_name,
+                "step_index": completed.index,
+                "needs": self._dependency_names(completed.index, run.workflow.workflow.steps, dependencies),
+                "job": completed.job_name,
+                "result": completed.result.status,
+                "log_tail": completed.result.log_tail,
+                "attempts": completed.attempts,
+                "continueOnError": step.continueOnError,
+            },
+        )
+
+    def _emit_step_skipped(
+        self,
+        run: _WorkflowRun,
+        index: int,
+        step: WorkflowStep,
+        dependencies: list[list[int]],
+        *,
+        condition: str | None = None,
+        visible_vars: dict[str, str] | None = None,
+        failed_step: str | None = None,
+    ) -> None:
+        data: dict[str, Any] = {
+            "step": step.name,
+            "step_index": index,
+            "needs": self._dependency_names(index, run.workflow.workflow.steps, dependencies),
+            "skipped": True,
+        }
+        if condition is not None:
+            data["condition"] = condition
+            data["vars"] = dict(visible_vars or {})
+            message = f"Krok přeskočen (if: {condition}): {step.name}"
+        else:
+            data["failed_step"] = failed_step
+            message = f"Krok přeskočen (workflow selhalo): {step.name}"
+        self._emit_adapter_event(
+            run.context,
+            kind="workflow_step",
+            status="skipped",
+            event_id=f"workflow_step:{run.context.run_id}:{run.attempt_id}:{index}",
+            message=message,
+            data=data,
         )
 
     def _cleanup_namespace(self, run: _WorkflowRun) -> None:

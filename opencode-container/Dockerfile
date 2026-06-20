@@ -97,6 +97,8 @@ RUN npm install -g @fission-ai/openspec@latest
 RUN curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.sh | bash
 COPY ./rtk /root/.local/bin
 
+RUN curl -fsSL https://cli.tavily.com/install.sh | bash
+
 RUN npm install prettier -g
 RUN npm install -g @anthropic-ai/claude-code@2.1.172
 RUN npm install -g opencode-ai@1.16.2 opencode-linux-x64-baseline@1.16.2

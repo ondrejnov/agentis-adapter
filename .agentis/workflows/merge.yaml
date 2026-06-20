@@ -40,6 +40,7 @@ workflow:
         - type: agent_comment
           bodyFrom: outputs/final-comment.md
           status: done
+          name: Merge agent
     - name: Report merge failure
       always: true
       run: |
@@ -54,6 +55,7 @@ workflow:
       outputs:
         - type: agent_comment
           bodyFrom: outputs/failure-comment.md
+          name: Merge agent
         - label: AI conflict resolver
           type: text
           valueFrom: outputs/conflict-resolution.txt

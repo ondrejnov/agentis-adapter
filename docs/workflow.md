@@ -2,7 +2,7 @@
 
 ## K čemu workflow slouží
 
-Workflow režim přesouvá projektově proměnlivou logiku běhu agenta (příprava prostředí, spuštění agenta, commit, pull request, úklid) z Python adapteru do deklarativního YAML souboru ve worktree projektu. Adapter pak jen orchestruje: načte YAML, spouští kroky postupně přes zvolený executor a po doběhnutí aplikuje výstupy úspěšných kroků (komentář, přílohy, artefakty) do Agentisu.
+Workflow režim přesouvá projektově proměnlivou logiku běhu agenta (příprava prostředí, spuštění agenta, commit, pull request, úklid) z Python adapteru do deklarativního YAML souboru ve worktree projektu. Adapter pak jen orchestruje: načte YAML, naplánuje kroky podle závislostí, spouští je přes zvolený executor a po doběhnutí aplikuje výstupy úspěšných kroků (komentář, přílohy, artefakty) do Agentisu.
 
 Je to protějšek lokálního CLI runtime (`local`), kde agent běží jako proces přímo na hostu řízený adapterem. Ve workflow režimu adapter sám žádného agenta nespouští — agent je jen jedním z kroků workflow (typicky `agentiscode` v kroku „Run agent“).
 
@@ -23,7 +23,9 @@ Workflow runtime se aktivuje v JSON-RPC metodách `start` / `add_message`, když
 - `context.adapter.runtime == "workflow"`, nebo
 - kontext obsahuje pojmenované workflow `context.adapter.workflow = "<name>"` (followup akce jako merge/close) — to běží přes workflow runtime vždy, bez ohledu na `runtime`.
 
-`start` / `add_message` vrací rychle — workflow běží na pozadí v daemon threadu, průběh se hlásí do Agentisu přes `run.adapter_event` (`workflow`, `workflow_step`, na konci `idle`). Metody `question` / `approve` workflow runtime nepodporuje (není IPC do Jobu). `abort` zruší běžící workflow a smaže aktivní kroky podle labels.
+`start` / `add_message` vrací rychle — workflow běží na pozadí v daemon threadu, průběh se hlásí do Agentisu přes `run.adapter_event` (`workflow`, `workflow_step`, na konci `idle`). Metody `question` / `approve` workflow runtime nepodporuje (není IPC do Jobu). `abort` zruší běžící workflow a smaže/zastaví všechny aktivní kroky podle labels.
+
+U paralelního workflow přichází `workflow_step` eventy v reálném pořadí běhu, ne nutně v pořadí YAML. Data eventu obsahují `step_index`, `step`, `needs` a u spuštěných kroků `job`, takže UI může řadit buď časově, nebo podle definice workflow.
 
 Per task běží maximálně jedno workflow — pokus o start nad běžícím taskem skončí chybou (busy).
 
@@ -73,6 +75,7 @@ workflow:
     - name: registry
   workingDir: "[%WORKDIR%]"
   timeoutSeconds: 14400         # default timeout kroku (sekundy)
+  maxParallel: 4                # maximum současně běžících kroků v jednom runu
   ttlSecondsAfterFinished: 300  # TTL dokončených K8s Jobů
   deleteNamespace: false        # po úspěchu smazat celý namespace (jen kubernetes)
   envFiles:                     # soubory sourcované na začátku každého kroku
@@ -86,6 +89,7 @@ workflow:
       run: ...
   steps:                        # povinné, aspoň jeden krok
     - name: Run agent
+      needs: ["Check environment"] # volitelné: explicitní závislosti podle jmen kroků
       uses: run-agent           # volitelně: defaulty kroku ze šablony (viz níže)
       run: |                    # bash skript kroku (povinný, pokud ho nedodá `uses`)
         ...
@@ -142,7 +146,7 @@ workflow:
         RUN_AGENT_FLAGS: ""    # odchylka jen tam, kde je potřeba
 ```
 
-Šablona má stejná pole jako krok kromě `name` a `uses`. Sémantika merge:
+Šablona má stejná pole jako krok kromě `name`, `uses` a `needs`. Závislosti jsou vlastnost konkrétního workflow grafu, ne reusable šablony. Sémantika merge:
 
 - pole, které krok sám deklaruje, vyhrává nad šablonou — **celé** (deklarované `outputs` nahradí outputs šablony, nedoplňují se),
 - `env` se merguje po klíčích, krok vyhrává,
@@ -151,6 +155,42 @@ workflow:
 Resoluce proběhne při načtení souboru (po `extends` merge), runtime už vidí jen plně rozbalené kroky. Parametrizace skriptu se dělá přes env proměnné s defaulty v bashi (`${VAR:-default}`), ne přes interpolační tokeny — `[%TOKEN%]` v šabloně se nahradí built-in hodnotami runu jako kdekoli jinde.
 
 Dodávaná šablona `run-agent` v `_base.yaml` spouští agenta (`agentiscode`, adapter CLI podle modelu, resume session) a parametrizuje se přes `RUN_AGENT_FLAGS` (default `--json`), `RUN_AGENT_OUTPUT_DIR` (default `$AGENTIS_RUN_DIR/outputs`; při přepisu je nutné přepsat i `outputs`, jejich cesty se čtou relativně k output rootu runu) a `RUN_AGENT_STREAM_FILTER` (příkaz, kterým proteče stdout agenta, default `cat` — Slack workflow tudy posílá stream do `scripts/slack_stream.py`).
+
+### Paralelní kroky (`needs` + `maxParallel`)
+
+Workflow je DAG nad `workflow.steps`. Bez pole `needs` zůstává chování zpětně kompatibilní a sekvenční: krok implicitně čeká na bezprostředně předchozí krok. Paralelismus se zapíná explicitně:
+
+- `needs` neuvedeno — implicitní závislost na předchozím kroku (`[]` jen u prvního kroku), tedy dnešní sekvenční pořadí,
+- `needs: []` — root krok bez závislostí; může startovat hned, jakmile je volný slot,
+- `needs: ["A", "B"]` — krok čeká na dokončení dříve definovaných kroků `A` a `B`.
+
+`needs` odkazuje na `name` kroku a smí ukazovat jen na kroky definované výše v YAML. Pokud workflow používá `needs`, názvy kroků musí být unikátní. Forward reference, duplicitní položky v `needs` a neznámé názvy jsou validační chyba při načtení workflow.
+
+Současně běžící kroky omezuje `workflow.maxParallel` (default `4`, minimum `1`). Limit platí stejně pro Kubernetes Joby i lokální procesy; retry kroku po celou dobu zabírá jeden slot.
+
+```yaml
+workflow:
+  maxParallel: 2
+  steps:
+    - name: Build backend
+      run: poetry run pytest backend
+
+    - name: Build frontend
+      needs: []
+      run: npm test
+
+    - name: Publish report
+      needs: ["Build backend", "Build frontend"]
+      run: ./scripts/report.sh
+```
+
+`needs` je ordering dependency, ne automatická success gate:
+
+- dependency přeskočená přes `if` dependent odblokuje,
+- dependency selhaná s `continueOnError: true` dependent odblokuje,
+- fatální selhání bez `continueOnError` přepne workflow do fail-fast režimu: nové běžné kroky se už nestartují, pending běžné kroky se označí jako skipped, už běžící kroky se nechají doběhnout a pak můžou běžet relevantní `always` kroky.
+
+Autor workflow ručí za bezpečnost paralelních zápisů do sdíleného worktree a output adresářů. Runtime nepozná, jestli bash skript jen čte, nebo zapisuje, proto žádný automatický lock nedává. Dva paralelní kroky by neměly zapisovat stejný soubor v `.agentis/outputs` / `outputs`; ne-`var` outputs se sice aplikují deterministicky v pořadí YAML, ale obsah kolidujícího souboru je race condition.
 
 ### Interpolace tokenů
 
@@ -173,17 +213,17 @@ Kromě `workflow.env` / `step.env` dostane každý krok od adapteru:
 - všechny interpolační tokeny jako env proměnné (`WORKDIR`, `BRANCH`, …),
 - `AGENTIS_RUN_ID`, `AGENTIS_TASK_ID`, `AGENTIS_RUN_DIR`, `AGENTIS_PROMPT_FILE` (soubor s promptem), `AGENTIS_CONTEXT_FILE` (context JSON),
 - volitelně `AGENTIS_SESSION_ID` (resume předchozí session), `AGENTIS_MODEL`, `AGENTIS_AGENT`, `AGENTIS_EFFORT` z `context.adapter`,
-- proměnné z `var` outputs už dokončených kroků.
+- proměnné z `var` outputs transitivních `needs` kroku.
 
 ### Podmínky `if`
 
 Krok s `if` se spustí jen při splnění podmínky. Proměnnými podmínky jsou:
 
-- `var` outputs předchozích kroků,
+- `var` outputs transitivních `needs` kroku,
 - built-in hodnoty runu — všechny interpolační tokeny z tabulky výše (`GITHUB_REPO`, `BRANCH`, `BASE_BRANCH`, `TASK_NUMBER`, …); stejná jména dostávají kroky i jako env proměnné,
 - env proměnné kroku — přesně to env, které krok dostane (`workflow.env`, runtime env od adapteru jako `AGENTIS_MODEL`/`AGENTIS_AGENT`/task header env, a `step.env`). Lze tak podmínit krok hodnotou env: `if: AGENTIS_MODEL == 'opus'` nebo `if: DEPLOY_ENV != 'prod'`.
 
-Při kolizi jmen vyhrává `var` output kroku nad built-in hodnotou i nad env (krok tak může env/built-in hodnotu pro zbytek workflow přepsat); v env samotném platí pořadí `workflow.env` < runtime env < `step.env`.
+Při kolizi jmen vyhrává viditelný `var` output nad built-in hodnotou i nad env (krok tak může env/built-in hodnotu pro své dependenty přepsat); v env samotném platí pořadí `workflow.env` < runtime env < `step.env`. Paralelní větev, na které krok explicitně ani transitivně nezávisí přes `needs`, jeho `if` ani env neovlivní, i kdyby doběhla dřív.
 
 Gramatika: termy `VAR`, `!VAR`, `VAR == hodnota`, `VAR != 'hodnota'` spojené `&&` a `||`. `&&` má přednost před `||` — `A && B || C` se vyhodnotí jako `(A && B) || C`; závorky nejsou. Negace `!` platí jen na jednotlivý holý term, ne na porovnání ani skupinu. Hodnota porovnání s mezerami nebo se spojkou `&&` / `||` musí být v uvozovkách (`MODE == 'a && b'`).
 
@@ -208,7 +248,7 @@ Neznámá proměnná se chová jako prázdný string; holý test `VAR` bere `""`
 
 ### Outputs
 
-Kroky komunikují s adapterem přes soubory; cesty jsou relativní k output rootu (worktree, resp. run adresáři — viz výše) a nesmí z něj utéct. Typ `var` se čte hned po doběhnutí kroku, ostatní outputs se aplikují **až po úspěšném dokončení celého workflow** jediným voláním do Agentisu:
+Kroky komunikují s adapterem přes soubory; cesty jsou relativní k output rootu (worktree, resp. run adresáři — viz výše) a nesmí z něj utéct. Typ `var` se čte hned po úspěšném doběhnutí kroku, aby mohl řídit dependenty. Ostatní outputs se aplikují **až po konci workflow** jediným voláním do Agentisu:
 
 | Typ | Pole | Význam |
 | --- | --- | --- |
@@ -218,15 +258,17 @@ Kroky komunikují s adapterem přes soubory; cesty jsou relativní k output root
 | `artifact` | `name`, `path` | Soubor přiložený ke komentáři (base64) |
 | `var` | `name`, `valueFrom` | Workflow proměnná pro `if` podmínky a env dalších kroků |
 
-Outputs se aplikují po dokončení workflow **za úspěšně doběhlé kroky** — i když workflow jako celek selhalo (viz Error handling níže). Outputs přeskočených a selhaných kroků se neaplikují. U běžných task runů adapter navíc automaticky přikládá „Changes diff“ (snapshot zdrojáků při startu vs. konci).
+Outputs se aplikují po dokončení workflow **za úspěšně doběhlé kroky** v pořadí kroků v YAML — i když workflow jako celek selhalo (viz Error handling níže). Outputs přeskočených a selhaných kroků se neaplikují. U běžných task runů adapter navíc automaticky přikládá „Changes diff“ (snapshot zdrojáků při startu vs. konci).
 
 ### Error handling kroků
 
-Selhaný krok bez příznaků níže workflow ukončí: do Agentisu jde událost `workflow_step` failed s posledními ~50 řádky logu, přeskočí se všechny zbývající ne-`always` kroky (hlásí se jako skipped) a na závěr jde `idle` failed se jménem selhaného kroku.
+Selhaný krok bez příznaků níže přepne workflow do fail-fast režimu: do Agentisu jde událost `workflow_step` failed s posledními ~50 řádky logu, nové běžné kroky se už nestartují, pending ne-`always` kroky se označí jako skipped a už běžící kroky se nechají doběhnout. Po doběhnutí aktivních běžných kroků se spustí relevantní `always` kroky a na závěr jde `idle` failed se jménem prvního fatálně selhaného kroku.
 
-- **`continueOnError: true`** — selhání kroku workflow nezastaví. Krok se nahlásí jako failed (s `continueOnError: true` v datech eventu), ale jeho `var` outputs se nečtou a ostatní outputs se na konci neaplikují.
-- **`retries: N`** — selhaný krok se zopakuje až N× (bez backoffu), tj. maximálně `N + 1` spuštění. Do Agentisu se hlásí **jen finální výsledek** s počtem pokusů (`attempts` v datech eventu) — mezivýsledky pokusů by jen zaplevelily timeline. Abort mezi pokusy workflow ukončí. Opakovaný pokus dostane unikátní jméno Jobu (`<job>-r<n>`), protože selhaný K8s Job s původním jménem stále existuje; u lokálního executoru má tím pádem každý pokus vlastní log soubor.
-- **`always: true`** — krok běží i poté, co dřívější krok fatálně selhal (typicky úklid a failure komentář na konci). `always` kroky běží v původním pořadí a `if` podmínky pro ně platí stejně. Adapter jim navíc exportuje env proměnné `AGENTIS_WORKFLOW_STATUS` (`failed`/`success`) a `AGENTIS_FAILED_STEP` (jméno prvního fatálně selhaného kroku, jinak prázdné) — krok z nich pozná, jestli má složit failure komentář.
+- **`continueOnError: true`** — selhání kroku workflow nezastaví a dependenty odblokuje. Krok se nahlásí jako failed (s `continueOnError: true` v datech eventu), ale jeho `var` outputs se nečtou a ostatní outputs se na konci neaplikují.
+- **`retries: N`** — selhaný krok se zopakuje až N× (bez backoffu), tj. maximálně `N + 1` spuštění. Do Agentisu se hlásí **jen finální výsledek** s počtem pokusů (`attempts` v datech eventu) — mezivýsledky pokusů by jen zaplevelily timeline. Abort mezi pokusy workflow ukončí. Opakovaný pokus dostane unikátní jméno Jobu (`<job>-r<n>`), protože selhaný K8s Job s původním jménem stále existuje; u lokálního executoru má tím pádem každý pokus vlastní log soubor. Během retry krok pořád zabírá jeden slot `maxParallel`.
+- **`always: true`** — krok běží i poté, co workflow fatálně selhalo (typicky úklid a failure komentář na konci). V DAG pořád respektuje `needs` jako pořadí, ale nevyžaduje jejich úspěch: čeká, až dependencies skončí jako success/failed/skipped. Bez explicitního `needs` platí sekvenční default na předchozí krok. `if` podmínky pro něj platí stejně. Adapter mu navíc exportuje env proměnné `AGENTIS_WORKFLOW_STATUS` (`failed`/`success`) a `AGENTIS_FAILED_STEP` (jméno prvního fatálně selhaného kroku, jinak prázdné) — krok z nich pozná, jestli má složit failure komentář.
+
+`abort` není failure workflow: zastaví aktivní kroky, scheduler už nespustí pending ani `always` kroky a outputs se neaplikují.
 
 Protože se outputs úspěšných kroků aplikují i u selhaného workflow, může `always` krok doručit `agent_comment` s důvodem selhání do ticketu (viz krok „Report merge failure“ v `merge.yaml`). **Followup akce se u failure komentáře nenabízí** — sekce `workflow.followups` platí jen pro úspěšný run; nabízet merge/close nad rozdělanou prací po selhaném runu nedává smysl.
 
@@ -279,6 +321,9 @@ Workflow `default.yaml`, `project.yaml`, `slack.yaml`, `merge.yaml` a `close.yam
 - **`Workflow extends target not found`** — `extends` ukazuje na neexistující soubor v `.agentis/workflows/`.
 - **`chained 'extends' is not supported`** — rodičovský soubor má vlastní `extends`; dědičnost má jen jednu úroveň.
 - **`uses unknown step template`** — krok odkazuje šablonu, která po `extends` merge není ve `workflow.stepTemplates`.
+- **`unknown or future 'needs'`** — `needs` odkazuje na neexistující krok nebo na krok definovaný až níže; producent musí být v YAML před konzumentem.
+- **`workflow steps using 'needs' require unique step names`** — workflow používá `needs`, ale více kroků má stejné `name`; názvy musí být unikátní, protože `needs` na ně odkazuje.
+- **`duplicate 'needs' entries`** — jeden krok má v `needs` stejné jméno vícekrát.
 - **`Unknown workflow token [%X%]`** — token mimo allowlist; viz tabulka výše.
 - **Workflow „busy“** — per task běží jen jeden run; počkat na doběhnutí nebo zavolat `abort`.
 - **Output se nepropsal** — soubor neexistuje, je prázdný, krok byl přeskočen (přes `if` nebo po selhání workflow), krok sám selhal (včetně `continueOnError`), nebo cesta vede mimo output root.

@@ -32,6 +32,7 @@ def workflow_file_relpath(name: str) -> str:
 
     return f"{WORKFLOW_DIR_RELPATH}/{name}.yaml"
 
+
 #: Tokeny povolené pro interpolaci ve string hodnotách YAML.
 INTERPOLATION_ALLOWLIST = (
     "NAMESPACE",
@@ -313,6 +314,10 @@ class WorkflowStep(WorkflowStepTemplate):
     name: str
     #: Jméno šablony ve `workflow.stepTemplates`, ze které krok bere defaulty.
     uses: str | None = None
+    #: Jména dříve definovaných kroků, na jejichž dokončení má krok čekat.
+    #: None = implicitně sekvenčně čekat na bezprostředně předchozí krok;
+    #: [] = root krok bez závislostí.
+    needs: list[str] | None = None
     #: Povinné, pokud krok nemá `uses` — pak `run` dodá šablona.
     run: str | None = None
 
@@ -339,6 +344,8 @@ class WorkflowSpec(BaseModel):
     deleteNamespace: bool = False
     workingDir: str | None = None
     timeoutSeconds: int = 14400
+    #: Maximální počet současně běžících kroků v jednom workflow runu.
+    maxParallel: int = Field(default=4, ge=1)
     ttlSecondsAfterFinished: int = 3600
     env: dict[str, str] = Field(default_factory=dict)
     envFiles: list[str] = Field(default_factory=list)
@@ -376,7 +383,33 @@ class WorkflowSpec(BaseModel):
             updates["env"] = {**template.env, **step.env}
             resolved.append(step.model_copy(update=updates))
         self.steps = resolved
+        self._validate_step_graph()
         return self
+
+    def _validate_step_graph(self) -> None:
+        uses_needs = any(step.needs is not None for step in self.steps)
+        seen: set[str] = set()
+        duplicate_names: set[str] = set()
+        for step in self.steps:
+            if step.name in seen:
+                duplicate_names.add(step.name)
+            seen.add(step.name)
+        if uses_needs and duplicate_names:
+            names = ", ".join(sorted(duplicate_names))
+            raise ValueError(f"workflow steps using 'needs' require unique step names; duplicates: {names}")
+
+        previous: set[str] = set()
+        for step in self.steps:
+            if step.needs is not None:
+                duplicate_needs = sorted({name for name in step.needs if step.needs.count(name) > 1})
+                if duplicate_needs:
+                    names = ", ".join(duplicate_needs)
+                    raise ValueError(f"step {step.name!r} has duplicate 'needs' entries: {names}")
+                missing = [name for name in step.needs if name not in previous]
+                if missing:
+                    names = ", ".join(missing)
+                    raise ValueError(f"step {step.name!r} has unknown or future 'needs' entries: {names}")
+            previous.add(step.name)
 
 
 class WorkflowFile(BaseModel):

@@ -214,6 +214,47 @@ def test_workflow_schema_parses_and_interpolates(tmp_path: Path) -> None:
     assert spec.steps[1].image == "registry.example/other:2.0"
     assert spec.steps[0].outputs[0].type == "agent_comment"
     assert spec.steps[0].outputs[0].status == 4  # alias `in_review` se mapuje na číslo
+    assert spec.maxParallel == 4
+
+
+def test_workflow_schema_accepts_needs_and_max_parallel(tmp_path: Path) -> None:
+    path = tmp_path / "parallel.yaml"
+    path.write_text(
+        "version: 1\nworkflow:\n  image: x\n  maxParallel: 2\n  steps:\n"
+        "    - name: a\n      run: echo a\n"
+        "    - name: b\n      needs: []\n      run: echo b\n"
+        "    - name: c\n      needs: [a, b]\n      run: echo c\n",
+        encoding="utf-8",
+    )
+
+    workflow = load_workflow_file(path, _values(tmp_path))
+
+    assert workflow.workflow.maxParallel == 2
+    assert workflow.workflow.steps[0].needs is None
+    assert workflow.workflow.steps[1].needs == []
+    assert workflow.workflow.steps[2].needs == ["a", "b"]
+
+
+def test_workflow_schema_rejects_future_needs_and_duplicate_names(tmp_path: Path) -> None:
+    future = tmp_path / "future.yaml"
+    future.write_text(
+        "version: 1\nworkflow:\n  image: x\n  steps:\n"
+        "    - name: a\n      needs: [b]\n      run: echo a\n"
+        "    - name: b\n      run: echo b\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError, match="unknown or future 'needs'"):
+        load_workflow_file(future, _values(tmp_path))
+
+    duplicate = tmp_path / "duplicate.yaml"
+    duplicate.write_text(
+        "version: 1\nworkflow:\n  image: x\n  steps:\n"
+        "    - name: a\n      run: echo a\n"
+        "    - name: a\n      needs: []\n      run: echo b\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError, match="unique step names"):
+        load_workflow_file(duplicate, _values(tmp_path))
 
 
 def test_comment_status_aliases_map_to_agentis_enum() -> None:
@@ -655,10 +696,12 @@ class FakeRunner:
         self.deleted_namespaces: list[str] = []
         self.prepared: list[str] = []
         self.results: list[str] = []
+        self.results_by_step: dict[str, str] = {}
         self.release = threading.Event()
         self.release.set()
         self.log_tail = "boom log"
         self.active = False
+        self._lock = threading.Lock()
 
     def prepare(self, workflow, *, namespace: str, run_dir: Path) -> None:
         self.prepared.append(namespace)
@@ -679,18 +722,22 @@ class FakeRunner:
         abort_event: threading.Event,
         run_dir: Path,
     ) -> StepResult:
-        self.steps.append(
-            {
-                "step": step.name,
-                "name": name,
-                "namespace": namespace,
-                "labels": dict(labels),
-                "env": dict(env),
-                "timeout": timeout,
-            }
-        )
+        with self._lock:
+            self.steps.append(
+                {
+                    "step": step.name,
+                    "name": name,
+                    "namespace": namespace,
+                    "labels": dict(labels),
+                    "env": dict(env),
+                    "timeout": timeout,
+                }
+            )
         self.release.wait(timeout=5.0)
-        status = self.results.pop(0) if self.results else "succeeded"
+        with self._lock:
+            status = self.results_by_step.get(step.name)
+            if status is None:
+                status = self.results.pop(0) if self.results else "succeeded"
         return StepResult(status=status, log_tail="" if status == "succeeded" else self.log_tail)
 
     def abort(self, namespace: str, labels: dict[str, str]) -> str:
@@ -718,6 +765,17 @@ def _wait_done(manager: WorkflowManager, task_id: str, timeout: float = 5.0) -> 
     raise AssertionError("workflow thread did not finish in time")
 
 
+def _wait_steps(runner: FakeRunner, count: int, timeout: float = 5.0) -> list[dict[str, Any]]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with runner._lock:
+            steps = list(runner.steps)
+        if len(steps) >= count:
+            return steps
+        time.sleep(0.01)
+    raise AssertionError(f"runner did not start {count} step(s) in time")
+
+
 def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -> None:
     worktree = tmp_path / "wt"
     _write_workflow(worktree)
@@ -727,6 +785,9 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
     (outputs_dir / "agent-name").write_text("Agent - openai/gpt-5", encoding="utf-8")
     (outputs_dir / "session-id").write_text("ses_42\n", encoding="utf-8")
     (outputs_dir / "pull-request-url").write_text("https://github.com/org/repo/pull/1\n", encoding="utf-8")
+    screenshots_dir = worktree / ".screenshots"
+    screenshots_dir.mkdir()
+    (screenshots_dir / "result.png").write_bytes(b"png-data")
 
     runner = FakeRunner()
     runner.release.clear()  # workflow zůstane "běžet", dokud test nepovolí dokončení
@@ -763,6 +824,7 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
     assert comment["attachments"] == [
         {"label": "Pull Request", "value": "https://github.com/org/repo/pull/1", "type": "url"}
     ]
+    assert comment["images"] == [{"name": "result.png", "content": base64.b64encode(b"png-data").decode("ascii")}]
     # followup akce jdou z `workflow.followups` sekce YAML, ne z Pythonu
     assert [(action["adapter_method"], action["workflow"]) for action in comment["actions"]] == [
         ("start", "merge"),
@@ -981,6 +1043,196 @@ def test_conditional_step_runs_when_condition_holds(tmp_path: Path) -> None:
 
     step_indexes = [record["labels"]["agentis.step_index"] for record in runner.steps]
     assert step_indexes == ["0", "1", "2"]
+
+
+PARALLEL_WORKFLOW_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  maxParallel: 2
+  timeoutSeconds: 120
+  steps:
+    - name: First
+      run: echo first
+    - name: Second root
+      needs: []
+      run: echo second
+    - name: Join
+      needs: [First, "Second root"]
+      run: echo join
+"""
+
+
+def test_parallel_needs_start_independent_steps_and_join_after_them(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    path = worktree / WORKFLOW_FILE_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(PARALLEL_WORKFLOW_YAML, encoding="utf-8")
+
+    runner = FakeRunner()
+    runner.release.clear()
+    manager, _calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+
+    started = _wait_steps(runner, 2)
+    assert {record["step"] for record in started} == {"First", "Second root"}
+
+    runner.release.set()
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "success"
+    step_names = [record["step"] for record in runner.steps]
+    assert set(step_names[:2]) == {"First", "Second root"}
+    assert step_names[2:] == ["Join"]
+
+
+PARALLEL_VAR_SCOPE_WORKFLOW_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  maxParallel: 2
+  timeoutSeconds: 120
+  steps:
+    - name: Emit flag
+      run: emit
+      outputs:
+        - type: var
+          name: FLAG
+          valueFrom: .agentis/outputs/flag
+    - name: Independent condition
+      needs: []
+      if: FLAG == 'yes'
+      run: should-not-run
+    - name: Dependent condition
+      needs: ["Emit flag"]
+      if: FLAG == 'yes'
+      run: should-run
+"""
+
+
+def test_parallel_var_outputs_are_visible_only_through_transitive_needs(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    path = worktree / WORKFLOW_FILE_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(PARALLEL_VAR_SCOPE_WORKFLOW_YAML, encoding="utf-8")
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "flag").write_text("yes\n", encoding="utf-8")
+
+    runner = FakeRunner()
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "success"
+    assert [record["step"] for record in runner.steps] == ["Emit flag", "Dependent condition"]
+    assert runner.steps[1]["env"]["FLAG"] == "yes"
+
+    skip_events = [
+        params
+        for method, params in calls
+        if method == "run.adapter_event" and params["kind"] == "workflow_step" and params["data"].get("skipped")
+    ]
+    assert len(skip_events) == 1
+    assert skip_events[0]["data"]["step"] == "Independent condition"
+    assert skip_events[0]["data"]["vars"] == {}
+
+
+FAIL_FAST_WORKFLOW_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  maxParallel: 1
+  timeoutSeconds: 120
+  steps:
+    - name: Fail
+      run: exit 1
+    - name: Pending normal
+      needs: []
+      run: should-not-run
+    - name: Report failure
+      always: true
+      run: report
+      outputs:
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/failure-comment.md
+"""
+
+
+def test_parallel_fail_fast_skips_pending_normal_steps_and_runs_always(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    path = worktree / WORKFLOW_FILE_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(FAIL_FAST_WORKFLOW_YAML, encoding="utf-8")
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "failure-comment.md").write_text("Selhalo.", encoding="utf-8")
+
+    runner = FakeRunner()
+    runner.results_by_step["Fail"] = "failed"
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "failed"
+    assert [record["step"] for record in runner.steps] == ["Fail", "Report failure"]
+    assert runner.steps[1]["env"]["AGENTIS_WORKFLOW_STATUS"] == "failed"
+    assert runner.steps[1]["env"]["AGENTIS_FAILED_STEP"] == "Fail"
+
+    skipped = [
+        params["data"]
+        for method, params in calls
+        if method == "run.adapter_event" and params["kind"] == "workflow_step" and params["data"].get("skipped")
+    ]
+    assert len(skipped) == 1
+    assert skipped[0]["step"] == "Pending normal"
+    assert skipped[0]["failed_step"] == "Fail"
+
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert len(comment_calls) == 1
+    assert comment_calls[0]["body"] == "Selhalo."
+
+
+PARALLEL_CONTINUE_ON_ERROR_WORKFLOW_YAML = """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 120
+  steps:
+    - name: Optional check
+      continueOnError: true
+      run: exit 1
+    - name: Continue
+      run: echo ok
+"""
+
+
+def test_parallel_continue_on_error_unblocks_dependents(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    path = worktree / WORKFLOW_FILE_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(PARALLEL_CONTINUE_ON_ERROR_WORKFLOW_YAML, encoding="utf-8")
+
+    runner = FakeRunner()
+    runner.results_by_step["Optional check"] = "failed"
+    manager, _calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "success"
+    assert [record["step"] for record in runner.steps] == ["Optional check", "Continue"]
 
 
 BUILTIN_CONDITION_WORKFLOW_YAML = """
