@@ -84,6 +84,8 @@ class AdapterOptionsPayload(BaseModel):
     task_status: int | None = None
     #: Název workflow souboru `.agentis/workflows/<workflow>.yaml`; vyplněný pro followup akce (merge, close, ...).
     workflow: str | None = None
+    #: Když je zapnuto v Agentisu, default workflow po úspěšném PR provede merge samo.
+    auto_merge: bool = False
 
     @field_validator("manifest")
     @classmethod
@@ -141,6 +143,7 @@ class AgentExecutionContextPayload(BaseModel):
     task_id: str
     session_id: str | None = None
     title: str
+    context_mode: Literal["full", "comments", "none"] = "full"
     description: str = ""
     user_prompt: str | None = None
     task_status: int | None = None

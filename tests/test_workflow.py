@@ -6,6 +6,7 @@ import base64
 import json
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -1650,6 +1651,11 @@ def test_delete_namespace_ignored_by_local_executor(tmp_path: Path) -> None:
 
 def test_repo_action_workflows_parse(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
+    default = load_workflow_file(repo_root / WORKFLOW_FILE_RELPATH, _values(tmp_path))
+    assert any(step.name == "Auto merge final comment" for step in default.workflow.steps)
+    merge_followup = next(followup for followup in default.workflow.followups if followup.workflow == "merge")
+    assert merge_followup.if_ == "PR_CREATED && !AUTO_MERGE"
+
     for name in ("merge", "close"):
         workflow = load_workflow_file(repo_root / workflow_file_relpath(name), _values(tmp_path))
         assert workflow.workflow.steps
@@ -1667,6 +1673,45 @@ def test_repo_action_workflows_parse(tmp_path: Path) -> None:
     mount_names = [mount["name"] for mount in merge.workflow.volumeMounts]
     assert "www" in mount_names and "gitconfig" in mount_names, "merge workflow dědí volumeMounts z _base.yaml"
     assert {volume["name"] for volume in merge.volumes} >= set(mount_names), "každý mount má zděděný volume"
+
+
+def test_repo_default_workflow_auto_merge_finishes_task_done(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    worktree = tmp_path / "wt"
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "env-ready").write_text("true", encoding="utf-8")
+    (outputs_dir / "auto-merge").write_text("true", encoding="utf-8")
+    (outputs_dir / "final-comment.md").write_text("Agent dokončil práci.", encoding="utf-8")
+    (outputs_dir / "pull-request-url").write_text("https://github.com/org/repo/pull/1\n", encoding="utf-8")
+    (outputs_dir / "auto-merge-comment.md").write_text("Zamergováno.", encoding="utf-8")
+
+    runner = FakeRunner()
+    settings = replace(_settings(tmp_path), bundled_workflow_dir=repo_root / ".agentis" / "workflows")
+    manager = WorkflowManager(settings, runner=runner)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    manager._agentis_call = lambda method, params: calls.append((method, params))  # type: ignore[method-assign]
+    context = _context(
+        project_github_repo="org/repo",
+        adapter={"runtime": "workflow", "model": "openai/gpt-5", "agent": "build", "auto_merge": True},
+    )
+
+    result = manager.start_workflow(context, str(worktree), "udelej X")
+    assert "Auto merge final comment" in result["steps"]
+    _wait_done(manager, context.task_id)
+
+    assert manager._runs[context.task_id].status == "success"
+    assert any(record["env"]["AGENTIS_AUTO_MERGE"] == "true" for record in runner.steps)
+    executed_steps = [record["step"] for record in runner.steps]
+    assert "Auto merge rebase task branch" in executed_steps
+    assert "Auto merge fast-forward base branch" in executed_steps
+
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert len(comment_calls) == 1
+    comment = comment_calls[0]
+    assert comment["body"] == "Zamergováno."
+    assert comment["status"] == 5
+    assert [action["title"] for action in comment["actions"]] == ["Zavřít prostředí"]
 
 
 def test_failed_step_stops_workflow_and_reports_log_tail(tmp_path: Path) -> None:
@@ -2434,6 +2479,50 @@ def test_jsonrpc_start_with_workflow_runtime_is_nonblocking(tmp_path: Path) -> N
 
     runner.release.set()
     _wait_done(manager, "task-77")
+
+
+def test_jsonrpc_start_comments_context_builds_prompt_from_comment_history(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+    runner = FakeRunner()
+    service, manager, _calls = _service(tmp_path, runner)
+    context = _context(
+        context_mode="comments",
+        user_prompt="IDE metadata must not be used in comments mode",
+        description="Task description must not be used in comments mode",
+        comments=[
+            {"id": "comment-1", "author_type": "user", "author_name": "Ada", "body": "Prvni zadani"},
+            {"id": "comment-2", "author_type": "user", "author_name": "Ada", "body": "Dopln testy"},
+        ],
+    )
+
+    service.start(StartParams(context=context))
+    _wait_done(manager, context.task_id)
+
+    prompt = manager._runs[context.task_id].prompt_file.read_text(encoding="utf-8")
+    assert prompt.startswith("<comments>")
+    assert "Prvni zadani" in prompt
+    assert "Dopln testy" in prompt
+    assert "Task description" not in prompt
+    assert "IDE metadata" not in prompt
+
+
+def test_jsonrpc_start_none_context_uses_only_direct_prompt(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+    runner = FakeRunner()
+    service, manager, _calls = _service(tmp_path, runner)
+    context = _context(
+        context_mode="none",
+        user_prompt="Jen novy komentar",
+        comments=[{"id": "comment-1", "author_type": "user", "body": "Historie"}],
+    )
+
+    service.start(StartParams(context=context))
+    _wait_done(manager, context.task_id)
+
+    prompt = manager._runs[context.task_id].prompt_file.read_text(encoding="utf-8")
+    assert prompt == "Jen novy komentar"
 
 
 def test_jsonrpc_add_message_reruns_ci_workflow_with_resume_session(tmp_path: Path) -> None:

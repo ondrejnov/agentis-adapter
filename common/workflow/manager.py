@@ -411,6 +411,8 @@ class WorkflowManager:
             env["AGENTIS_AGENT"] = adapter.agent
         if adapter and adapter.effort:
             env["AGENTIS_EFFORT"] = adapter.effort
+        if adapter:
+            env["AGENTIS_AUTO_MERGE"] = "true" if adapter.auto_merge else "false"
         return env
 
     def _thread_main(self, run: _WorkflowRun) -> None:

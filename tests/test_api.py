@@ -394,6 +394,7 @@ def test_start_accepts_extended_agent_execution_context_schema(tmp_path: Path):
                     "task_number": 17,
                     "task_priority": 3,
                     "parent_task_id": 12,
+                    "context_mode": "comments",
                     "agent_id": "agent-1",
                     "agent_title": "Builder",
                     "agent_prompt": "Follow repository instructions.",
@@ -423,6 +424,7 @@ def test_start_accepts_extended_agent_execution_context_schema(tmp_path: Path):
     assert context["task_number"] == 17
     assert context["task_priority"] == 3
     assert context["parent_task_id"] == 12
+    assert context["context_mode"] == "comments"
     assert context["agent_id"] == "agent-1"
     assert context["agent_title"] == "Builder"
     assert context["agent_prompt"] == "Follow repository instructions."

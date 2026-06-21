@@ -19,6 +19,13 @@
 
   },
   "mcp": {
+     "agentis": {
+      "type": "remote",
+      "url": "https://agentis.cz/mcp",
+      "headers": {
+        "Authorization": "Bearer {env:AGENTIS_TOKEN}"
+      }
+    },
      "ask-question": {
       "command": ["/var/www/agentis-sdk/.venv/bin/python", "-m", "agentis_sdk.mcp_server"],
       "cwd": "/var/www/agentis-sdk",
