@@ -838,9 +838,7 @@ class WorkflowManager:
                 continue
             outputs.extend(step.outputs)
 
-        comment_body: str | None = None
-        comment_status: int | None = None
-        comment_name: str | None = None
+        comments: list[dict[str, Any]] = []
         session_id: str | None = None
         attachments: list[dict[str, Any]] = []
         artifacts: list[dict[str, Any]] = []
@@ -859,10 +857,14 @@ class WorkflowManager:
             if output.type == "agent_comment":
                 body = self._read_output_file(run, output.bodyFrom)
                 if body and body.strip():
-                    comment_body = body.strip()
-                    comment_status = output.status
                     name = self._read_output_file(run, output.nameFrom) if output.nameFrom else output.name
-                    comment_name = (name or "").strip() or None
+                    comments.append(
+                        {
+                            "body": body.strip(),
+                            "status": output.status,
+                            "author_name": (name or "").strip() or None,
+                        }
+                    )
             elif output.type == "session_id":
                 value = self._read_output_file(run, output.valueFrom)
                 if value and value.strip():
@@ -895,7 +897,7 @@ class WorkflowManager:
                 params={"run_id": run.context.run_id, "session_id": session_id},
             )
 
-        if comment_body:
+        if comments:
             # Followup akce se konfigurují v `workflow.followups` sekci workflow YAML;
             # pojmenovaná workflow (merge/close) sekci nemají, takže další akce nenabízí.
             # U failure komentáře se akce nenabízí vůbec — merge/close rozdělané práce
@@ -910,20 +912,24 @@ class WorkflowManager:
                     if followup.if_ is None or evaluate_condition(followup.if_, run.vars)
                 ]
             )
-            self._agentis_call(
-                method="task.add_agent_comment",
-                params={
-                    "run_id": run.context.run_id,
-                    "body": comment_body,
-                    "attachments": attachments,
-                    "images": collect_screenshot_images(run.worktree),
-                    "artifacts": artifacts,
-                    "status": comment_status,
-                    "comment_type": "primary",
-                    "actions": actions,
-                    "author_name": comment_name,
-                },
-            )
+            images = collect_screenshot_images(run.worktree)
+            last_comment_index = len(comments) - 1
+            for index, comment in enumerate(comments):
+                include_run_outputs = index == last_comment_index
+                self._agentis_call(
+                    method="task.add_agent_comment",
+                    params={
+                        "run_id": run.context.run_id,
+                        "body": comment["body"],
+                        "attachments": attachments if include_run_outputs else [],
+                        "images": images if include_run_outputs else [],
+                        "artifacts": artifacts if include_run_outputs else [],
+                        "status": comment["status"],
+                        "comment_type": "primary",
+                        "actions": actions if include_run_outputs else [],
+                        "author_name": comment["author_name"],
+                    },
+                )
         elif attachments or artifacts:
             self._emit_adapter_event(
                 run.context,

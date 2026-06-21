@@ -855,6 +855,69 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
         assert "AGENTIS_SERVICE_TOKEN" not in env
 
 
+def test_workflow_applies_multiple_agent_comment_outputs_as_separate_comments(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    path = worktree / WORKFLOW_FILE_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        """
+version: 1
+workflow:
+  followups:
+    - title: Zavřít prostředí
+      workflow: close
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 120
+  steps:
+    - name: Run agent
+      run: agentiscode < "$AGENTIS_PROMPT_FILE"
+      outputs:
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/final-comment.md
+          status: in_review
+          name: Agent
+    - name: Auto merge final comment
+      run: echo merged
+      outputs:
+        - label: Pull Request
+          type: url
+          valueFrom: .agentis/outputs/pull-request-url
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/auto-merge-comment.md
+          status: done
+          name: Merge agent
+""",
+        encoding="utf-8",
+    )
+    outputs_dir = worktree / ".agentis" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "final-comment.md").write_text("Hotovo od agenta.", encoding="utf-8")
+    (outputs_dir / "auto-merge-comment.md").write_text("Zamergováno.", encoding="utf-8")
+    (outputs_dir / "pull-request-url").write_text("https://github.com/org/repo/pull/1", encoding="utf-8")
+
+    runner = FakeRunner()
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert len(comment_calls) == 2
+    assert [comment["body"] for comment in comment_calls] == ["Hotovo od agenta.", "Zamergováno."]
+    assert [comment["status"] for comment in comment_calls] == [4, 5]
+    assert [comment["author_name"] for comment in comment_calls] == ["Agent", "Merge agent"]
+    assert comment_calls[0]["attachments"] == []
+    assert comment_calls[0]["actions"] == []
+    assert comment_calls[1]["attachments"] == [
+        {"label": "Pull Request", "value": "https://github.com/org/repo/pull/1", "type": "url"}
+    ]
+    assert [(action["adapter_method"], action["workflow"]) for action in comment_calls[1]["actions"]] == [
+        ("start", "close")
+    ]
+
+
 def test_workflow_runtime_env_includes_configured_service_token(tmp_path: Path) -> None:
     worktree = tmp_path / "wt"
     _write_workflow(worktree)
@@ -1707,11 +1770,11 @@ def test_repo_default_workflow_auto_merge_finishes_task_done(tmp_path: Path) -> 
     assert "Auto merge fast-forward base branch" in executed_steps
 
     comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
-    assert len(comment_calls) == 1
-    comment = comment_calls[0]
-    assert comment["body"] == "Zamergováno."
-    assert comment["status"] == 5
-    assert [action["title"] for action in comment["actions"]] == ["Zavřít prostředí"]
+    assert len(comment_calls) == 2
+    assert [comment["body"] for comment in comment_calls] == ["Agent dokončil práci.", "Zamergováno."]
+    assert [comment["status"] for comment in comment_calls] == [4, 5]
+    assert comment_calls[0]["actions"] == []
+    assert [action["title"] for action in comment_calls[1]["actions"]] == ["Zavřít prostředí"]
 
 
 def test_failed_step_stops_workflow_and_reports_log_tail(tmp_path: Path) -> None:
