@@ -5,7 +5,7 @@ workflow:
   # s pojmenovaným workflow `.agentis/workflows/<workflow>.yaml`.
   followups:
     - title: Git merge
-      if: PR_CREATED
+      if: PR_CREATED && !AUTO_MERGE
       prompt: Sloučit změny z task větve do hlavní větve.
       workflow: merge
     - title: Zavřít prostředí
@@ -42,10 +42,14 @@ workflow:
         else
           printf 'false' > .agentis/outputs/env-ready
         fi
+        printf '%s' "${AGENTIS_AUTO_MERGE:-false}" > .agentis/outputs/auto-merge
       outputs:
         - type: var
           name: ENV_READY
           valueFrom: .agentis/outputs/env-ready
+        - type: var
+          name: AUTO_MERGE
+          valueFrom: .agentis/outputs/auto-merge
     - name: Create virtualenv
       if: ENV_READY != 'true'
       run: python3.13 -m venv .venv
@@ -113,6 +117,62 @@ workflow:
         - type: var
           name: PR_CREATED
           valueFrom: .agentis/outputs/pull-request-url
+    - name: Auto merge rebase task branch
+      if: PR_CREATED && AUTO_MERGE
+      run: |
+        mkdir -p .agentis/outputs
+        git fetch origin "$BASE_BRANCH"
+        if ! git rebase "refs/remotes/origin/${BASE_BRANCH}"; then
+          opencode run --model openai/gpt-5.5 "fix git conflict" \
+            | tee .agentis/outputs/auto-merge-conflict-resolution.txt
+          if ! GIT_EDITOR=true git rebase --continue; then
+            git rebase --abort
+            exit 1
+          fi
+        fi
+    - name: Auto merge fast-forward base branch
+      if: PR_CREATED && AUTO_MERGE
+      workingDir: "[%MAIN_DIR%]"
+      run: |
+        if ! git rebase "$BRANCH"; then
+          git stash push
+          git rebase "$BRANCH"
+          git stash pop
+        fi
+        git push origin "${BASE_BRANCH}:refs/heads/${BASE_BRANCH}"
+    - name: Auto merge final comment
+      if: PR_CREATED && AUTO_MERGE
+      run: |
+        mkdir -p .agentis/outputs
+        {
+          printf 'Zamergoval jsem task větev do hlavní větve.\n'
+          if [ -s .agentis/outputs/auto-merge-conflict-resolution.txt ]; then
+            printf '\nMerge narazil na git conflict, který jsem řešil přes AI resolver.\n'
+          fi
+        } > .agentis/outputs/auto-merge-comment.md
+      outputs:
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/auto-merge-comment.md
+          status: done
+          name: Merge agent
+    - name: Report auto merge failure
+      always: true
+      run: |
+        [ "${AGENTIS_WORKFLOW_STATUS:-success}" = "failed" ] || exit 0
+        mkdir -p .agentis/outputs
+        {
+          printf 'Auto merge task větve selhal v kroku "%s".\n' "$AGENTIS_FAILED_STEP"
+          if [ -s .agentis/outputs/auto-merge-conflict-resolution.txt ]; then
+            printf '\nRebase narazil na konflikt, který se nepodařilo vyřešit ani přes AI resolver; rebase byl zrušen (git rebase --abort) a task větev zůstává beze změny.\n'
+          fi
+        } > .agentis/outputs/auto-merge-failure-comment.md
+      outputs:
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/auto-merge-failure-comment.md
+          name: Merge agent
+        - label: AI conflict resolver
+          type: text
+          valueFrom: .agentis/outputs/auto-merge-conflict-resolution.txt
 volumes:
   - name: npm-cache
     hostPath:
