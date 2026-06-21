@@ -22,6 +22,7 @@ class Settings:
     public_base_url: str | None
     agentis_endpoint: str | None
     agentis_token: str | None
+    agentis_service_token: str | None = None
     namespace_prefix: str = "Task"
     project_run_root: Path = Path("/tmp/agentis")
     kubectl_command: str = "kubectl"
@@ -47,7 +48,7 @@ class Settings:
         if not self.agentis_adapter_id:
             raise ValueError("AGENTIS_ADAPTER_ID is required for WebSocket transport")
         if not self.agentis_token:
-            raise ValueError("AGENTIS_TOKEN is required for WebSocket transport")
+            raise ValueError("AGENTIS_API_TOKEN or AGENTIS_TOKEN is required for WebSocket transport")
 
         parsed = urlparse(self.agentis_ws_endpoint)
         if parsed.scheme not in {"ws", "wss"}:
@@ -83,7 +84,8 @@ def _build_settings() -> Settings:
         ).resolve(),
         public_base_url=_public_base_url(port),
         agentis_endpoint=_get_env("AGENTIS_ENDPOINT", "https://agentis.cz/api"),
-        agentis_token=_get_env("AGENTIS_TOKEN", "1234"),
+        agentis_token=_get_env("AGENTIS_API_TOKEN") or _get_env("AGENTIS_TOKEN", "1234"),
+        agentis_service_token=_get_env("AGENTIS_SERVICE_TOKEN"),
         namespace_prefix=_get_env("ADAPTER_NAMESPACE_PREFIX", "Task") or "Task",
         project_run_root=Path(_get_env("ADAPTER_PROJECT_RUN_ROOT", "/tmp/agentis") or "/tmp/agentis").resolve(),
         kubectl_command=_get_env("KUBECTL_COMMAND", "kubectl") or "kubectl",

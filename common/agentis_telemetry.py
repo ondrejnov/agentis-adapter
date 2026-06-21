@@ -99,6 +99,7 @@ class AgentisTelemetry:
         primary_session: bool = True,
         endpoint: Optional[str] = None,
         token: Optional[str] = None,
+        service_token: Optional[str] = None,
         timeout: float = 10.0,
         client: Optional[AgentisJsonRpcClient] = None,
         on_error: Optional[Callable[[str], None]] = None,
@@ -121,7 +122,12 @@ class AgentisTelemetry:
         if client is None:
             if not endpoint:
                 raise ValueError("endpoint must not be empty")
-            self._client = AgentisJsonRpcClient(endpoint=endpoint, token=token, timeout=timeout)
+            self._client = AgentisJsonRpcClient(
+                endpoint=endpoint,
+                token=token,
+                service_token=service_token,
+                timeout=timeout,
+            )
 
         self._mapper = ClaudeActivityMapper(prompt=prompt, mode=mode, agent=adapter, cwd=cwd)
         self.session_id: Optional[str] = None

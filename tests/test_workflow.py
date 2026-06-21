@@ -147,14 +147,21 @@ workflow:
 """
 
 
-def _settings(tmp_path: Path, workflow_executor: str = "kubernetes") -> Settings:
+def _settings(
+    tmp_path: Path,
+    workflow_executor: str = "kubernetes",
+    *,
+    agentis_endpoint: str | None = None,
+    agentis_service_token: str | None = None,
+) -> Settings:
     return Settings(
         host="127.0.0.1",
         port=8001,
         worktree_root=tmp_path / "worktrees",
         public_base_url=None,
-        agentis_endpoint=None,
+        agentis_endpoint=agentis_endpoint,
         agentis_token=None,
+        agentis_service_token=agentis_service_token,
         project_run_root=tmp_path / "tmp-agentis",
         workflow_executor=workflow_executor,
         bundled_workflow_dir=tmp_path / "bundled-workflows",
@@ -844,6 +851,32 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
         assert env["AGENTIS_RUN_ID"] == "run-12345678"
         assert env["AGENTIS_MODEL"] == "openai/gpt-5"
         assert "AGENTIS_TOKEN" not in env
+        assert "AGENTIS_SERVICE_TOKEN" not in env
+
+
+def test_workflow_runtime_env_includes_configured_service_token(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+
+    runner = FakeRunner()
+    manager = WorkflowManager(
+        _settings(
+            tmp_path,
+            agentis_endpoint="https://agentis.local/api",
+            agentis_service_token="ags_secret",
+        ),
+        runner=runner,
+    )
+    manager._agentis_call = lambda method, params: None  # type: ignore[method-assign]
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    env = runner.steps[0]["env"]
+    assert env["AGENTIS_ENDPOINT"] == "https://agentis.local/api"
+    assert env["AGENTIS_SERVICE_TOKEN"] == "ags_secret"
+    assert "AGENTIS_TOKEN" not in env
 
 
 def test_start_workflow_falls_back_to_bundled_workflow(tmp_path: Path) -> None:
@@ -2039,6 +2072,8 @@ workflow:
     - name: Run agent
       run: |
         [ -z "${AGENTIS_TOKEN:-}" ]
+        [ -z "${AGENTIS_API_TOKEN:-}" ]
+        [ -z "${AGENTIS_SERVICE_TOKEN:-}" ]
         mkdir -p .agentis/outputs
         printf 'Hotovo lokálně: %s' "$(cat "$AGENTIS_PROMPT_FILE")" > .agentis/outputs/final-comment.md
         printf 'ses_local' > .agentis/outputs/session-id
@@ -2117,6 +2152,8 @@ def test_local_executor_runs_steps_as_processes_and_applies_outputs(
 ) -> None:
     # token adapter procesu nesmí prosáknout do prostředí kroků (krok si to sám kontroluje)
     monkeypatch.setenv("AGENTIS_TOKEN", "super-secret")
+    monkeypatch.setenv("AGENTIS_API_TOKEN", "super-secret-api")
+    monkeypatch.setenv("AGENTIS_SERVICE_TOKEN", "super-secret-service")
     worktree = tmp_path / "wt"
     _write_workflow_yaml(worktree, LOCAL_WORKFLOW_YAML)
     manager, calls = _local_manager(tmp_path)

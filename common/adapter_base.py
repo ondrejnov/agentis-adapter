@@ -62,6 +62,7 @@ class BaseAdapterService:
             with self._agentis_client_class()(
                 endpoint=endpoint,
                 token=self.settings.agentis_token,
+                service_token=self.settings.agentis_service_token,
                 timeout=timeout,
             ) as client:
                 return client.call(method=method, params=params, request_id=1)

@@ -8,6 +8,21 @@ import requests
 from common.config import get_settings
 
 AUTH_HEADER = "X-Auth-Token"
+SERVICE_AUTH_HEADER = "X-Service-Token"
+SERVICE_TOKEN_METHODS = frozenset(
+    {
+        "task.add_agent_comment",
+        "task.upload_artifact",
+        "task.add_question",
+        "task.get_question_result",
+        "task.add_approve",
+        "task.get_approve_result",
+        "session.session_created",
+        "session.session_update",
+        "session.store_activity_log",
+        "session.session_error",
+    }
+)
 
 
 class AgentisJsonRpcError(RuntimeError):
@@ -22,15 +37,16 @@ class AgentisJsonRpcClient:
         self,
         endpoint: str,
         token: str | None = None,
+        service_token: str | None = None,
         timeout: float = 15.0,
         session: requests.Session | None = None,
     ) -> None:
         self.endpoint = self._normalize_endpoint(endpoint)
+        self.token = token
+        self.service_token = service_token
         self.timeout = timeout
         self.session = session or requests.Session()
         self._owns_session = session is None
-        if token:
-            self.session.headers.update({AUTH_HEADER: str(token)})
 
     def __enter__(self) -> AgentisJsonRpcClient:
         return self
@@ -67,9 +83,14 @@ class AgentisJsonRpcClient:
         if params is not None:
             payload["params"] = params
 
+        headers = self._auth_headers(method)
+
         try:
             response = self.session.post(
-                self.endpoint, json=payload, timeout=timeout if timeout is not None else self.timeout
+                self.endpoint,
+                json=payload,
+                timeout=timeout if timeout is not None else self.timeout,
+                headers=headers or None,
             )
         except requests.RequestException as exc:
             raise AgentisJsonRpcError(f"Agentis JSON-RPC request failed: {exc}") from exc
@@ -102,6 +123,11 @@ class AgentisJsonRpcClient:
 
         return body.get("result")
 
+    def _auth_headers(self, method: str) -> dict[str, str]:
+        if method in SERVICE_TOKEN_METHODS:
+            return {SERVICE_AUTH_HEADER: str(self.service_token)} if self.service_token else {}
+        return {AUTH_HEADER: str(self.token)} if self.token else {}
+
 
 class AgentisRunLogger:
     def __init__(
@@ -130,6 +156,7 @@ class AgentisRunLogger:
             self._client = AgentisJsonRpcClient(
                 endpoint=resolved_endpoint,
                 token=settings.agentis_token if token is None else token,
+                service_token=settings.agentis_service_token,
                 timeout=timeout,
             )
 

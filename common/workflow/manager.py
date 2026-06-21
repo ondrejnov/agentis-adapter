@@ -398,6 +398,10 @@ class WorkflowManager:
                 "AGENTIS_CONTEXT_FILE": str(run.context_file),
             }
         )
+        if self.settings.agentis_endpoint:
+            env["AGENTIS_ENDPOINT"] = self.settings.agentis_endpoint
+        if self.settings.agentis_service_token:
+            env["AGENTIS_SERVICE_TOKEN"] = self.settings.agentis_service_token
         adapter = run.context.adapter
         if run.context.session_id:
             env["AGENTIS_SESSION_ID"] = run.context.session_id
@@ -953,7 +957,11 @@ class WorkflowManager:
         if not endpoint:
             return
         try:
-            with AgentisJsonRpcClient(endpoint=endpoint, token=self.settings.agentis_token) as client:
+            with AgentisJsonRpcClient(
+                endpoint=endpoint,
+                token=self.settings.agentis_token,
+                service_token=self.settings.agentis_service_token,
+            ) as client:
                 client.call(method=method, params=params, request_id=f"workflow-{method}-{uuid4().hex}")
         except AgentisJsonRpcError as exc:
             sys.stderr.write(f"[workflow] agentis {method} failed: {exc}\n")

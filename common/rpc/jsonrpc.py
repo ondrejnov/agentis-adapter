@@ -307,7 +307,11 @@ class AgentJsonRpcService:
         endpoint = self.settings.agentis_endpoint
 
         try:
-            with AgentisJsonRpcClient(endpoint=endpoint, token=self.settings.agentis_token) as client:
+            with AgentisJsonRpcClient(
+                endpoint=endpoint,
+                token=self.settings.agentis_token,
+                service_token=self.settings.agentis_service_token,
+            ) as client:
                 result = client.call(method=method, params=params, request_id=f"agent-{method}-{uuid4().hex}")
         except AgentisJsonRpcError as exc:
             raise AgentJsonRpcException(

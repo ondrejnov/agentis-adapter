@@ -4,7 +4,7 @@ from typing import Any, cast
 
 import pytest
 
-from common.agentis import AUTH_HEADER, AgentisJsonRpcClient, AgentisJsonRpcError, AgentisRunLogger
+from common.agentis import AUTH_HEADER, SERVICE_AUTH_HEADER, AgentisJsonRpcClient, AgentisJsonRpcError, AgentisRunLogger
 
 
 class FakeResponse:
@@ -26,8 +26,15 @@ class FakeSession:
         self.calls: list[dict[str, Any]] = []
         self.closed = False
 
-    def post(self, url: str, *, json: dict[str, Any], timeout: float) -> FakeResponse:
-        self.calls.append({"url": url, "json": json, "timeout": timeout})
+    def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        timeout: float,
+        headers: dict[str, str] | None = None,
+    ) -> FakeResponse:
+        self.calls.append({"url": url, "json": json, "timeout": timeout, "headers": headers})
         return self.response
 
     def close(self) -> None:
@@ -42,7 +49,6 @@ def test_agentis_jsonrpc_client_posts_normalized_authenticated_request() -> None
 
     assert result == {"ok": True}
     assert client.endpoint == "http://agentis.local/api"
-    assert session.headers[AUTH_HEADER] == "secret"
     assert session.calls == [
         {
             "url": "http://agentis.local/api",
@@ -53,8 +59,37 @@ def test_agentis_jsonrpc_client_posts_normalized_authenticated_request() -> None
                 "params": {"kind": "deploy"},
             },
             "timeout": 12.0,
+            "headers": {AUTH_HEADER: "secret"},
         }
     ]
+
+
+def test_agentis_jsonrpc_client_uses_service_token_only_for_service_methods() -> None:
+    session = FakeSession(FakeResponse({"jsonrpc": "2.0", "id": "req-1", "result": {"ok": True}}))
+    client = AgentisJsonRpcClient(
+        "http://agentis.local/",
+        token="user-secret",
+        service_token="service-secret",
+        session=cast(Any, session),
+    )
+
+    client.call("session.store_activity_log", {"session_id": "ses-1"}, request_id="req-1")
+
+    assert session.calls[0]["headers"] == {SERVICE_AUTH_HEADER: "service-secret"}
+
+
+def test_agentis_jsonrpc_client_does_not_send_service_token_to_regular_methods() -> None:
+    session = FakeSession(FakeResponse({"jsonrpc": "2.0", "id": "req-1", "result": {"ok": True}}))
+    client = AgentisJsonRpcClient(
+        "http://agentis.local/",
+        token="user-secret",
+        service_token="service-secret",
+        session=cast(Any, session),
+    )
+
+    client.call("run.adapter_event", {"kind": "workflow"}, request_id="req-1")
+
+    assert session.calls[0]["headers"] == {AUTH_HEADER: "user-secret"}
 
 
 def test_agentis_jsonrpc_client_raises_shared_error_for_rpc_error() -> None:
@@ -95,6 +130,7 @@ def test_agentis_run_logger_posts_system_event() -> None:
                 },
             },
             "timeout": 7.0,
+            "headers": None,
         }
     ]
 

@@ -370,6 +370,8 @@ def test_cli_task_id_drives_telemetry(monkeypatch) -> None:
             "http://agentis.local/api",
             "--agentis-token",
             "secret",
+            "--agentis-service-token",
+            "service-secret",
             "udelej",
             "X",
         ]
@@ -381,6 +383,7 @@ def test_cli_task_id_drives_telemetry(monkeypatch) -> None:
     assert events["kwargs"]["task_id"] == "task-1"
     assert events["kwargs"]["endpoint"] == "http://agentis.local/api"
     assert events["kwargs"]["token"] == "secret"
+    assert events["kwargs"]["service_token"] == "service-secret"
     assert events["kwargs"]["adapter"] == "opencode"
     assert events["kwargs"]["last_message_to_comment"] is False
     assert events["kwargs"]["primary_session"] is True

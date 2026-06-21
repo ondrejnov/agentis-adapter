@@ -73,9 +73,16 @@ def test_collect_expected_artifacts_ignores_paths_outside_root(tmp_path):
 
 def fake_agentis_client_factory(captured_calls: list[dict[str, Any]]):
     class FakeAgentisClient:
-        def __init__(self, endpoint: str, token: str | None = None, timeout: float = 15.0) -> None:
+        def __init__(
+            self,
+            endpoint: str,
+            token: str | None = None,
+            service_token: str | None = None,
+            timeout: float = 15.0,
+        ) -> None:
             self.endpoint = endpoint
             self.token = token
+            self.service_token = service_token
             self.timeout = timeout
 
         def __enter__(self):
@@ -89,6 +96,7 @@ def fake_agentis_client_factory(captured_calls: list[dict[str, Any]]):
                 {
                     "endpoint": self.endpoint,
                     "token": self.token,
+                    "service_token": self.service_token,
                     "timeout": self.timeout,
                     "request_id": request_id,
                     "method": method,
@@ -281,9 +289,7 @@ def test_project_scope_namespace_uses_project_slug():
     )
 
     namespace = namespace_for_context(context, make_settings(namespace_prefix="Task"))
-    dev_server_url = dev_server_url_for_context(
-        context, make_settings(namespace_prefix="Task")
-    )
+    dev_server_url = dev_server_url_for_context(context, make_settings(namespace_prefix="Task"))
 
     assert namespace == "project-agentis-core"
     assert dev_server_url == "http://app-project-agentis-core.dev.agentis.cz"
@@ -613,6 +619,8 @@ def test_project_scope_allows_working_dir_without_git(tmp_path):
         "status": "skipped",
         "reason": "project_scope",
     }
+
+
 def test_start_rejects_path_inside_adapter_manifest():
     client = make_client()
 

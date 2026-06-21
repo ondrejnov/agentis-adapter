@@ -19,7 +19,7 @@ založí run a průběžně do něj posílá aktivitu agenta (viz
 :mod:`common.agentis_telemetry`)::
 
     agentiscode --adapter claude --task-id <TASK_ID> \\
-        --agentis-api https://agentis.example/api --agentis-token TOKEN "udelej X"
+        --agentis-api https://agentis.example/api --agentis-token TOKEN --agentis-service-token SERVICE_TOKEN "udelej X"
 """
 
 from __future__ import annotations
@@ -258,8 +258,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--agentis-token",
         metavar="TOKEN",
-        default=os.environ.get("AGENTIS_TOKEN"),
-        help="Agentis auth token (default: $AGENTIS_TOKEN).",
+        default=os.environ.get("AGENTIS_API_TOKEN") or os.environ.get("AGENTIS_TOKEN"),
+        help="Agentis user/API auth token (default: $AGENTIS_API_TOKEN, fallback $AGENTIS_TOKEN).",
+    )
+    parser.add_argument(
+        "--agentis-service-token",
+        metavar="TOKEN",
+        default=os.environ.get("AGENTIS_SERVICE_TOKEN"),
+        help="Agentis service token for runtime callbacks (default: $AGENTIS_SERVICE_TOKEN).",
     )
     parser.add_argument(
         "prompt",
@@ -404,6 +410,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             primary_session=args.primary_session,
             endpoint=args.agentis_api,
             token=args.agentis_token,
+            service_token=args.agentis_service_token,
             on_error=_telemetry_error,
         )
 

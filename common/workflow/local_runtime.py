@@ -30,7 +30,7 @@ from common.workflow.runtime import LOG_TAIL_LINES, StepResult, build_bash_wrapp
 from common.workflow.schema import WorkflowFile, WorkflowStep
 
 #: Proměnné adapter procesu, které se do prostředí lokálních kroků nesmí propsat.
-_SCRUBBED_HOST_ENV = frozenset({"AGENTIS_TOKEN"})
+_SCRUBBED_HOST_ENV = frozenset({"AGENTIS_TOKEN", "AGENTIS_API_TOKEN", "AGENTIS_SERVICE_TOKEN"})
 
 #: Po SIGTERM dostane process group tolik sekund na úklid, pak přijde SIGKILL.
 _KILL_GRACE_SEC = 5.0
