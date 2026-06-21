@@ -149,6 +149,21 @@ def test_telemetry_uses_existing_run_id_without_starting_new_run() -> None:
     assert client.calls[0]["params"]["run_id"] == "run-existing"
 
 
+def test_telemetry_does_not_finish_existing_run_id() -> None:
+    client = FakeClient()
+    telemetry = AgentisTelemetry(
+        task_id="task-1", prompt="udelej X", adapter="claude", run_id="run-existing", client=client
+    )
+
+    telemetry.start()
+    for event in _stream():
+        telemetry.handle(event)
+    telemetry.finish()
+
+    adapter_events = [c["params"] for c in client.calls if c["method"] == "run.adapter_event"]
+    assert [event["kind"] for event in adapter_events] == ["agentiscode"]
+
+
 def test_telemetry_can_bind_secondary_session() -> None:
     client = FakeClient()
     telemetry = AgentisTelemetry(

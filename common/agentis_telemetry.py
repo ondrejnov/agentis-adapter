@@ -112,6 +112,7 @@ class AgentisTelemetry:
         self.adapter = adapter
         self.timeout = timeout
         self.run_id = run_id.strip() if isinstance(run_id, str) and run_id.strip() else None
+        self._owns_run = self.run_id is None
         self.task_status = task_status
         self.last_message_to_comment = last_message_to_comment
         self.primary_session = primary_session
@@ -221,9 +222,10 @@ class AgentisTelemetry:
           2. ``{adapter}_run`` ``success``/``failed`` se **stejným event_id** jako
              úvodní ``started`` — tím se rozpracovaný krok přepne z točícího se
              spinneru na hotovo,
-          3. ``idle`` ``success``/``failed`` — dotlačí ``adapter_state`` do
-             koncového stavu (``starting`` je pořád „aktivní“) a vyšle
-             ``run.finished``.
+          3. pro vlastní run ``idle`` ``success``/``failed`` — dotlačí
+             ``adapter_state`` do koncového stavu (``starting`` je pořád
+             „aktivní“) a vyšle ``run.finished``. Externí ``--run-id`` uvnitř
+             workflow uzavírá až workflow orchestrátor.
         """
         if self.run_id is None:
             return
@@ -239,7 +241,10 @@ class AgentisTelemetry:
         # ze spinneru na hotovo/selhalo.
         # self._emit_adapter_event(status, kind="agentiscode", message="běh selhal." if self._is_error else "běh doběhl.")
         # Koncový stav adapteru + run.finished (kind musí být přesně "idle").
-        self._emit_adapter_event(status, kind="idle", message=message)
+        # Když agentiscode běží uvnitř workflow s předaným --run-id, celý run
+        # uzavírá až WorkflowManager po aplikaci závěrečných outputs/komentáře.
+        if self._owns_run:
+            self._emit_adapter_event(status, kind="idle", message=message)
 
     # ------------------------------------------------------------------
     # Internals
