@@ -39,7 +39,7 @@ backend ◄───────────── HTTP JSON-RPC (AgentisJsonRpc
 Důležité vlastnosti:
 
 - **Spojení iniciuje adapter** — drží outbound WebSocket na Agentis (`AGENTIS_WS_ENDPOINT`), Agentis do adapteru nevolá žádné HTTP. Adapter tak může běžet za NATem.
-- **HTTP server adapteru je jen observabilita** — `/health`, `/status`, `/log`, `/runs/{run_id}/log` pro lokální TUI `agentis-top`. Žádné JSON-RPC přes HTTP.
+- **HTTP server adapteru je jen observabilita** — `/health`, `/status`, `/log`, `/runs/{run_id}/log`. Žádné JSON-RPC přes HTTP.
 - **Stav je in-memory** — registry sessions a runů nepřežijí restart procesu, záměrně bez perzistence.
 
 ## Vstupní body
@@ -48,7 +48,6 @@ Důležité vlastnosti:
 | --- | --- |
 | `agentis-adapter [--id <adapter-id>]` | Spustí adapter proces: FastAPI app (observabilita) + WebSocket transport |
 | `agentiscode …` | Samostatný CLI wrapper nad OpenCode/Claude Code (viz níže) |
-| `agentis-top` | Textual TUI dashboard nad `/status` a `/log` endpointy adapteru |
 
 Serving adapter je **jeden generický** (`app/adapter_api.py`), žádný `--adapter` výběr. Definuje `create_app()` (FastAPI app se službami na `app.state`) a tabulku `_DISPATCH` (JSON-RPC metody → handler) a `adapter_factory` instancuje `GitAdapterService` napřímo — adapter dělá jen git worktree/snapshot plumbing.
 
@@ -157,7 +156,6 @@ Selhání reportingu běh agenta neshazuje (best-effort, loguje se na stderr). `
 - `GET /health` — liveness.
 - `GET /status` — snapshot status registru: stav WebSocket spojení, běžící/dokončené runy, statistiky od startu.
 - `GET /log?after=&limit=` — globální log adapteru; `GET /runs/{run_id}/log` — log konkrétního runu.
-- `agentis-top` — read-only Textual dashboard, který tyhle endpointy polluje.
 
 ## Testy
 

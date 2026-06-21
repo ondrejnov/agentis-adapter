@@ -1,4 +1,4 @@
-"""Testy StatusRegistry a read-only status endpointů pro TUI `agentis-top`."""
+"""Testy StatusRegistry a read-only status endpointů."""
 
 from typing import Any
 
@@ -110,7 +110,9 @@ def test_run_activity_log_cursor_and_unknown_run():
 
 def test_activity_from_event_formats():
     assert activity_from_event("session_start", {"model": "claude-fable-5"}) == "session start (claude-fable-5)"
-    assert activity_from_event("tool_use", {"name": "Edit", "input": {"file_path": "app/main.py"}}) == "Edit app/main.py"
+    assert (
+        activity_from_event("tool_use", {"name": "Edit", "input": {"file_path": "app/main.py"}}) == "Edit app/main.py"
+    )
     assert activity_from_event("thinking", {}) == "přemýšlí…"
     assert activity_from_event("error", {"message": "boom"}) == "chyba: boom"
     assert activity_from_event("raw", {"line": "noise"}) is None

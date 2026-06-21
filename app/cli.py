@@ -27,7 +27,7 @@ async def _run_transports(
     External Agentis JSON-RPC is received over the outbound WebSocket connection;
     the agent runtime does not call back into the adapter (its activity is
     streamed directly from the CLI output). The HTTP server serves only the
-    observability endpoints (``/health``, ``/status``, logy) pro ``agentis-top``.
+    observability endpoints (``/health``, ``/status``, logs).
     """
     import uvicorn
 

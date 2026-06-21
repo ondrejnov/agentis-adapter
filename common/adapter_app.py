@@ -28,7 +28,7 @@ def create_adapter_app(
     back into the adapter (its activity is streamed directly from the ``opencode``/
     ``claude`` CLI). The HTTP app holds the configured services on ``app.state``
     and serves only read-only observability endpoints (``/health``, ``/status``,
-    logy) pro lokální TUI ``agentis-top``.
+    logs).
     """
     app = FastAPI(title=title, version=version)
     session_registry = SessionContextRegistry()

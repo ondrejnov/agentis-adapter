@@ -1,0 +1,1 @@
+odparej agentis-top a TUI. nebude jiz potreba

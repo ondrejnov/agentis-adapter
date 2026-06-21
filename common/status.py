@@ -1,4 +1,4 @@
-"""In-memory stav adapteru pro lokální observabilitu (TUI `agentis-top`, `/status`).
+"""In-memory stav adapteru pro lokální observabilitu (`/status`).
 
 `StatusRegistry` sbírá stav WebSocket spojení na Agentis, záznamy o runech
 (agentí session i workflow), aktivitu per run a globální log adapteru.
@@ -245,9 +245,7 @@ class StatusRegistry:
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             running = [record.dump() for record in self._runs.values() if record.status == "running"]
-            finished = [
-                self._runs[run_id].dump() for run_id in reversed(self._finished_order) if run_id in self._runs
-            ]
+            finished = [self._runs[run_id].dump() for run_id in reversed(self._finished_order) if run_id in self._runs]
             running.sort(key=lambda item: item["received_at"])
             stats = dict(self._counters)
             stats["runs_running"] = len(running)
@@ -281,9 +279,7 @@ def activity_from_event(event_type: str, data: dict[str, Any] | None) -> str | N
         tool_input = data.get("input") or {}
         detail = ""
         if isinstance(tool_input, dict):
-            detail = str(
-                tool_input.get("file_path") or tool_input.get("command") or tool_input.get("pattern") or ""
-            )
+            detail = str(tool_input.get("file_path") or tool_input.get("command") or tool_input.get("pattern") or "")
         return _truncate(f"{name} {detail}".strip(), 120)
     if event_type == "text":
         text = (data.get("text") or "").strip()
