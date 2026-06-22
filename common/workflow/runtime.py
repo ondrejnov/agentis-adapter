@@ -128,8 +128,8 @@ def build_job_manifest(
     }
     if working_dir:
         container["workingDir"] = working_dir
-    if spec.volumeMounts:
-        container["volumeMounts"] = spec.volumeMounts
+    if spec.mounts:
+        container["volumeMounts"] = [mount.volume_mount() for mount in spec.mounts]
     if step.resources:
         container["resources"] = step.resources
 
@@ -137,8 +137,8 @@ def build_job_manifest(
         "restartPolicy": "Never",
         "containers": [container],
     }
-    if workflow.volumes:
-        pod_spec["volumes"] = workflow.volumes
+    if spec.mounts:
+        pod_spec["volumes"] = [mount.volume() for mount in spec.mounts]
     if spec.imagePullSecrets:
         pod_spec["imagePullSecrets"] = spec.imagePullSecrets
 

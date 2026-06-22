@@ -57,10 +57,8 @@ def _ignored_fields(workflow: WorkflowFile) -> list[str]:
         ignored.append("image")
     if spec.imagePullSecrets:
         ignored.append("imagePullSecrets")
-    if spec.volumeMounts:
-        ignored.append("volumeMounts")
-    if workflow.volumes:
-        ignored.append("volumes")
+    if spec.mounts:
+        ignored.append("mounts")
     if spec.followups:
         ignored.append("followups")
     if any(step.if_ for step in spec.steps):

@@ -78,6 +78,37 @@ def _coerce_env(value: dict[str, Any]) -> dict[str, str]:
     return {key: str(item) for key, item in value.items()}
 
 
+_MOUNT_FIELD_NAMES = {"name", "mountPath", "readOnly", "subPath", "subPathExpr", "mountPropagation"}
+
+
+class WorkflowMount(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str
+    mountPath: str
+    readOnly: bool | None = None
+    subPath: str | None = None
+    subPathExpr: str | None = None
+    mountPropagation: str | None = None
+
+    def volume_mount(self) -> dict[str, Any]:
+        return {key: value for key, value in self.model_dump(exclude_none=True).items() if key in _MOUNT_FIELD_NAMES}
+
+    def volume(self) -> dict[str, Any]:
+        return {"name": self.name, **self.volume_source()}
+
+    def volume_source(self) -> dict[str, Any]:
+        return {
+            key: value for key, value in self.model_dump(exclude_none=True).items() if key not in _MOUNT_FIELD_NAMES
+        }
+
+    @model_validator(mode="after")
+    def validate_volume_source(self) -> WorkflowMount:
+        if not self.volume_source():
+            raise ValueError(f"mount {self.name!r} requires a Kubernetes volume source")
+        return self
+
+
 #: Jména workflow proměnných musí být env-safe — injektují se do prostředí dalších kroků.
 _VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -349,7 +380,7 @@ class WorkflowSpec(BaseModel):
     ttlSecondsAfterFinished: int = 3600
     env: dict[str, str] = Field(default_factory=dict)
     envFiles: list[str] = Field(default_factory=list)
-    volumeMounts: list[dict[str, Any]] = Field(default_factory=list)
+    mounts: list[WorkflowMount] = Field(default_factory=list)
     imagePullSecrets: list[dict[str, Any]] = Field(default_factory=list)
     #: Sdílené definice kroků pro `uses`; dědí se přes `extends` (merge po jménech).
     stepTemplates: dict[str, WorkflowStepTemplate] = Field(default_factory=dict)
@@ -420,7 +451,6 @@ class WorkflowFile(BaseModel):
     #: soubor dědí konfiguraci. Vyřeší ho `load_workflow_file()` před validací.
     extends: str | None = None
     workflow: WorkflowSpec
-    volumes: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class WorkflowExtendsError(ValueError):
@@ -431,13 +461,13 @@ class WorkflowExtendsError(ValueError):
 _NON_INHERITED_SPEC_FIELDS = ("steps", "followups")
 
 #: Seznamová pole `workflow` spec slučovaná položkově (rodič + potomek, viz `_merge_list`).
-_MERGED_SPEC_LIST_FIELDS = ("envFiles", "volumeMounts", "imagePullSecrets")
+_MERGED_SPEC_LIST_FIELDS = ("envFiles", "mounts", "imagePullSecrets")
 
 
 def _merge_list(parent: list[Any], child: list[Any]) -> list[Any]:
     """Sloučí seznamová pole rodiče a potomka: konkatenace s přepisem podle `name`.
 
-    Položky-mapy se stejným `name` (volumes, volumeMounts, imagePullSecrets)
+    Položky-mapy se stejným `name` (mounts, imagePullSecrets)
     potomek přepisuje na místě — konkatenace by vyrobila duplicitní jména
     v Job manifestu. Ostatní položky se přidávají na konec, přesné duplikáty
     (typicky stejný řádek v `envFiles`) se vynechají.
@@ -460,7 +490,7 @@ def _merge_workflow_raw(parent: dict[str, Any], child: dict[str, Any]) -> dict[s
 
     Skaláry přepisuje potomek, `env` a `stepTemplates` se mergují po klíčích
     (potomek vyhrává, šablonu přepisuje celou), seznamy infrastruktury
-    (`volumes`, `envFiles`, `volumeMounts`, `imagePullSecrets`) se slučují přes
+    (`mounts`, `envFiles`, `imagePullSecrets`) se slučují přes
     `_merge_list`, `steps` a `followups` se nedědí nikdy. Merge běží nad
     surovými daty před validací a interpolací, aby se defaulty schématu
     neprosadily místo hodnot rodiče.
@@ -468,7 +498,6 @@ def _merge_workflow_raw(parent: dict[str, Any], child: dict[str, Any]) -> dict[s
 
     merged = {key: value for key, value in parent.items() if key != "workflow"}
     merged.update({key: value for key, value in child.items() if key not in {"workflow", "extends"}})
-    merged["volumes"] = _merge_list(parent.get("volumes") or [], child.get("volumes") or [])
 
     parent_spec = dict(parent.get("workflow") or {})
     child_spec = dict(child.get("workflow") or {})
@@ -563,6 +592,7 @@ __all__ = [
     "WorkflowExtendsError",
     "WorkflowFollowup",
     "WorkflowInterpolationError",
+    "WorkflowMount",
     "WorkflowOutput",
     "WorkflowStep",
     "WorkflowStepTemplate",

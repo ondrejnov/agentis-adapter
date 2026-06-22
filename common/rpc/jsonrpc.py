@@ -63,14 +63,17 @@ class AgentJsonRpcService:
 
     @staticmethod
     def _workflow_prompt(context: AgentExecutionContextPayload) -> str:
-        if context.context_mode == "comments":
-            return OpenCodeUtils.build_comments_block(context.comments) or context.title
-
         chunks: list[str] = []
         for text in (context.user_prompt, context.description):
             if isinstance(text, str) and text.strip() and (not chunks or chunks[-1] != text.strip()):
                 chunks.append(text.strip())
-        return "\n\n".join(chunks) or context.title
+        s = "\n\n".join(chunks) or context.title
+
+        if context.context_mode == "comments":
+            s = "<task>" + s + "</task>\n" + str(OpenCodeUtils.build_comments_block(context.comments)) + "\n"
+            s += "user added last comment to comments."
+
+        return s
 
     @staticmethod
     def _prompt_with_attachments(

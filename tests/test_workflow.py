@@ -69,9 +69,11 @@ workflow:
     HOME: /root
     IS_SANDBOX: 1
     MAIN_DIR: "[%MAIN_DIR%]"
-  volumeMounts:
+  mounts:
     - name: www
       mountPath: /var/www
+      hostPath:
+        path: /var/www
   steps:
     - name: Run agent
       run: |
@@ -92,10 +94,6 @@ workflow:
         - type: url
           label: Pull Request
           valueFrom: .agentis/outputs/pull-request-url
-volumes:
-  - name: www
-    hostPath:
-      path: /var/www
 """
 
 
@@ -223,6 +221,21 @@ def test_workflow_schema_parses_and_interpolates(tmp_path: Path) -> None:
     assert spec.steps[0].outputs[0].type == "agent_comment"
     assert spec.steps[0].outputs[0].status == 4  # alias `in_review` se mapuje na číslo
     assert spec.maxParallel == 4
+    assert spec.mounts[0].volume_mount() == {"name": "www", "mountPath": "/var/www"}
+    assert spec.mounts[0].volume() == {"name": "www", "hostPath": {"path": "/var/www"}}
+
+
+def test_workflow_schema_rejects_mount_without_volume_source(tmp_path: Path) -> None:
+    path = tmp_path / "ci.yaml"
+    path.write_text(
+        "version: 1\nworkflow:\n  image: x\n  mounts:\n"
+        "    - name: cache\n      mountPath: /cache\n"
+        "  steps:\n    - name: a\n      run: echo\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="requires a Kubernetes volume source"):
+        load_workflow_file(path, _values(tmp_path))
 
 
 def test_workflow_schema_accepts_needs_and_max_parallel(tmp_path: Path) -> None:
@@ -396,22 +409,19 @@ workflow:
     SHARED: base
   imagePullSecrets:
     - name: registry
-  volumeMounts:
+  mounts:
     - name: www
       mountPath: /var/www
+      hostPath:
+        path: /var/www
     - name: config
       mountPath: /root/.config
       readOnly: true
+      hostPath:
+        path: /root/.config
   followups:
     - title: Nesmí se dědit
       workflow: merge
-volumes:
-  - name: www
-    hostPath:
-      path: /var/www
-  - name: config
-    hostPath:
-      path: /root/.config
 """
 
 CHILD_YAML = """
@@ -425,18 +435,18 @@ workflow:
   env:
     SHARED: child
     EXTRA: "1"
-  volumeMounts:
+  mounts:
     - name: config
       mountPath: /root/.config
+      hostPath:
+        path: /root/.config
     - name: cache
       mountPath: /root/.cache
+      hostPath:
+        path: /root/.cache
   steps:
     - name: Run agent
       run: agentiscode
-volumes:
-  - name: cache
-    hostPath:
-      path: /root/.cache
 """
 
 
@@ -460,13 +470,12 @@ def test_extends_merges_scalars_env_and_lists(tmp_path: Path) -> None:
     assert spec.env == {"HOME": "/root", "SHARED": "child", "EXTRA": "1"}
     assert spec.envFiles == ["/root/.config/agentis/agentis.env", "/etc/child.env"]  # dedupe + append
     assert spec.imagePullSecrets == [{"name": "registry"}]
-    # volumeMounts: stejné `name` potomek přepisuje na místě, nové se přidává na konec
-    assert spec.volumeMounts == [
-        {"name": "www", "mountPath": "/var/www"},
-        {"name": "config", "mountPath": "/root/.config"},
-        {"name": "cache", "mountPath": "/root/.cache"},
+    # mounts: stejné `name` potomek přepisuje na místě, nové se přidává na konec
+    assert [mount.model_dump(exclude_none=True) for mount in spec.mounts] == [
+        {"name": "www", "mountPath": "/var/www", "hostPath": {"path": "/var/www"}},
+        {"name": "config", "mountPath": "/root/.config", "hostPath": {"path": "/root/.config"}},
+        {"name": "cache", "mountPath": "/root/.cache", "hostPath": {"path": "/root/.cache"}},
     ]
-    assert [volume["name"] for volume in workflow.volumes] == ["www", "config", "cache"]
 
 
 def test_extends_never_inherits_steps_and_followups(tmp_path: Path) -> None:
@@ -1733,9 +1742,9 @@ def test_repo_action_workflows_parse(tmp_path: Path) -> None:
     assert close.workflow.deleteNamespace, "close workflow má po úspěchu smazat Kubernetes namespace"
     merge = load_workflow_file(repo_root / workflow_file_relpath("merge"), _values(tmp_path))
     assert merge.workflow.image, "merge workflow dědí image z _base.yaml"
-    mount_names = [mount["name"] for mount in merge.workflow.volumeMounts]
-    assert "www" in mount_names and "gitconfig" in mount_names, "merge workflow dědí volumeMounts z _base.yaml"
-    assert {volume["name"] for volume in merge.volumes} >= set(mount_names), "každý mount má zděděný volume"
+    mount_names = [mount.name for mount in merge.workflow.mounts]
+    assert "www" in mount_names and "gitconfig" in mount_names, "merge workflow dědí mounts z _base.yaml"
+    assert all(mount.volume_source() for mount in merge.workflow.mounts), "každý mount má volume source"
 
 
 def test_repo_default_workflow_auto_merge_finishes_task_done(tmp_path: Path) -> None:

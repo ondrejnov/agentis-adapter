@@ -55,11 +55,11 @@ Kde kroky fyzicky poběží, určuje `workflow.executor` v YAML; bez něj platí
 
 ### `kubernetes`
 
-Každý krok je `batch/v1 Job` obsluhovaný přes `kubectl` (apply / wait / logs / delete) — vyžaduje platný kube context. Joby běží v namespace odvozeném z kontextu (`common/namespaces.py`: explicitní `context.namespace`, jinak `project-<slug>` pro project scope, jinak `<prefix>-<task_number>-<title>`). Každý krok musí mít `image` (na kroku nebo na workflow), jinak start selže. `volumes` / `volumeMounts` / `imagePullSecrets` / `resources` se promítají do Job manifestu.
+Každý krok je `batch/v1 Job` obsluhovaný přes `kubectl` (apply / wait / logs / delete) — vyžaduje platný kube context. Joby běží v namespace odvozeném z kontextu (`common/namespaces.py`: explicitní `context.namespace`, jinak `project-<slug>` pro project scope, jinak `<prefix>-<task_number>-<title>`). Každý krok musí mít `image` (na kroku nebo na workflow), jinak start selže. `mounts` / `imagePullSecrets` / `resources` se promítají do Job manifestu.
 
 ### `local`
 
-Kroky běží jako lokální bash subprocessy na hostu nad worktree, pod uživatelem adapter procesu, bez izolace. Kubernetes pole (`image`, `volumes`, `volumeMounts`, `imagePullSecrets`, `resources`, `deleteNamespace`) se ignorují (vypíše se varování). Logy kroků jdou do `<run_dir>/logs/<job>.log`. Proměnná `AGENTIS_TOKEN` z prostředí adapteru se do kroků nepropisuje.
+Kroky běží jako lokální bash subprocessy na hostu nad worktree, pod uživatelem adapter procesu, bez izolace. Kubernetes pole (`image`, `mounts`, `imagePullSecrets`, `resources`, `deleteNamespace`) se ignorují (vypíše se varování). Logy kroků jdou do `<run_dir>/logs/<job>.log`. Proměnná `AGENTIS_TOKEN` z prostředí adapteru se do kroků nepropisuje.
 
 Oba executory spouští `run` skript kroku přes stejný bash wrapper: `set -euo pipefail`, sourcing `envFiles`, `cd` do `workingDir` kroku (jinak workflow `workingDir`, jinak `$WORKDIR`).
 
@@ -82,7 +82,12 @@ workflow:
     - /root/.config/agentis/agentis.env
   env:                          # env společné všem krokům
     TASK_NUMBER: "[%TASK_NUMBER%]"
-  volumeMounts: [...]           # jen kubernetes
+  mounts:                       # jen kubernetes; generuje volumeMounts i volumes
+    - name: www
+      mountPath: /var/www
+      readOnly: true            # volitelné mount pole
+      hostPath:                 # K8s volume source; lze použít i secret/configMap/emptyDir/...
+        path: /var/www
   followups: [...]              # akce nabídnuté v completion komentáři (viz níže)
   stepTemplates:                # sdílené definice kroků pro `uses` (viz níže)
     run-agent:
@@ -103,14 +108,15 @@ workflow:
       timeoutSeconds: 600       # přepis timeoutu
       resources: {}             # K8s resources (jen kubernetes)
       outputs: [...]            # viz níže
-volumes: [...]                  # K8s volumes (jen kubernetes)
 ```
+
+Každá položka `workflow.mounts` musí mít `name`, `mountPath` a aspoň jeden Kubernetes volume source klíč. Do `volumeMounts` se propisují jen mount pole `name`, `mountPath`, `readOnly`, `subPath`, `subPathExpr`, `mountPropagation`; ostatní klíče položky se propíšou do odpovídající položky `pod.spec.volumes`.
 
 Schema je striktní (`extra="forbid"`) — neznámé klíče jsou chyba.
 
 ### Dědičnost (`extends`)
 
-Top-level pole `extends: <name>` načte před validací soubor `.agentis/workflows/<name>.yaml` jako rodiče a smerguje ho s potomkem — typicky `extends: _base`, aby image, env a volumes nebyly zkopírované v každém workflow. Rodičovský soubor nemusí mít `steps`, takže se samostatně spustit nedá (start na něm selže na validaci). Podporovaná je **jediná úroveň** dědičnosti: rodič s vlastním `extends` (řetězení i cyklus) je chyba `WorkflowExtendsError`; chybějící cílový soubor je `FileNotFoundError` s cestou.
+Top-level pole `extends: <name>` načte před validací soubor `.agentis/workflows/<name>.yaml` jako rodiče a smerguje ho s potomkem — typicky `extends: _base`, aby image, env a mounty nebyly zkopírované v každém workflow. Rodičovský soubor nemusí mít `steps`, takže se samostatně spustit nedá (start na něm selže na validaci). Podporovaná je **jediná úroveň** dědičnosti: rodič s vlastním `extends` (řetězení i cyklus) je chyba `WorkflowExtendsError`; chybějící cílový soubor je `FileNotFoundError` s cestou.
 
 Merge probíhá nad surovým YAML (defaulty schématu nepřebijí hodnoty rodiče) a **interpolace `[%TOKEN%]` běží až po merge** — tokeny v base se vyhodnotí v kontextu runu potomka. Sémantika po polích:
 
@@ -119,7 +125,7 @@ Merge probíhá nad surovým YAML (defaulty schématu nepřebijí hodnoty rodič
 | skaláry (`image`, `workingDir`, `timeoutSeconds`, `deleteNamespace`, …) | potomek přepisuje rodiče; bez hodnoty v potomkovi platí rodič |
 | `env` | merge po klíčích, potomek vyhrává |
 | `stepTemplates` | merge po jménech šablon; potomek přepisuje **celou** šablonu (žádný deep-merge polí) |
-| `envFiles`, `volumeMounts`, `imagePullSecrets`, `volumes` | konkatenace rodič + potomek; položka-mapa se stejným `name` se přepíše na místě, přesný duplikát se vynechá |
+| `envFiles`, `mounts`, `imagePullSecrets` | konkatenace rodič + potomek; položka-mapa se stejným `name` se přepíše na místě, přesný duplikát se vynechá |
 | `steps`, `followups` | **nedědí se nikdy** — potomek je musí definovat sám |
 
 Konkatenace seznamů (místo přepisu) je zvolená záměrně: potomci typicky jen *přidávají* mounty navíc a přepis by je nutil kopírovat celý base blok, čímž by dědičnost ztratila smysl. Přepis podle `name` zároveň brání duplicitním jménům volumes v Job manifestu a umožňuje cílené přepsání jedné položky (např. zrušit `readOnly`). `steps` se nedědí, protože kroky jsou podstata workflow — „zdědit a upravit“ seznam kroků se nedá vyjádřit srozumitelně; sdílení *jednoho* kroku mezi workflow řeší `stepTemplates` + `uses` (viz níže).
@@ -302,7 +308,7 @@ Z tokenů jsou k dispozici `[%WORKDIR%]` (cwd agenta) a `[%MAIN_DIR%]` (hlavní 
 
 ## Dodávaná workflow
 
-Workflow `default.yaml`, `project.yaml`, `slack.yaml`, `merge.yaml` a `close.yaml` dědí přes `extends: _base` sdílenou infrastrukturu (image, `imagePullSecrets`, `envFiles`, společné env a volumes) a šablonu kroku `run-agent` z `_base.yaml` a definují jen vlastní kroky a odchylky.
+Workflow `default.yaml`, `project.yaml`, `slack.yaml`, `merge.yaml` a `close.yaml` dědí přes `extends: _base` sdílenou infrastrukturu (image, `imagePullSecrets`, `envFiles`, společné env a mounty) a šablonu kroku `run-agent` z `_base.yaml` a definují jen vlastní kroky a odchylky.
 
 | Soubor | Účel |
 | --- | --- |

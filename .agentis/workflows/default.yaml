@@ -19,15 +19,6 @@ workflow:
     IS_SANDBOX: 1
     PYTHONPATH: "[%WORKDIR%]/backend"
     PATH: "[%WORKDIR%]/.venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-  volumeMounts:
-    - name: npm-cache
-      mountPath: /root/.npm
-    - name: poetry-cache
-      mountPath: /root/.cache/pypoetry
-    - name: claudecodejson
-      mountPath: /root/.claude.json
-    - name: claudecode
-      mountPath: /root/.claude
   steps:
     - name: Copy environment file
       run: |
@@ -82,10 +73,6 @@ workflow:
           git -c user.name=Agentis -c user.email=code@agentis.cz \
             commit -m "TASK: #${TASK_NUMBER} - ${TASK_TITLE}"
         fi
-      outputs:
-        - label: Commit
-          type: text
-          valueFrom: .agentis/label-code-tasks-state.json
 
     - name: Create pull request
       if: GITHUB_REPO
@@ -173,27 +160,3 @@ workflow:
         - label: AI conflict resolver
           type: text
           valueFrom: .agentis/outputs/auto-merge-conflict-resolution.txt
-volumes:
-  - name: npm-cache
-    hostPath:
-      path: /root/.npm
-      type: DirectoryOrCreate
-  - name: poetry-cache
-    hostPath:
-      path: /root/.cache/pypoetry
-      type: DirectoryOrCreate
-  - name: gitnexus
-    hostPath:
-      path: /root/.gitnexus
-      type: DirectoryOrCreate
-  - name: claudecode
-    hostPath:
-      path: /root/.claude
-      type: DirectoryOrCreate
-  - name: claudecodejson
-    hostPath:
-      path: /root/.claude.json
-  - name: hf-cache
-    hostPath:
-      path: /root/.cache/huggingface
-      type: DirectoryOrCreate

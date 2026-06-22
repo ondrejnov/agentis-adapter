@@ -2,7 +2,7 @@
 
 Spouští workflow kroky jako bash subprocessy přímo na hostu nad worktree —
 protějšek :class:`~common.workflow.runtime.KubectlJobRunner` bez Kubernetes.
-Kubernetes-specifická pole workflow YAML (`image`, `volumes`, `volumeMounts`,
+Kubernetes-specifická pole workflow YAML (`image`, `mounts`,
 `imagePullSecrets`, `resources`) se ignorují; kroky běží pod uživatelem
 adapter procesu bez izolace, se stejným bash wrapperem (`set -euo pipefail`,
 sourcing `envFiles`, `cd` do workingDir kroku, jinak `"$WORKDIR"`) jako v Kubernetes.
@@ -174,10 +174,8 @@ class LocalProcessRunner:
             ignored.append("image")
         if spec.imagePullSecrets:
             ignored.append("imagePullSecrets")
-        if spec.volumeMounts:
-            ignored.append("volumeMounts")
-        if workflow.volumes:
-            ignored.append("volumes")
+        if spec.mounts:
+            ignored.append("mounts")
         if any(step.image for step in spec.steps):
             ignored.append("steps[].image")
         if any(step.resources for step in spec.steps):

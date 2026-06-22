@@ -56,76 +56,59 @@ workflow:
     TASK_NUMBER: "[%TASK_NUMBER%]"
     TASK_TITLE: "[%TASK_TITLE%]"
 
-  volumeMounts:
+  mounts:
     - name: www
       mountPath: /var/www
+      hostPath:
+        path: /var/www
     - name: agentis-tmp
       mountPath: /tmp/agentis
+      hostPath:
+        path: /tmp/agentis
+        type: DirectoryOrCreate
     - name: npm-cache
       mountPath: /root/.npm
+      hostPath:
+        path: /root/.npm
+        type: DirectoryOrCreate
     - name: poetry-cache
       mountPath: /root/.cache/pypoetry
+      hostPath:
+        path: /root/.cache/pypoetry
+        type: DirectoryOrCreate
     - name: gitconfig
       mountPath: /root/.gitconfig
       readOnly: true
+      hostPath:
+        path: /root/.gitconfig
+        type: FileOrCreate
     - name: gh-config
       mountPath: /root/.config/gh
       readOnly: true
+      hostPath:
+        path: /root/.config/gh
+        type: DirectoryOrCreate
     - name: agentis-config
       mountPath: /root/.config/agentis
       readOnly: true
+      hostPath:
+        path: /root/.config/agentis/
     - name: opencode-config
       mountPath: /root/.config/opencode
+      hostPath:
+        path: /root/.config/opencode
+        type: DirectoryOrCreate
     - name: opencode-share
       mountPath: /root/.local/share/opencode
+      hostPath:
+        path: /root/.local/share/opencode
+        type: DirectoryOrCreate
     - name: claudecodejson
       mountPath: /root/.claude.json
+      hostPath:
+        path: /root/.claude.json
     - name: claudecode
       mountPath: /root/.claude
-
-volumes:
-  - name: www
-    hostPath:
-      path: /var/www
-  - name: agentis-tmp
-    hostPath:
-      path: /tmp/agentis
-      type: DirectoryOrCreate
-  - name: npm-cache
-    hostPath:
-      path: /root/.npm
-      type: DirectoryOrCreate
-  - name: poetry-cache
-    hostPath:
-      path: /root/.cache/pypoetry
-      type: DirectoryOrCreate
-  - name: gitnexus
-    hostPath:
-      path: /root/.gitnexus
-      type: DirectoryOrCreate
-  - name: gitconfig
-    hostPath:
-      path: /root/.gitconfig
-      type: FileOrCreate
-  - name: gh-config
-    hostPath:
-      path: /root/.config/gh
-      type: DirectoryOrCreate
-  - name: agentis-config
-    hostPath:
-      path: /root/.config/agentis/
-  - name: opencode-config
-    hostPath:
-      path: /root/.config/opencode
-      type: DirectoryOrCreate
-  - name: opencode-share
-    hostPath:
-      path: /root/.local/share/opencode
-      type: DirectoryOrCreate
-  - name: claudecode
-    hostPath:
-      path: /root/.claude
-      type: DirectoryOrCreate
-  - name: claudecodejson
-    hostPath:
-      path: /root/.claude.json
+      hostPath:
+        path: /root/.claude
+        type: DirectoryOrCreate

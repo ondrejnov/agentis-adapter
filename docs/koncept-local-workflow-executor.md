@@ -132,14 +132,14 @@ Aktivace workflow režimu jako takového zůstává beze změny přes
 | `workingDir` | container workingDir | cwd subprocesů |
 | `timeoutSeconds` | `activeDeadlineSeconds` | deadline poll smyčky |
 | `image`, `imagePullSecrets` | povinné / použité | ignorováno |
-| `volumes`, `volumeMounts` | mounty | ignorováno (běží přímo na hostu) |
+| `mounts` | mounty | ignorováno (běží přímo na hostu) |
 | `resources`, `ttlSecondsAfterFinished` | Job spec | ignorováno |
 
 - `image` ve schématu povolit jako `str | None`; validátor vyžaduje image jen
   pro `executor == "kubernetes"` (resp. když se workflow reálně spouští v K8s,
   vyhodí `LocalProcessRunner`/manager srozumitelnou chybu naopak nikdy).
 - Ignorovaná pole lokální runner jednou za run zaloguje na stderr
-  (`[workflow] local executor ignoruje: volumes, volumeMounts, ...`), aby
+  (`[workflow] local executor ignoruje: mounts, ...`), aby
   nepřekvapilo, že mounty „nefungují".
 - `namespace` zůstává jen jako label/hodnota v eventech (`data.namespace`),
   reálně se nic nevytváří.

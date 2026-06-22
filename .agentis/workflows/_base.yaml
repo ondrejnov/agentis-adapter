@@ -55,48 +55,59 @@ workflow:
     BRANCH: "[%BRANCH%]"
     BASE_BRANCH: "[%BASE_BRANCH%]"
     MAIN_DIR: "[%MAIN_DIR%]"
-  volumeMounts:
+  mounts:
     - name: www
       mountPath: /var/www
+      hostPath:
+        path: /var/www
     - name: agentis-tmp
       mountPath: /tmp/agentis
+      hostPath:
+        path: /tmp/agentis
+        type: DirectoryOrCreate
+    - name: npm-cache
+      mountPath: /root/.npm
+      hostPath:
+        path: /root/.npm
+        type: DirectoryOrCreate
+    - name: poetry-cache
+      mountPath: /root/.cache/pypoetry
+      hostPath:
+        path: /root/.cache/pypoetry
+        type: DirectoryOrCreate
     - name: gitconfig
       mountPath: /root/.gitconfig
       readOnly: true
+      hostPath:
+        path: /root/.gitconfig
+        type: FileOrCreate
     - name: gh-config
       mountPath: /root/.config/gh
       readOnly: true
+      hostPath:
+        path: /root/.config/gh
+        type: DirectoryOrCreate
     - name: agentis-config
       mountPath: /root/.config/agentis
       readOnly: true
+      hostPath:
+        path: /root/.config/agentis/
     - name: opencode-config
       mountPath: /root/.config/opencode
+      hostPath:
+        path: /root/.config/opencode
+        type: DirectoryOrCreate
     - name: opencode-share
       mountPath: /root/.local/share/opencode
-volumes:
-  - name: www
-    hostPath:
-      path: /var/www
-  - name: agentis-tmp
-    hostPath:
-      path: /tmp/agentis
-      type: DirectoryOrCreate
-  - name: gitconfig
-    hostPath:
-      path: /root/.gitconfig
-      type: FileOrCreate
-  - name: gh-config
-    hostPath:
-      path: /root/.config/gh
-      type: DirectoryOrCreate
-  - name: agentis-config
-    hostPath:
-      path: /root/.config/agentis/
-  - name: opencode-config
-    hostPath:
-      path: /root/.config/opencode
-      type: DirectoryOrCreate
-  - name: opencode-share
-    hostPath:
-      path: /root/.local/share/opencode
-      type: DirectoryOrCreate
+      hostPath:
+        path: /root/.local/share/opencode
+        type: DirectoryOrCreate
+    - name: claudecodejson
+      mountPath: /root/.claude.json
+      hostPath:
+        path: /root/.claude.json
+    - name: claudecode
+      mountPath: /root/.claude
+      hostPath:
+        path: /root/.claude
+        type: DirectoryOrCreate

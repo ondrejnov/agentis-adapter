@@ -25,15 +25,6 @@ workflow:
     IS_SANDBOX: 1
     PYTHONPATH: "[%WORKDIR%]/backend"
     PATH: "[%WORKDIR%]/.venv/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-  volumeMounts:
-    - name: npm-cache
-      mountPath: /root/.npm
-    - name: poetry-cache
-      mountPath: /root/.cache/pypoetry
-    - name: claudecodejson
-      mountPath: /root/.claude.json
-    - name: claudecode
-      mountPath: /root/.claude
   steps:
     # Task headers nejsou dostupné v `if` podmínkách (jen env), proto se
     # kanál přečte do `var` outputu — kroky pro Slack se pak dají podmínit
@@ -96,19 +87,3 @@ workflow:
               -H "Content-Type: application/json; charset=utf-8" \
               --data @- \
           | jq -e '.ok' >/dev/null
-volumes:
-  - name: npm-cache
-    hostPath:
-      path: /root/.npm
-      type: DirectoryOrCreate
-  - name: poetry-cache
-    hostPath:
-      path: /root/.cache/pypoetry
-      type: DirectoryOrCreate
-  - name: claudecode
-    hostPath:
-      path: /root/.claude
-      type: DirectoryOrCreate
-  - name: claudecodejson
-    hostPath:
-      path: /root/.claude.json
