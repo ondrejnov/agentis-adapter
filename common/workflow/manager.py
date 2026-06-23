@@ -57,8 +57,26 @@ from common.workflow.schema import (
 )
 
 
+ARTIFACT_OUTPUT_MAX_FILES = 50
+ARTIFACT_OUTPUT_MAX_BYTES = 50 * 1024 * 1024
+ARTIFACT_OUTPUT_STAGING_DIR = "artifact-staging"
+ARTIFACT_NAME_MAX_LENGTH = 255
+
+
 class WorkflowBusyError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class _StagedArtifact:
+    step_index: int
+    output_index: int
+    match_index: int
+    name: str
+    filename: str
+    source_relpath: str
+    staged_path: Path
+    size: int
 
 
 @dataclass
@@ -70,6 +88,7 @@ class _WorkflowRun:
     attempt_id: str
     run_dir: Path
     output_root: Path
+    artifact_staging_dir: Path
     prompt_file: Path
     context_file: Path
     executor: str
@@ -87,6 +106,10 @@ class _WorkflowRun:
     skipped_steps: set[int] = field(default_factory=set)
     #: Indexy selhaných kroků (`continueOnError` i fatální) — outputs se neaplikují.
     failed_steps: set[int] = field(default_factory=set)
+    #: Artefakty zachycené po úspěchu kroku; uploadují se až při aplikaci outputs.
+    staged_artifacts: list[_StagedArtifact] = field(default_factory=list)
+    #: Diagnostika artifact outputů; workflow kvůli ní nepadá.
+    output_warnings: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def active(self) -> bool:
