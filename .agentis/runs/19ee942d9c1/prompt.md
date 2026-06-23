@@ -1,1 +1,0 @@
-kdyz dobehne agentiscode agent, tak run peprne do completed, prestore workflow run jeste bezi. Prepnuti musi udelat az add comment na zaver workflow.
