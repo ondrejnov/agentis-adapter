@@ -5,6 +5,8 @@ __pycache__/
 .env
 .screenshots
 .agentis/.local.changes
+.agentis/outputs
+.agentis/runs
 .code-review-graph
 dist
 opencode-container/registry-secret.yaml
