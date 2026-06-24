@@ -26,13 +26,13 @@ import contextlib
 import json
 import os
 import signal
+import shlex
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
 
 import asyncio
 
 from common.cli_session import unbounded_line_reader as _unbounded_line_reader
-from common.workflow.local_env import build_local_env_shell_command
 
 
 # Po terminálním `result` eventu necháme claude CLI doběhnout jen krátce; pokud
@@ -201,7 +201,7 @@ class ClaudeCodeClient:
         env = {**os.environ, **cfg.env}
         args = cfg.build_args()
 
-        local_command = build_local_env_shell_command([cfg.command, *args], cwd=cfg.cwd)
+        local_command = "exec " + shlex.join([cfg.command, *args])
         proc = await asyncio.create_subprocess_exec(
             "bash",
             "-c",

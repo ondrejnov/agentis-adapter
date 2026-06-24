@@ -306,7 +306,7 @@ def test_cli_json_mode_emits_json_lines(monkeypatch, capsys) -> None:
     exit_code = run(["--adapter", "opencode", "--json", "udelej", "X"])
 
     assert exit_code == 0
-    # Runner vypisuje na stdout i spouštěný shell příkaz (local-env wrapper) → bereme jen JSON řádky.
+    # Bereme jen JSON řádky; fake subprocess může v jiných testech propouštět i pomocný výstup.
     out_lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
     types = [entry["type"] for entry in out_lines]
     assert types == ["session", "text", "result"]

@@ -132,7 +132,7 @@ Per task běží maximálně jedno workflow — souběžný start vrací chybu 4
 Průběh jednoho běhu:
 
 1. Před spuštěním se pořídí **source snapshot** worktree (klíč se vrací nahoru a slouží metodě `undo`).
-2. CLI proces se spustí s `start_new_session=True` (vlastní process group — `abort` pak killuje celou skupinu) a obalený env wrapperem z `local-env.yaml` (`build_local_env_shell_command`, viz Gotchas v CLAUDE.md).
+2. CLI proces se spustí přes `bash -c 'exec …'` s `start_new_session=True` (vlastní process group — `abort` pak killuje celou skupinu).
 3. Z eventu `session_start` se převezme **skutečné agentí `session_id`** — do té doby je session registrovaná pod pending klíčem; `start` blokuje (max 300 s), dokud session_id nedorazí. Nová session se ohlásí do Agentisu (`session.session_created`).
 4. Eventy agenta (text, reasoning, tool cally) průběžně mapuje **activity mapper** na zprávy a posílá je do Agentisu přes `session.store_activity_log`.
 5. Po doběhnutí (`_finish_session_actions`, jen pro task scope s GitHub repem) se sestaví přílohy completion komentáře: odkaz na worktree pro IDE (`context.ide`) a diff proti snapshotu. Commit, pull request ani dev server lokální session nedělá — to obstarávají kroky workflow runtime.

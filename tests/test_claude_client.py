@@ -134,7 +134,7 @@ def test_stream_includes_stderr_in_nonzero_exit_error(monkeypatch) -> None:
     assert events[1]["message"] == "claude skončil s kódem 1: root failure"
 
 
-def test_stream_execs_local_claude_directly_without_local_env_workflow(monkeypatch) -> None:
+def test_stream_execs_local_claude_directly(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
@@ -155,41 +155,6 @@ def test_stream_execs_local_claude_directly_without_local_env_workflow(monkeypat
     assert captured["args"][2].startswith("exec claude --print - --output-format stream-json")
     assert "--model haiku" in captured["args"][2]
     assert captured["cwd"] == "/work/project"
-
-
-def test_stream_wraps_local_claude_with_local_env_workflow(monkeypatch, tmp_path) -> None:
-    workflow_path = tmp_path / ".agentis" / "workflows" / "local-env.yaml"
-    workflow_path.parent.mkdir(parents=True)
-    workflow_path.write_text(
-        "version: 1\n"
-        "workflow:\n"
-        "  env:\n"
-        '    PATH: "[%WORKDIR%]/.venv/bin:$PATH"\n'
-        "  steps:\n"
-        "    - name: Ensure virtualenv\n"
-        "      run: ensure-venv\n",
-        encoding="utf-8",
-    )
-    captured: dict[str, Any] = {}
-
-    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
-        captured["args"] = args
-        return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
-
-    monkeypatch.setattr("claude.client.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
-
-    async def collect_events() -> list[dict[str, Any]]:
-        client = ClaudeCodeClient(config=ClaudeRunConfig(command="claude", cwd=str(tmp_path), model="haiku"))
-        return [{"type": event.type, **event.data} async for event in client.stream("Ahoj")]
-
-    events = asyncio.run(collect_events())
-
-    assert events == []
-    script = captured["args"][2]
-    assert script.startswith("set -euo pipefail")
-    assert f'export PATH="{tmp_path}/.venv/bin:$PATH"' in script
-    assert "(\nensure-venv\n)" in script
-    assert "exec claude --print - --output-format stream-json" in script.splitlines()[-1]
 
 
 def test_stream_failure_message_uses_last_stderr_line(monkeypatch) -> None:
@@ -216,9 +181,7 @@ def test_stream_failure_message_uses_last_stderr_line(monkeypatch) -> None:
 
 def test_stream_handles_stdout_line_longer_than_asyncio_readline_limit(monkeypatch) -> None:
     long_text = "x" * (70 * 1024)
-    long_event = json.dumps(
-        {"type": "assistant", "message": {"content": [{"type": "text", "text": long_text}]}}
-    )
+    long_event = json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": long_text}]}})
 
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
         proc = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
@@ -277,7 +240,9 @@ def test_normalize_emits_session_start_for_claude_p_mode_event() -> None:
     assert client.session_id == "sess-cp"
 
     # Další event se session id už `session_start` nezopakuje.
-    again = client._normalize({"type": "permission-mode", "permissionMode": "bypassPermissions", "sessionId": "sess-cp"})
+    again = client._normalize(
+        {"type": "permission-mode", "permissionMode": "bypassPermissions", "sessionId": "sess-cp"}
+    )
     assert all(e.type != "session_start" for e in again)
 
 
@@ -289,7 +254,11 @@ def test_normalize_session_start_emitted_once_for_standard_claude() -> None:
     assert [e.type for e in init] == ["session_start"]
 
     follow = client._normalize(
-        {"type": "assistant", "session_id": "sess-cc", "message": {"id": "m1", "content": [{"type": "text", "text": "hi"}]}}
+        {
+            "type": "assistant",
+            "session_id": "sess-cc",
+            "message": {"id": "m1", "content": [{"type": "text", "text": "hi"}]},
+        }
     )
     assert all(e.type != "session_start" for e in follow)
 

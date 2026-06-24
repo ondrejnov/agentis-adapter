@@ -295,17 +295,6 @@ Volitelné `if` podmíní nabídku akce výsledkem konkrétního runu: vyhodnocu
 
 Workflow bez sekce (`project.yaml`, `merge.yaml`, `close.yaml`) žádné akce nenabízí. Lokální CLI sessions čtou sekci best-effort přes `load_workflow_followups()` — nevalidní soubor znamená jen žádné akce, dokončení runu na něm nespadne. Lokální sessions navíc nemají žádné `var` outputs runu, takže podmíněné followups (`if`) se v nich konzervativně přeskakují — akce s nevyhodnotitelnou podmínkou se nenabízí.
 
-### Prostředí lokálních sessions (`local-env.yaml`)
-
-Mini workflow `.agentis/workflows/local-env.yaml` deklaruje prostředí pro lokální CLI sessions (environment `local`) — nahradilo dřívější `.agentis/local-setup.sh`. Nespouští ho `WorkflowManager`: při každém spawnu agent CLI ho `build_local_env_shell_command()` (`common/workflow/local_env.py`) best-effort přečte z cwd agenta a složí z něj bash skript `env + kroky + exec agent`. Chybějící nebo nevalidní soubor znamená spuštění agenta bez setupu (varování na stderr), neúspěšný krok agenta nespustí.
-
-Použijí se jen `workflow.env`, `workflow.envFiles` a `steps[].run`; Kubernetes pole a kroková `if`/`outputs`/`env` se ignorují s varováním. Dvě odlišnosti proti executorům:
-
-- hodnoty `workflow.env` expanduje bash — `PATH: "[%WORKDIR%]/.venv/bin:$PATH"` tedy zachová PATH hosta a jen předřadí venv,
-- každý krok běží v subshellu, takže `exit 0` ukončí jen krok (guard „už je hotovo“), ne spuštění agenta.
-
-Z tokenů jsou k dispozici `[%WORKDIR%]` (cwd agenta) a `[%MAIN_DIR%]` (hlavní worktree); obě hodnoty jsou krokům k dispozici i jako env proměnné.
-
 ## Dodávaná workflow
 
 Workflow `default.yaml`, `project.yaml`, `slack.yaml`, `merge.yaml` a `close.yaml` dědí přes `extends: _base` sdílenou infrastrukturu (image, `imagePullSecrets`, `envFiles`, společné env a mounty) a šablonu kroku `run-agent` z `_base.yaml` a definují jen vlastní kroky a odchylky.
@@ -318,7 +307,6 @@ Workflow `default.yaml`, `project.yaml`, `slack.yaml`, `merge.yaml` a `close.yam
 | `slack.yaml` | Dotaz ze Slack threadu (project scope): `uses: run-agent` se streamem přes `scripts/slack_stream.py`, odpověď/failure report do Slacku |
 | `merge.yaml` | Rebase task větve na base (konflikty řeší AI resolver), fast-forward base větve, push, úklid worktree a větve; při selhání pošle failure komentář (`always` krok) |
 | `close.yaml` | Úklid worktree a task větve bez merge; `deleteNamespace: true` |
-| `local-env.yaml` | Prostředí lokálních CLI sessions: PATH s venv (worktree, pak hlavní worktree) a vytvoření venv při studeném startu; viz výše |
 
 ## Časté chyby
 
