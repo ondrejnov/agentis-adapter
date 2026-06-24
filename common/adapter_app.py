@@ -24,7 +24,7 @@ def create_adapter_app(
     """Build the adapter's service container.
 
     External Agentis JSON-RPC (``start``, ``add_message`` …) is delivered over the
-    passive WebSocket transport, not over HTTP. The agent runtime no longer calls
+    adapter-initiated WebSocket transport, not over HTTP. The agent runtime no longer calls
     back into the adapter (its activity is streamed directly from the ``opencode``/
     ``claude`` CLI). The HTTP app holds the configured services on ``app.state``
     and serves only read-only observability endpoints (``/health``, ``/status``,

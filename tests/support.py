@@ -1,7 +1,7 @@
 """Test helpers for the adapter WebSocket transport.
 
 External Agentis JSON-RPC (``start``, ``add_message`` …) is not served over HTTP; in
-production it arrives over the passive WebSocket transport. ``RpcTestClient`` lets
+production it arrives over the adapter-initiated WebSocket transport. ``RpcTestClient`` lets
 existing tests keep calling ``client.post("/api", json=...)`` by routing those payloads
 through the same dispatcher the WebSocket client uses, while ``/health`` still goes
 through a real ``TestClient``.

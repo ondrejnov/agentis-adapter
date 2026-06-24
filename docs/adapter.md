@@ -9,7 +9,7 @@ Klíčové zdrojáky:
 | Soubor | Role |
 | --- | --- |
 | `app/cli.py` | Entrypoint `agentis-adapter` — výběr adapteru, spuštění transportů |
-| `common/rpc/passive_websocket.py` | Pasivní WebSocket transport k Agentisu (příjem JSON-RPC) |
+| `common/rpc/passive_websocket.py` | WebSocket transport k Agentisu pro příjem JSON-RPC |
 | `common/rpc/dispatcher.py` | JSON-RPC dispatch — validace, mapování metod, chybové kódy |
 | `common/rpc/jsonrpc.py` | `AgentJsonRpcService` — logika metod `start`/`add_message`/`abort`/`undo` |
 | `common/adapter_base.py` | `BaseAdapterService` — lifecycle agenta + reporting do Agentisu |
@@ -21,19 +21,45 @@ Klíčové zdrojáky:
 
 ## Architektura v kostce
 
-```
-            JSON-RPC příkazy (start, add_message, abort, undo)
-Agentis ────────────── wss (pasivní WebSocket) ──────────────► agentis-adapter
-backend ◄───────────── HTTP JSON-RPC (AgentisJsonRpcClient) ──┤
-            run.adapter_event, session.store_activity_log,    │
-            task.add_agent_comment, run.store_session_id, …    │
-                                                               │
-                       ┌───────────────────────────────────────┤
-                       ▼                                       ▼
-              local CLI runtime                        workflow runtime
-        (session manager + CLI proces                (WorkflowManager —
-         ve worktree tasku:                           kroky jako K8s Joby
-         claude / opencode / agentiscode)             nebo lokální bash)
+```mermaid
+flowchart LR
+    agentis["Agentis backend"]
+    websocket["Outbound WebSocket<br/>common/rpc/passive_websocket.py"]
+    dispatcher["JSON-RPC dispatcher<br/>common/rpc/dispatcher.py"]
+    service["AgentJsonRpcService<br/>start / add_message / abort / undo"]
+    git["GitAdapterService<br/>worktree, branch, snapshots"]
+    mode{"Běhový režim"}
+    local["Local CLI runtime<br/>session manager + CLI proces"]
+    workflow["Workflow runtime<br/>WorkflowManager + YAML kroky"]
+    executor{"Executor kroků"}
+    k8s["Kubernetes Job<br/>kubectl"]
+    bash["Lokální bash<br/>subproces"]
+    reporting["AgentisJsonRpcClient<br/>eventy, aktivita, komentáře, session_id"]
+    status["FastAPI observabilita<br/>/health, /status, /log"]
+
+    agentis -->|"JSON-RPC příkazy<br/>wss, spojení iniciuje adapter"| websocket
+    websocket --> dispatcher --> service --> git --> mode
+    mode -->|"local"| local
+    mode -->|"workflow nebo pojmenovaný followup"| workflow
+    workflow --> executor
+    executor -->|"workflow.executor = kubernetes"| k8s
+    executor -->|"workflow.executor = local"| bash
+    local --> reporting
+    k8s --> reporting
+    bash --> reporting
+    reporting -->|"HTTP JSON-RPC"| agentis
+    service -.->|"snapshot stavu"| status
+
+    classDef external fill:#eef2ff,stroke:#4f46e5,color:#111827
+    classDef transport fill:#f8fafc,stroke:#64748b,color:#111827
+    classDef adapter fill:#ecfeff,stroke:#0891b2,color:#111827
+    classDef runtime fill:#f0fdf4,stroke:#16a34a,color:#111827
+    classDef report fill:#fff7ed,stroke:#ea580c,color:#111827
+    class agentis external
+    class websocket,dispatcher transport
+    class service,git,status adapter
+    class mode,local,workflow,executor,k8s,bash runtime
+    class reporting report
 ```
 
 Důležité vlastnosti:
@@ -59,7 +85,7 @@ Konkrétní CLI agent (`opencode` / `claude` / `claude-p`) se nevybírá na serv
 | `claude-p` | `claudep`, `cp` | `claude-p ... --output-format stream-json` — stejný engine jako `claude`, jen bez `--print -` |
 | `opencode` | `oc` | `opencode run --format json` |
 
-## Transport: pasivní WebSocket
+## Transport: WebSocket iniciovaný adapterem
 
 `PassiveWebSocketClient` (`common/rpc/passive_websocket.py`):
 
@@ -139,7 +165,7 @@ Selhání reportingu běh agenta neshazuje (best-effort, loguje se na stderr). `
 | --- | --- | --- |
 | `AGENTIS_ENDPOINT` | `http://127.0.0.1:8891` | HTTP JSON-RPC endpoint Agentisu |
 | `AGENTIS_TOKEN` | `1234` | Bearer token pro HTTP i WebSocket |
-| `AGENTIS_WS_ENDPOINT` | — | `ws(s)://` endpoint pro pasivní WebSocket (povinné) |
+| `AGENTIS_WS_ENDPOINT` | — | `ws(s)://` endpoint pro WebSocket spojení adapteru (povinné) |
 | `AGENTIS_ADAPTER_ID` | — | Identita adapteru vůči Agentisu (povinné; lze předat `--id`) |
 | `ADAPTER_HOST` / `ADAPTER_PORT` | `0.0.0.0` / `8001` | Status HTTP server |
 | `ADAPTER_WORKTREE_ROOT` | `<repo>/worktrees` | Kořen pro task worktrees |

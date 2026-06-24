@@ -22,7 +22,7 @@ async def _run_transports(
     dispatch: Mapping[str, JsonRpcRoute],
     app: Any,
 ) -> None:
-    """Run the passive WebSocket client plus a local read-only status HTTP server.
+    """Run the adapter WebSocket client plus a local read-only status HTTP server.
 
     External Agentis JSON-RPC is received over the outbound WebSocket connection;
     the agent runtime does not call back into the adapter (its activity is
