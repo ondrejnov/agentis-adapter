@@ -394,6 +394,37 @@ echo "dlouhý prompt" | poetry run agentiscode --adapter claude --json
 
 Bez `--json` píše finální odpověď agenta na stdout a aktivitu na stderr. S `--json` streamuje sjednocené eventy jako JSON Lines. S parametry `--task-id`, `--run-id` a Agentis tokeny umí průběžně posílat telemetrii do Agentisu.
 
+Použití:
+
+```bash
+poetry run agentiscode --adapter <adapter> [volby] "prompt pro agenta"
+poetry run agentiscode --adapter <adapter> [volby] < prompt.md
+```
+
+### Volby Agentiscode
+
+| Volba | Význam |
+| --- | --- |
+| `--adapter NAME`, `-a NAME` | Povinný agent runtime. Hodnoty: `opencode`, `claude`, `claude-p` a jejich aliasy z tabulky výše. |
+| `--model MODEL`, `-m MODEL` | Model předaný podkladovému agentovi. |
+| `--effort EFFORT`, `-e EFFORT` | Reasoning effort. U Claude se předá jako `--effort`, u OpenCode jako `--variant`. |
+| `--agent AGENT` | Pojmenovaný agent, mode nebo profil podkladového CLI. |
+| `--cwd PATH` | Pracovní adresář běhu. Default je aktuální adresář. |
+| `--resume SESSION_ID` | Naváže na existující agent session. |
+| `--timeout SECONDS` | Časový limit běhu v sekundách. `0` znamená bez limitu; default je `0`. |
+| `--json` | Streamuje sjednocené eventy jako JSON Lines na stdout místo textového rendereru. |
+| `--task-id TASK_ID` | Agentis task id. Zapne telemetrii, založí run a průběžně posílá aktivitu do Agentisu. |
+| `--run-id RUN_ID` | Existující Agentis run id. Telemetrie se zapíše do něj místo založení nového runu. Vyžaduje `--task-id`. |
+| `--task-status STATUS_ID` | Stav tasku nastavený při finálním `task.add_agent_comment`. Použije se jen s `--last-message-to-comment`. |
+| `--last-message-to-comment` | Po skončení běhu pošle poslední odpověď agenta jako primary komentář do Agentisu. |
+| `--primary-session BOOL` | Označí agent session jako primární v Agentisu. Default je `true`; přijímá například `true/false`, `1/0`, `yes/no`, `on/off`. |
+| `--agentis-api URL` | Agentis JSON-RPC endpoint. Default je `$AGENTIS_ENDPOINT`; povinné při použití `--task-id` nebo `--run-id`. |
+| `--agentis-token TOKEN` | Agentis user/API auth token. Default je `$AGENTIS_API_TOKEN`, fallback `$AGENTIS_TOKEN`. |
+| `--agentis-service-token TOKEN` | Agentis service token pro runtime callbacky. Default je `$AGENTIS_SERVICE_TOKEN`. |
+| `--final-output PATH` | Po skončení běhu uloží finální odpověď agenta do souboru. |
+| `--session-output PATH` | Uloží agent session id do souboru, jakmile je známé. |
+| `prompt` | Zadání pro agenta jako poziční argumenty. Když chybí, načte se ze stdin; prázdný prompt je chyba. |
+
 ## Observabilita
 
 Lokální HTTP server je read-only a slouží pro provozní dohled.
