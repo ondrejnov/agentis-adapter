@@ -76,3 +76,21 @@ def collect_screenshot_images(project_root: str | Path | None) -> list[dict[str,
             }
         )
     return images
+
+
+def clear_screenshot_images(project_root: str | Path | None) -> None:
+    """Remove screenshot image/video artifacts after they have been sent."""
+    if not project_root:
+        return
+
+    screenshots_dir = Path(project_root) / ".screenshots"
+    if not screenshots_dir.is_dir():
+        return
+
+    for path in screenshots_dir.iterdir():
+        if not path.is_file() or path.suffix.lower() not in _SCREENSHOT_ARTIFACT_EXTENSIONS:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue

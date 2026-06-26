@@ -1,7 +1,7 @@
 import base64
 from pathlib import Path
 
-from common.artifacts.screenshots import collect_screenshot_images
+from common.artifacts.screenshots import clear_screenshot_images, collect_screenshot_images
 
 
 def test_collect_screenshot_images_reads_images_from_project_root(tmp_path):
@@ -62,3 +62,18 @@ def test_collect_screenshot_images_keeps_webm_when_ffmpeg_fails(monkeypatch, tmp
     assert collect_screenshot_images(tmp_path) == [
         {"name": "recording.webm", "content": base64.b64encode(b"webm-data").decode("ascii")},
     ]
+
+
+def test_clear_screenshot_images_removes_only_supported_files(tmp_path):
+    screenshots = tmp_path / ".screenshots"
+    screenshots.mkdir()
+    (screenshots / "result.png").write_bytes(b"png-data")
+    (screenshots / "recording.webm").write_bytes(b"webm-data")
+    notes = screenshots / "notes.txt"
+    notes.write_text("keep", encoding="utf-8")
+
+    clear_screenshot_images(tmp_path)
+
+    assert not (screenshots / "result.png").exists()
+    assert not (screenshots / "recording.webm").exists()
+    assert notes.read_text(encoding="utf-8") == "keep"

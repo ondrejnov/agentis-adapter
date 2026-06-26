@@ -23,7 +23,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
-from common.artifacts.screenshots import collect_screenshot_images
+from common.artifacts.screenshots import clear_screenshot_images, collect_screenshot_images
 from common.artifacts.source_snapshot import (
     build_snapshot_key,
     changes_diff_attachment,
@@ -88,11 +88,11 @@ class _WorkflowRun:
     attempt_id: str
     run_dir: Path
     output_root: Path
-    artifact_staging_dir: Path
     prompt_file: Path
     context_file: Path
     executor: str
     runner: WorkflowStepRunner
+    artifact_staging_dir: Path | None = None
     #: Klíč snapshotu zdrojáků pro "Changes diff" attachment; None pro pojmenovaná
     #: workflow (merge/close), která můžou worktree sama smazat.
     snapshot_key: Optional[str] = None
@@ -249,6 +249,7 @@ class WorkflowManager:
             attempt_id=attempt_id,
             run_dir=run_dir,
             output_root=run_dir if external_run_files else worktree_path,
+            artifact_staging_dir=run_dir / ARTIFACT_OUTPUT_STAGING_DIR,
             prompt_file=prompt_file,
             context_file=context_file,
             executor=executor,
@@ -953,6 +954,8 @@ class WorkflowManager:
                         "author_name": comment["author_name"],
                     },
                 )
+                if include_run_outputs and images:
+                    clear_screenshot_images(run.worktree)
         elif attachments or artifacts:
             self._emit_adapter_event(
                 run.context,

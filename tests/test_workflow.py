@@ -842,6 +842,7 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
         {"label": "Pull Request", "value": "https://github.com/org/repo/pull/1", "type": "url"}
     ]
     assert comment["images"] == [{"name": "result.png", "content": base64.b64encode(b"png-data").decode("ascii")}]
+    assert not (screenshots_dir / "result.png").exists()
     # followup akce jdou z `workflow.followups` sekce YAML, ne z Pythonu
     assert [(action["adapter_method"], action["workflow"]) for action in comment["actions"]] == [
         ("start", "merge"),
