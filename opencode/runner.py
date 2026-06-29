@@ -1,5 +1,5 @@
 """
-Async wrapper around the OpenCode (`opencode run <prompt> --format json`).
+Async wrapper around the OpenCode (`opencode run --format json`, prompt on stdin).
 
 Spouští `opencode run` jako subprocess pro jedno zadání promptu (bez web REST
 API) a čte streamovaný `--format json` výstup po řádcích. Každý řádek je jeden
@@ -19,8 +19,8 @@ session-loop logikou jako Claude Code:
   - stderr: {line}
   - raw: {event}                             (nerozpoznaný řádek)
 
-Dlouhé prompty se kvůli limitům délky argv předávají přes dočasný soubor a
-krátkou poziční zprávu příkazu ``opencode run``.
+Prompt se posílá přes stdin, aby se nevešel jen do argv a aby OpenCode dostal
+celé zadání přímo jako zprávu, ne jako přílohu.
 """
 
 from __future__ import annotations
@@ -31,15 +31,10 @@ import json
 import os
 import shlex
 import shutil
-import tempfile
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Sequence
 
 from common.cli_session import unbounded_line_reader as _unbounded_line_reader
-
-
-PROMPT_FILE_MESSAGE = "Read the attached prompt file and follow its instructions exactly."
-ARG_MAX_FALLBACK = 2 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -74,10 +69,8 @@ class OpenCodeRunConfig:
     env: Dict[str, str] = field(default_factory=dict)
     timeout_sec: float = 0.0  # 0 = bez limitu
 
-    def build_args(self, message: str, *, prompt_file: Optional[str] = None) -> List[str]:
-        args: List[str] = ["run", message]
-        if prompt_file:
-            args += ["--file", prompt_file]
+    def build_args(self) -> List[str]:
+        args: List[str] = ["run"]
         args += ["--format", "json"]
         if self.dangerously_skip_permissions:
             args.append("--dangerously-skip-permissions")
@@ -129,17 +122,9 @@ class OpenCodeRunner:
     @staticmethod
     def _safe_command_display(command: str, args: Sequence[str]) -> str:
         display_args = [command, *args]
-        if len(display_args) >= 3 and display_args[1] == "run":
-            display_args[2] = "<prompt>"
+        if len(display_args) >= 2 and display_args[1] == "run":
+            display_args.insert(2, "<stdin>")
         return shlex.join(display_args)
-
-    @staticmethod
-    def _prompt_file_threshold_bytes() -> int:
-        return max(1, ARG_MAX_FALLBACK)
-
-    @classmethod
-    def _should_use_prompt_file(cls, prompt: str) -> bool:
-        return len(prompt.encode("utf-8")) > cls._prompt_file_threshold_bytes()
 
     @classmethod
     def _failure_message(
@@ -180,42 +165,25 @@ class OpenCodeRunner:
     ) -> AsyncIterator[OpenCodeEvent]:
         cfg = self.config
         env = {**os.environ, **cfg.env}
-        args: List[str]
-        prompt_stdin: Optional[bytes] = None
-        local_prompt_path: Optional[str] = None
-        use_prompt_file = self._should_use_prompt_file(prompt)
+        args = cfg.build_args()
+        prompt_stdin = prompt.encode("utf-8")
 
         if not shutil.which("bash"):
             yield OpenCodeEvent("error", {"message": "bash nenalezeno v PATH pro lokální spuštění opencode"})
             return
 
-        if use_prompt_file:
-            with tempfile.NamedTemporaryFile(
-                "w", encoding="utf-8", suffix=".md", prefix="opencode-prompt-", delete=False
-            ) as prompt_file:
-                prompt_file.write(prompt)
-                local_prompt_path = prompt_file.name
-            args = cfg.build_args(PROMPT_FILE_MESSAGE, prompt_file=local_prompt_path)
-        else:
-            args = cfg.build_args(prompt)
         local_command = "exec " + shlex.join([cfg.command, *args])
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "bash",
-                "-c",
-                local_command,
-                cwd=cfg.cwd,
-                env=env,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
-        except BaseException:
-            if local_prompt_path is not None:
-                with contextlib.suppress(OSError):
-                    os.unlink(local_prompt_path)
-            raise
+        proc = await asyncio.create_subprocess_exec(
+            "bash",
+            "-c",
+            local_command,
+            cwd=cfg.cwd,
+            env=env,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
 
         if on_proc_started is not None:
             try:
@@ -225,12 +193,13 @@ class OpenCodeRunner:
 
         assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
         try:
-            if prompt_stdin is not None:
-                proc.stdin.write(prompt_stdin)
-                await proc.stdin.drain()
-            proc.stdin.close()
+            proc.stdin.write(prompt_stdin)
+            await proc.stdin.drain()
         except Exception:
             pass
+        finally:
+            with contextlib.suppress(Exception):
+                proc.stdin.close()
 
         stderr_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
         stderr_lines: List[str] = []
@@ -305,7 +274,7 @@ class OpenCodeRunner:
                 await proc.wait()
             except Exception:
                 pass
-            with __import__("contextlib").suppress(BaseException):
+            with contextlib.suppress(BaseException):
                 await stderr_task
 
             tail: List[str] = []
@@ -314,9 +283,6 @@ class OpenCodeRunner:
                 if item:
                     stderr_lines.append(item)
                     tail.append(item)
-            if local_prompt_path is not None:
-                with contextlib.suppress(OSError):
-                    os.unlink(local_prompt_path)
             for line in tail:
                 yield OpenCodeEvent("stderr", {"line": line})
 

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
-from pathlib import Path
 from typing import Any
 
 from opencode.runner import OpenCodeRunner, OpenCodeEvent, OpenCodeRunConfig
@@ -61,15 +59,10 @@ class _FakeProcess:
 # ---------------------------------------------------------------------------
 
 
-def test_build_args_places_prompt_and_flags() -> None:
-    args = OpenCodeRunConfig(model="openai/gpt-5", agent="build", variant="high").build_args(
-        "precti prompt", prompt_file="/tmp/prompt.md"
-    )
+def test_build_args_places_flags_without_prompt() -> None:
+    args = OpenCodeRunConfig(model="openai/gpt-5", agent="build", variant="high").build_args()
     assert args == [
         "run",
-        "precti prompt",
-        "--file",
-        "/tmp/prompt.md",
         "--format",
         "json",
         "--dangerously-skip-permissions",
@@ -83,7 +76,7 @@ def test_build_args_places_prompt_and_flags() -> None:
 
 
 def test_build_args_resume_session() -> None:
-    args = OpenCodeRunConfig(resume_session_id="ses_42").build_args("pokracuj", prompt_file="/tmp/prompt.md")
+    args = OpenCodeRunConfig(resume_session_id="ses_42").build_args()
     assert "--session" in args
     assert args[args.index("--session") + 1] == "ses_42"
 
@@ -92,9 +85,11 @@ def test_stream_execs_local_opencode_directly(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
+        proc = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
         captured["args"] = args
         captured["cwd"] = kwargs["cwd"]
-        return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+        captured["proc"] = proc
+        return proc
 
     monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
 
@@ -106,37 +101,39 @@ def test_stream_execs_local_opencode_directly(monkeypatch) -> None:
 
     assert events == []
     assert captured["args"][:2] == ("bash", "-c")
-    assert captured["args"][2].startswith("exec opencode run 'Do X' --format json")
+    assert captured["args"][2].startswith("exec opencode run --format json")
+    assert "Do X" not in captured["args"][2]
     assert "--file" not in captured["args"][2]
     assert "--model haiku" in captured["args"][2]
     assert captured["cwd"] == "/work/project"
+    assert captured["proc"].stdin.data == b"Do X"
+    assert captured["proc"].stdin.closed is True
 
 
-def test_stream_uses_temp_prompt_file_for_long_local_prompt(monkeypatch) -> None:
+def test_stream_sends_long_prompt_via_stdin(monkeypatch) -> None:
     captured: dict[str, Any] = {}
-
-    monkeypatch.setattr(OpenCodeRunner, "_prompt_file_threshold_bytes", staticmethod(lambda: 10))
+    prompt = "x" * 5000
 
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> _FakeProcess:
+        proc = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
         captured["args"] = args
-        return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+        captured["proc"] = proc
+        return proc
 
     monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
 
     async def collect_events() -> list[dict[str, Any]]:
         client = OpenCodeRunner(config=OpenCodeRunConfig(command="opencode"))
-        return [{"type": event.type, **event.data} async for event in client.stream("x" * 11)]
+        return [{"type": event.type, **event.data} async for event in client.stream(prompt)]
 
     events = asyncio.run(collect_events())
 
     assert events == []
-    assert (
-        "exec opencode run 'Read the attached prompt file and follow its instructions exactly.'" in captured["args"][2]
-    )
-    prompt_match = re.search(r"--file (/tmp/opencode-prompt-[^ ]+\.md)", captured["args"][2])
-    assert prompt_match is not None
-    assert not Path(prompt_match.group(1)).exists()
-    assert "x" * 11 not in captured["args"][2]
+    assert captured["args"][2].startswith("exec opencode run --format json")
+    assert "--file" not in captured["args"][2]
+    assert prompt not in captured["args"][2]
+    assert captured["proc"].stdin.data == prompt.encode("utf-8")
+    assert captured["proc"].stdin.closed is True
 
 
 def test_stream_includes_stderr_in_nonzero_exit_error(monkeypatch) -> None:
@@ -177,7 +174,7 @@ def test_stream_failure_message_prefers_context_over_end_marker(monkeypatch) -> 
 
     assert error["message"].startswith("opencode skončil s kódem 1: real failure")
     assert "opencode skončil s kódem 1: --- End ---" not in error["message"]
-    assert "příkaz: /usr/bin/opencode run '<prompt>' --format json --dangerously-skip-permissions" in error["message"]
+    assert "příkaz: /usr/bin/opencode run '<stdin>' --format json --dangerously-skip-permissions" in error["message"]
     assert "cwd: /work/project" in error["message"]
     assert "stdout neparsované řádky (posledních 20):\nnon-json diagnostic" in error["message"]
     assert "tajny prompt" not in error["message"]
