@@ -230,6 +230,62 @@ def test_normalize_tool_execute_before_emits_tool_before() -> None:
     }
 
 
+def test_normalize_vscode_stream_tool_part_updated_emits_part() -> None:
+    client = OpenCodeRunner(config=OpenCodeRunConfig(command="opencode"))
+
+    events = client._normalize(
+        {
+            "source": "stream",
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": "ses_1",
+                "part": {
+                    "id": "prt_tool",
+                    "messageID": "msg_1",
+                    "sessionID": "ses_1",
+                    "type": "tool",
+                    "tool": "read",
+                    "callID": "call_read",
+                    "state": {
+                        "status": "completed",
+                        "input": {"filePath": "/tmp/agentis.log"},
+                        "output": "ok",
+                    },
+                },
+            },
+        }
+    )
+
+    assert [e.type for e in events] == ["session_start", "part"]
+    assert events[0].data == {"session_id": "ses_1"}
+    assert events[1].data["part"]["callID"] == "call_read"
+    assert events[1].data["part"]["state"]["status"] == "completed"
+
+
+def test_normalize_vscode_stream_ignores_nested_text_parts() -> None:
+    client = OpenCodeRunner(config=OpenCodeRunConfig(command="opencode"))
+    client.session_id = "ses_1"
+
+    events = client._normalize(
+        {
+            "source": "stream",
+            "type": "message.part.updated",
+            "properties": {
+                "sessionID": "ses_1",
+                "part": {
+                    "id": "prt_user",
+                    "messageID": "msg_user",
+                    "sessionID": "ses_1",
+                    "type": "text",
+                    "text": "user prompt",
+                },
+            },
+        }
+    )
+
+    assert [e.type for e in events] == ["raw"]
+
+
 def test_normalize_error_extracts_nested_message() -> None:
     client = OpenCodeRunner(config=OpenCodeRunConfig(command="opencode"))
     client.session_id = "ses_1"

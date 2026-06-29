@@ -345,7 +345,11 @@ class OpenCodeRunner:
         if not isinstance(event, dict):
             return [OpenCodeEvent("raw", {"event": event})]
 
+        raw_properties = event.get("properties")
+        properties: Dict[str, Any] = raw_properties if isinstance(raw_properties, dict) else {}
         session_id = event.get("sessionID") or event.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            session_id = properties.get("sessionID") or properties.get("session_id")
         if isinstance(session_id, str) and session_id and session_id != self.session_id:
             self.session_id = session_id
             out.append(OpenCodeEvent("session_start", {"session_id": session_id}, raw=event))
@@ -367,9 +371,9 @@ class OpenCodeRunner:
                 OpenCodeEvent(
                     "tool_before",
                     {
-                        "callID": event.get("callID"),
-                        "tool": event.get("tool"),
-                        "input": event.get("input"),
+                        "callID": event.get("callID") or properties.get("callID"),
+                        "tool": event.get("tool") or properties.get("tool"),
+                        "input": event.get("input") if "input" in event else properties.get("input"),
                     },
                     raw=event,
                 )
@@ -377,7 +381,16 @@ class OpenCodeRunner:
             return out
 
         part = event.get("part")
+        nested_part = False
+        if not isinstance(part, dict) and isinstance(properties.get("part"), dict):
+            part = properties["part"]
+            nested_part = True
         if isinstance(part, dict):
+            # VS Code/OpenCode stream events include user and assistant parts under
+            # `properties.part`; only tool lifecycle and step-finish are safe to
+            # consume without tracking message roles.
+            if nested_part and part.get("type") not in {"tool", "step-finish"}:
+                return out or [OpenCodeEvent("raw", {"event": event}, raw=event)]
             if part.get("type") == "step-finish":
                 self._capture_usage(part)
             out.append(OpenCodeEvent("part", {"part": part}, raw=event))
