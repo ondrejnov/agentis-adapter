@@ -269,7 +269,7 @@ class WorkflowFollowup(BaseModel):
     prompt: str = ""
     workflow: str
     continue_previous_run: bool = False
-    #: Podmínka nad `var` outputs runu; followup bez podmínky se nabízí vždy.
+    #: Podmínka nad env/built-in hodnotami a `var` outputs runu; bez podmínky se nabízí vždy.
     if_: str | None = Field(default=None, alias="if")
 
     @field_validator("if_")
@@ -560,8 +560,8 @@ def load_workflow_followups(path: str | Path) -> list[WorkflowFollowup]:
     soubor nebo nevalidní obsah znamená žádné followup akce — dokončení runu
     nesmí spadnout na rozbité konfiguraci, ta se projeví až při startu workflow.
 
-    Podmíněné followups (`if`) se přeskakují: lokální sessions nemají `var`
-    outputs runu, nad kterými by se podmínka dala vyhodnotit, a akce
+    Podmíněné followups (`if`) se přeskakují: lokální sessions nemají runtime env
+    ani `var` outputs runu, nad kterými by se podmínka dala vyhodnotit, a akce
     s nevyhodnotitelnou podmínkou se konzervativně nenabízí.
     """
 

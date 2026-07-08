@@ -143,30 +143,7 @@ def test_restore_metadata_falls_back_when_utime_follow_symlinks_is_unavailable(m
     assert calls == [False, None]
 
 
-def test_copy2_uses_reflink_clone_when_available(monkeypatch, tmp_path: Path):
-    source = tmp_path / "source.txt"
-    target = tmp_path / "target.txt"
-    source.write_text("source\n", encoding="utf-8")
-    clone_calls: list[tuple[Path, Path]] = []
-
-    def fake_clone_file(source_arg: Path, target_arg: Path) -> bool:
-        clone_calls.append((source_arg, target_arg))
-        target_arg.write_bytes(source_arg.read_bytes())
-        return True
-
-    def fail_copy2(*args, **kwargs):
-        raise AssertionError("fallback copy should not be used when reflink clone succeeds")
-
-    monkeypatch.setattr(work_snapshot, "_clone_file", fake_clone_file)
-    monkeypatch.setattr(work_snapshot.shutil, "copy2", fail_copy2)
-
-    work_snapshot._copy2(source, target)
-
-    assert clone_calls == [(source, target)]
-    assert target.read_text(encoding="utf-8") == "source\n"
-
-
-def test_copy2_falls_back_when_reflink_clone_is_unavailable(monkeypatch, tmp_path: Path):
+def test_copy2_delegates_to_shutil_copy2_without_following_symlinks(monkeypatch, tmp_path: Path):
     source = tmp_path / "source.txt"
     target = tmp_path / "target.txt"
     source.write_text("source\n", encoding="utf-8")
@@ -176,7 +153,6 @@ def test_copy2_falls_back_when_reflink_clone_is_unavailable(monkeypatch, tmp_pat
         copy_calls.append((source_arg, target_arg, follow_symlinks))
         Path(target_arg).write_bytes(Path(source_arg).read_bytes())
 
-    monkeypatch.setattr(work_snapshot, "_clone_file", lambda _source, _target: False)
     monkeypatch.setattr(work_snapshot.shutil, "copy2", fake_copy2)
 
     work_snapshot._copy2(source, target)

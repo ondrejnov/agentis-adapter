@@ -439,6 +439,24 @@ class WorkflowManager:
             env["AGENTIS_AUTO_MERGE"] = "true" if adapter.auto_merge else "false"
         return env
 
+    def _condition_vars(
+        self,
+        run: _WorkflowRun,
+        *,
+        env: dict[str, str] | None = None,
+        step_env: dict[str, str] | None = None,
+        visible_vars: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        """Proměnné viditelné v `if`; `var` outputs přepisují env i built-ins."""
+
+        return {
+            **run.workflow.workflow.env,
+            **(env if env is not None else self._runtime_env(run)),
+            **(step_env or {}),
+            **self._interpolation_values(run.context, run.worktree, run.namespace, run_dir=run.run_dir),
+            **(visible_vars or {}),
+        }
+
     def _thread_main(self, run: _WorkflowRun) -> None:
         try:
             self._run_workflow(run)
@@ -460,9 +478,6 @@ class WorkflowManager:
         if run.snapshot_key:
             snapshot_sources_best_effort(run.worktree, run.snapshot_key, label="workflow-start")
         env = self._runtime_env(run)
-        #: Built-in hodnoty (INTERPOLATION_ALLOWLIST) dostupné v `if` podmínkách;
-        #: `var` output stejného jména z kroku built-in hodnotu přepisuje.
-        builtin_vars = self._interpolation_values(run.context, run.worktree, run.namespace, run_dir=run.run_dir)
         run.runner.prepare(run.workflow, namespace=run.namespace, run_dir=run.run_dir)
         workflow_event_id = f"workflow:{run.context.run_id}:{run.attempt_id}"
         self._emit_adapter_event(
@@ -517,13 +532,7 @@ class WorkflowManager:
                         continue
 
                     dependency_vars = self._dependency_vars(index, dependencies, step_vars)
-                    condition_vars = {
-                        **run.workflow.workflow.env,
-                        **env,
-                        **step.env,
-                        **builtin_vars,
-                        **dependency_vars,
-                    }
+                    condition_vars = self._condition_vars(run, env=env, step_env=step.env, visible_vars=dependency_vars)
                     if step.if_ is not None and not evaluate_condition(step.if_, condition_vars):
                         pending_steps.remove(index)
                         terminal_steps.add(index)
@@ -904,9 +913,7 @@ class WorkflowManager:
                         }
                     )
             elif output.type == "artifact":
-                artifact = self._collect_artifact(run, output)
-                if artifact is not None:
-                    artifacts.append(artifact)
+                artifacts.extend(self._collect_artifacts(run, output))
 
         if run.snapshot_key:
             diff_result = write_changes_diff_best_effort(run.worktree, run.snapshot_key, label="workflow-finish")
@@ -926,16 +933,15 @@ class WorkflowManager:
             # pojmenovaná workflow (merge/close) sekci nemají, takže další akce nenabízí.
             # U failure komentáře se akce nenabízí vůbec — merge/close rozdělané práce
             # po selhaném runu nedává smysl. Followup s `if` se nabídne jen při splnění
-            # podmínky nad `var` outputs runu; bez podmínky se nabízí vždy.
-            actions = (
-                []
-                if run.status == "failed"
-                else [
+            # podmínky nad env/built-in hodnotami a `var` outputs runu; bez podmínky se nabízí vždy.
+            actions: list[dict[str, Any]] = []
+            if run.status != "failed":
+                followup_vars = self._condition_vars(run, visible_vars=run.vars)
+                actions = [
                     followup.to_action()
                     for followup in run.workflow.workflow.followups
-                    if followup.if_ is None or evaluate_condition(followup.if_, run.vars)
+                    if followup.if_ is None or evaluate_condition(followup.if_, followup_vars)
                 ]
-            )
             images = collect_screenshot_images(run.worktree)
             last_comment_index = len(comments) - 1
             for index, comment in enumerate(comments):
@@ -966,21 +972,81 @@ class WorkflowManager:
                 data={"attachments": attachments, "artifact_names": [item.get("name") for item in artifacts]},
             )
 
-    def _collect_artifact(self, run: _WorkflowRun, output: WorkflowOutput) -> dict[str, Any] | None:
+    def _collect_artifacts(self, run: _WorkflowRun, output: WorkflowOutput) -> list[dict[str, Any]]:
         if not output.path:
-            return None
-        path = (run.output_root / output.path).resolve()
-        if run.output_root.resolve() not in path.parents or not path.is_file():
-            return None
+            return []
+        has_glob = self._has_glob(output.path)
+        paths = self._artifact_output_paths(run, output.path)
+        multiple = len(paths) > 1
+        artifacts: list[dict[str, Any]] = []
+        for path in paths:
+            try:
+                content = base64.b64encode(path.read_bytes()).decode("ascii")
+            except OSError:
+                continue
+            display_relpath = self._artifact_display_relpath(run.output_root.resolve(), output.path, path)
+            artifacts.append(
+                {
+                    "name": self._artifact_name(output, display_relpath, has_glob=has_glob, multiple=multiple),
+                    "filename": path.name,
+                    "content": content,
+                }
+            )
+        return artifacts
+
+    def _artifact_output_paths(self, run: _WorkflowRun, pattern: str) -> list[Path]:
+        root = run.output_root.resolve()
+        has_glob = self._has_glob(pattern)
+        if not has_glob:
+            path = (root / pattern).resolve()
+            if root not in path.parents or not path.is_file():
+                return []
+            return [path]
+
+        if Path(pattern).is_absolute():
+            return []
         try:
-            content = base64.b64encode(path.read_bytes()).decode("ascii")
-        except OSError:
-            return None
-        return {
-            "name": output.name or output.path,
-            "filename": path.name,
-            "content": content,
-        }
+            candidates = sorted(root.glob(pattern))
+        except ValueError:
+            return []
+
+        paths: list[Path] = []
+        seen: set[Path] = set()
+        for candidate in candidates:
+            path = candidate.resolve()
+            if path in seen or root not in path.parents or not path.is_file():
+                continue
+            seen.add(path)
+            paths.append(path)
+        return paths
+
+    @staticmethod
+    def _has_glob(pattern: str) -> bool:
+        return any(char in pattern for char in "*?[")
+
+    @classmethod
+    def _artifact_display_relpath(cls, root: Path, pattern: str, path: Path) -> str:
+        root_relpath = path.relative_to(root).as_posix()
+        if not cls._has_glob(pattern):
+            return root_relpath
+
+        base_parts: list[str] = []
+        for part in Path(pattern).parts:
+            if cls._has_glob(part):
+                break
+            base_parts.append(part)
+        base = (root.joinpath(*base_parts)).resolve() if base_parts else root
+        if base == root or base in path.parents:
+            return path.relative_to(base).as_posix()
+        return root_relpath
+
+    @staticmethod
+    def _artifact_name(output: WorkflowOutput, relpath: str, *, has_glob: bool, multiple: bool) -> str:
+        if output.name and multiple:
+            return f"{output.name}/{relpath}"
+        if output.name:
+            return output.name
+        return relpath if has_glob else (output.path or relpath)
 
     # ------------------------------------------------------------------
     # Agentis RPC

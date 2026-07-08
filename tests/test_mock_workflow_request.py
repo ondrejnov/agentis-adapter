@@ -3,7 +3,7 @@ from __future__ import annotations
 from scripts.mock_workflow_request import build_payload, parse_args
 
 
-def test_build_payload_defaults_to_safe_local_slack_workflow(tmp_path):
+def test_build_payload_defaults_to_safe_local_test_workflow(tmp_path):
     args = parse_args(["--working-dir", str(tmp_path), "hello from slack"])
 
     payload = build_payload(args)
@@ -19,7 +19,7 @@ def test_build_payload_defaults_to_safe_local_slack_workflow(tmp_path):
         "agent": "build",
         "model": "openai/gpt-5.4-mini",
         "effort": "low",
-        "workflow": "slack",
+            "workflow": "test",
     }
 
 

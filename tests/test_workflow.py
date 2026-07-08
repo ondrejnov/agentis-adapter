@@ -381,7 +381,7 @@ def test_followup_invalid_condition_fails_full_load_but_followups_loader_swallow
 
 
 def test_load_workflow_followups_skips_conditional_actions(tmp_path: Path) -> None:
-    # lokální sessions nemají `var` outputs runu — followup s `if` se konzervativně nenabízí
+    # lokální sessions nemají runtime env ani `var` outputs runu — followup s `if` se konzervativně nenabízí
     path = tmp_path / "ci.yaml"
     path.write_text(FOLLOWUPS_WITH_CONDITION_YAML, encoding="utf-8")
 
@@ -863,6 +863,61 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
         assert env["AGENTIS_MODEL"] == "openai/gpt-5"
         assert "AGENTIS_TOKEN" not in env
         assert "AGENTIS_SERVICE_TOKEN" not in env
+
+
+def test_workflow_artifact_output_expands_glob_mask(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    path = worktree / WORKFLOW_FILE_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        """
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  workingDir: "[%WORKDIR%]"
+  steps:
+    - name: Run agent
+      run: agentiscode < "$AGENTIS_PROMPT_FILE"
+      outputs:
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/final-comment.md
+        - type: artifact
+          name: reports
+          path: .agentis/outputs/reports/**/*.json
+""",
+        encoding="utf-8",
+    )
+    outputs_dir = worktree / ".agentis" / "outputs"
+    reports_dir = outputs_dir / "reports"
+    nested_dir = reports_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    (outputs_dir / "final-comment.md").write_text("Hotovo.", encoding="utf-8")
+    (reports_dir / "a.json").write_text('{"a": 1}', encoding="utf-8")
+    (nested_dir / "b.json").write_text('{"b": 2}', encoding="utf-8")
+    (nested_dir / "ignored.txt").write_text("ignored", encoding="utf-8")
+    (reports_dir / "dir.json").mkdir()
+
+    runner = FakeRunner()
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert len(comment_calls) == 1
+    assert comment_calls[0]["artifacts"] == [
+        {
+            "name": "reports/a.json",
+            "filename": "a.json",
+            "content": base64.b64encode(b'{"a": 1}').decode("ascii"),
+        },
+        {
+            "name": "reports/nested/b.json",
+            "filename": "b.json",
+            "content": base64.b64encode(b'{"b": 2}').decode("ascii"),
+        },
+    ]
 
 
 def test_workflow_applies_multiple_agent_comment_outputs_as_separate_comments(tmp_path: Path) -> None:
@@ -1470,7 +1525,7 @@ version: 1
 workflow:
   followups:
     - title: Git merge
-      if: PR_CREATED
+      if: PR_CREATED && !AGENTIS_AUTO_MERGE
       workflow: merge
     - title: Zavřít prostředí
       workflow: close
@@ -1493,7 +1548,12 @@ workflow:
 """
 
 
-def _completion_actions_for_followup_workflow(tmp_path: Path, *, pr_url: str | None) -> list[dict[str, Any]]:
+def _completion_actions_for_followup_workflow(
+    tmp_path: Path,
+    *,
+    pr_url: str | None,
+    auto_merge: bool = False,
+) -> list[dict[str, Any]]:
     worktree = tmp_path / "wt"
     path = worktree / WORKFLOW_FILE_RELPATH
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1506,7 +1566,15 @@ def _completion_actions_for_followup_workflow(tmp_path: Path, *, pr_url: str | N
 
     runner = FakeRunner()
     manager, calls = _manager(tmp_path, runner)
-    context = _context()
+    context = _context(
+        adapter={
+            "runtime": "workflow",
+            "model": "openai/gpt-5",
+            "agent": "build",
+            "effort": "low",
+            "auto_merge": auto_merge,
+        }
+    )
     manager.start_workflow(context, str(worktree), "udelej X")
     _wait_done(manager, context.task_id)
     assert manager._runs[context.task_id].status == "success"
@@ -1519,6 +1587,15 @@ def _completion_actions_for_followup_workflow(tmp_path: Path, *, pr_url: str | N
 def test_conditional_followup_offered_when_run_var_is_truthy(tmp_path: Path) -> None:
     actions = _completion_actions_for_followup_workflow(tmp_path, pr_url="https://github.com/org/repo/pull/1\n")
     assert [action["title"] for action in actions] == ["Git merge", "Zavřít prostředí"]
+
+
+def test_conditional_followup_reads_runtime_env(tmp_path: Path) -> None:
+    actions = _completion_actions_for_followup_workflow(
+        tmp_path,
+        pr_url="https://github.com/org/repo/pull/1\n",
+        auto_merge=True,
+    )
+    assert [action["title"] for action in actions] == ["Zavřít prostředí"]
 
 
 def test_conditional_followup_skipped_without_run_var_unconditional_stays(tmp_path: Path) -> None:
@@ -1727,7 +1804,7 @@ def test_repo_action_workflows_parse(tmp_path: Path) -> None:
     default = load_workflow_file(repo_root / WORKFLOW_FILE_RELPATH, _values(tmp_path))
     assert any(step.name == "Auto merge final comment" for step in default.workflow.steps)
     merge_followup = next(followup for followup in default.workflow.followups if followup.workflow == "merge")
-    assert merge_followup.if_ == "PR_CREATED && !AUTO_MERGE"
+    assert merge_followup.if_ == "PR_CREATED && !AGENTIS_AUTO_MERGE"
 
     for name in ("merge", "close"):
         workflow = load_workflow_file(repo_root / workflow_file_relpath(name), _values(tmp_path))
@@ -1754,7 +1831,6 @@ def test_repo_default_workflow_auto_merge_finishes_task_done(tmp_path: Path) -> 
     outputs_dir = worktree / ".agentis" / "outputs"
     outputs_dir.mkdir(parents=True)
     (outputs_dir / "env-ready").write_text("true", encoding="utf-8")
-    (outputs_dir / "auto-merge").write_text("true", encoding="utf-8")
     (outputs_dir / "final-comment.md").write_text("Agent dokončil práci.", encoding="utf-8")
     (outputs_dir / "pull-request-url").write_text("https://github.com/org/repo/pull/1\n", encoding="utf-8")
     (outputs_dir / "auto-merge-comment.md").write_text("Zamergováno.", encoding="utf-8")
@@ -2554,7 +2630,7 @@ def test_jsonrpc_start_with_workflow_runtime_is_nonblocking(tmp_path: Path) -> N
     _wait_done(manager, "task-77")
 
 
-def test_jsonrpc_start_comments_context_builds_prompt_from_comment_history(tmp_path: Path) -> None:
+def test_jsonrpc_start_comments_context_builds_prompt_from_task_and_comment_history(tmp_path: Path) -> None:
     worktree = tmp_path / "wt"
     _write_workflow(worktree)
     runner = FakeRunner()
@@ -2573,11 +2649,17 @@ def test_jsonrpc_start_comments_context_builds_prompt_from_comment_history(tmp_p
     _wait_done(manager, context.task_id)
 
     prompt = manager._runs[context.task_id].prompt_file.read_text(encoding="utf-8")
-    assert prompt.startswith("<comments>")
-    assert "Prvni zadani" in prompt
-    assert "Dopln testy" in prompt
-    assert "Task description" not in prompt
-    assert "IDE metadata" not in prompt
+    assert prompt == (
+        "<task>IDE metadata must not be used in comments mode\n\n"
+        "Task description must not be used in comments mode</task>\n"
+        "<comments>\n"
+        "1. Ada\n"
+        "Prvni zadani\n\n"
+        "2. Ada\n"
+        "Dopln testy\n"
+        "</comments>\n"
+        "user added last comment to comments."
+    )
 
 
 def test_jsonrpc_start_none_context_uses_only_direct_prompt(tmp_path: Path) -> None:

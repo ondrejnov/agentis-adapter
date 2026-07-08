@@ -5,7 +5,7 @@ workflow:
   # s pojmenovaným workflow `.agentis/workflows/<workflow>.yaml`.
   followups:
     - title: Git merge
-      if: PR_CREATED && !AUTO_MERGE
+      if: PR_CREATED && !AGENTIS_AUTO_MERGE
       prompt: Sloučit změny z task větve do hlavní větve.
       workflow: merge
     - title: Zavřít prostředí
@@ -33,14 +33,10 @@ workflow:
         else
           printf 'false' > .agentis/outputs/env-ready
         fi
-        printf '%s' "${AGENTIS_AUTO_MERGE:-false}" > .agentis/outputs/auto-merge
       outputs:
         - type: var
           name: ENV_READY
           valueFrom: .agentis/outputs/env-ready
-        - type: var
-          name: AUTO_MERGE
-          valueFrom: .agentis/outputs/auto-merge
     - name: Create virtualenv
       if: ENV_READY != 'true'
       run: python3.13 -m venv .venv
@@ -105,7 +101,7 @@ workflow:
           name: PR_CREATED
           valueFrom: .agentis/outputs/pull-request-url
     - name: Auto merge rebase task branch
-      if: PR_CREATED && AUTO_MERGE
+      if: PR_CREATED && AGENTIS_AUTO_MERGE
       run: |
         mkdir -p .agentis/outputs
         git fetch origin "$BASE_BRANCH"
@@ -118,7 +114,7 @@ workflow:
           fi
         fi
     - name: Auto merge fast-forward base branch
-      if: PR_CREATED && AUTO_MERGE
+      if: PR_CREATED && AGENTIS_AUTO_MERGE
       workingDir: "[%MAIN_DIR%]"
       run: |
         if ! git rebase "$BRANCH"; then
@@ -128,7 +124,7 @@ workflow:
         fi
         git push origin "${BASE_BRANCH}:refs/heads/${BASE_BRANCH}"
     - name: Auto merge final comment
-      if: PR_CREATED && AUTO_MERGE
+      if: PR_CREATED && AGENTIS_AUTO_MERGE
       run: |
         mkdir -p .agentis/outputs
         {

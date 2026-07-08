@@ -338,6 +338,66 @@ Outputs úspěšných kroků se aplikují po konci workflow v pořadí kroků v 
 
 U `agent_comment` lze `status` zadat číslem nebo aliasem `backlog`, `todo`, `in_progress`, `in_review`, `done`, `cancelled`, `blocked`. `name` nastaví autora staticky, `nameFrom` ho přečte ze souboru. U běžného task workflow je output root worktree; u `scope=project` a pojmenovaných workflow je output root externí run dir `ADAPTER_PROJECT_RUN_ROOT/<run_id>/<attempt>/`.
 
+#### Artefakty
+
+Soubory předáte do Agentisu přes output typu `artifact`. `path` je cesta k existujícímu souboru nebo glob maska relativně k output rootu runu, `name` je název artefaktu zobrazený v Agentisu. Artifacty se přiloží k poslednímu `agent_comment`; bez komentáře adapter jen zaloguje, že outputy zpracoval.
+
+Jeden soubor v běžném task workflow:
+
+```yaml
+- name: Generate report
+  run: |
+    mkdir -p .agentis/outputs
+    ./scripts/build-report > .agentis/outputs/report.json
+    printf 'Report je přiložený jako artefakt.\n' > .agentis/outputs/final-comment.md
+  outputs:
+    - type: agent_comment
+      bodyFrom: .agentis/outputs/final-comment.md
+    - type: artifact
+      name: report
+      path: .agentis/outputs/report.json
+```
+
+Více známých souborů můžete předat jako více `artifact` outputů:
+
+```yaml
+- name: Collect artifacts
+  run: |
+    mkdir -p .agentis/outputs
+    cp dist/app.tar.gz .agentis/outputs/app.tar.gz
+    cp coverage/coverage.xml .agentis/outputs/coverage.xml
+    printf 'Build a coverage jsou v artefaktech.\n' > .agentis/outputs/final-comment.md
+  outputs:
+    - type: agent_comment
+      bodyFrom: .agentis/outputs/final-comment.md
+    - type: artifact
+      name: build-archive
+      path: .agentis/outputs/app.tar.gz
+    - type: artifact
+      name: coverage-report
+      path: .agentis/outputs/coverage.xml
+```
+
+V `scope=project` nebo pojmenovaném workflow zapisujte soubory typicky do `$AGENTIS_RUN_DIR/outputs` a v `path` použijte cestu relativní k run diru, např. `outputs/report.json`.
+
+Když počet souborů není dopředu známý, použijte v `path` masku. Adapter rozbalí masku na samostatné artifacty, vezme jen soubory uvnitř output rootu a adresáře přeskočí. Při více shodách se `name` použije jako prefix názvu každého artefaktu.
+
+```yaml
+- name: Collect reports
+  run: |
+    mkdir -p .agentis/outputs/reports
+    cp reports/*.json .agentis/outputs/reports/
+    printf 'Reporty jsou v artefaktech.\n' > .agentis/outputs/final-comment.md
+  outputs:
+    - type: agent_comment
+      bodyFrom: .agentis/outputs/final-comment.md
+    - type: artifact
+      name: reports
+      path: .agentis/outputs/reports/*.json
+```
+
+Pro zachování adresářové struktury použijte rekurzivní masku, například `path: .agentis/outputs/reports/**/*.json`. Pokud chcete předat velké množství souborů jako jeden artefakt, zabalte je do archivu a předejte archiv jedním `artifact` outputem.
+
 ### Followup Akce
 
 `workflow.followups` definuje akce nabídnuté v completion komentáři po úspěšném workflow. Kliknutí na akci spustí `start` s `context.adapter.workflow = "<workflow>"`.
@@ -345,13 +405,13 @@ U `agent_comment` lze `status` zadat číslem nebo aliasem `backlog`, `todo`, `i
 ```yaml
 followups:
   - title: Git merge
-    if: PR_CREATED
+    if: PR_CREATED && !AGENTIS_AUTO_MERGE
     prompt: Sloučit změny z task větve do hlavní větve.
     workflow: merge
     continue_previous_run: false
 ```
 
-Podmínka `if` u followupu se vyhodnocuje nad `var` outputs dokončeného runu. Workflow bez `followups` žádné akce nenabízí.
+Podmínka `if` u followupu se vyhodnocuje nad `workflow.env`, runtime env jako `AGENTIS_AUTO_MERGE`, built-in hodnotami a `var` outputs dokončeného runu. Workflow bez `followups` žádné akce nenabízí.
 
 ### Error Handling
 

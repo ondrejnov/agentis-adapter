@@ -223,13 +223,13 @@ Kromě `workflow.env` / `step.env` dostane každý krok od adapteru:
 
 ### Podmínky `if`
 
-Krok s `if` se spustí jen při splnění podmínky. Proměnnými podmínky jsou:
+Krok nebo followup akce s `if` se spustí/nabídne jen při splnění podmínky. Proměnnými podmínky jsou:
 
-- `var` outputs transitivních `needs` kroku,
+- u kroků `var` outputs transitivních `needs` kroku, u followup akcí všechny `var` outputs dokončeného runu,
 - built-in hodnoty runu — všechny interpolační tokeny z tabulky výše (`GITHUB_REPO`, `BRANCH`, `BASE_BRANCH`, `TASK_NUMBER`, …); stejná jména dostávají kroky i jako env proměnné,
-- env proměnné kroku — přesně to env, které krok dostane (`workflow.env`, runtime env od adapteru jako `AGENTIS_MODEL`/`AGENTIS_AGENT`/task header env, a `step.env`). Lze tak podmínit krok hodnotou env: `if: AGENTIS_MODEL == 'opus'` nebo `if: DEPLOY_ENV != 'prod'`.
+- env proměnné kroku/followupu (`workflow.env`, runtime env od adapteru jako `AGENTIS_MODEL`/`AGENTIS_AGENT`/`AGENTIS_AUTO_MERGE`/task header env, u kroků navíc `step.env`). Lze tak podmínit krok nebo followup hodnotou env: `if: AGENTIS_MODEL == 'opus'`, `if: DEPLOY_ENV != 'prod'` nebo `if: PR_CREATED && !AGENTIS_AUTO_MERGE`.
 
-Při kolizi jmen vyhrává viditelný `var` output nad built-in hodnotou i nad env (krok tak může env/built-in hodnotu pro své dependenty přepsat); v env samotném platí pořadí `workflow.env` < runtime env < `step.env`. Paralelní větev, na které krok explicitně ani transitivně nezávisí přes `needs`, jeho `if` ani env neovlivní, i kdyby doběhla dřív.
+Při kolizi jmen vyhrává viditelný `var` output nad built-in hodnotou i nad env (krok tak může env/built-in hodnotu pro své dependenty přepsat); v env samotném platí pořadí `workflow.env` < runtime env < `step.env` (u followup akcí žádné `step.env` není). Paralelní větev, na které krok explicitně ani transitivně nezávisí přes `needs`, jeho `if` ani env neovlivní, i kdyby doběhla dřív.
 
 Gramatika: termy `VAR`, `!VAR`, `VAR == hodnota`, `VAR != 'hodnota'` spojené `&&` a `||`. `&&` má přednost před `||` — `A && B || C` se vyhodnotí jako `(A && B) || C`; závorky nejsou. Negace `!` platí jen na jednotlivý holý term, ne na porovnání ani skupinu. Hodnota porovnání s mezerami nebo se spojkou `&&` / `||` musí být v uvozovkách (`MODE == 'a && b'`).
 
@@ -285,15 +285,15 @@ Sekce `workflow.followups` definuje akce nabídnuté v completion komentáři po
 ```yaml
 followups:
   - title: Git merge
-    if: PR_CREATED                 # volitelné — podmínka nad `var` outputs runu
+    if: PR_CREATED && !AGENTIS_AUTO_MERGE  # volitelné — stejná gramatika jako `if` kroků
     prompt: Sloučit změny z task větve do hlavní větve.
     workflow: merge
     continue_previous_run: false   # volitelné
 ```
 
-Volitelné `if` podmíní nabídku akce výsledkem konkrétního runu: vyhodnocuje se nad `var` outputs runu stejnou gramatikou jako `if` kroků (viz výše), ale **bez built-in hodnot** — k dispozici jsou jen proměnné z `var` outputs úspěšně doběhlých kroků. Followup bez podmínky se nabízí vždy. Syntaxe se validuje při načtení workflow souboru. V `default.yaml` tak „Git merge" závisí na `PR_CREATED` (krok „Create pull request" čte `.agentis/outputs/pull-request-url` i jako var) — run bez commitů a PR akci nenabídne, „Zavřít prostředí" se nabízí vždy.
+Volitelné `if` podmíní nabídku akce výsledkem konkrétního runu: vyhodnocuje se stejnou gramatikou jako `if` kroků (viz výše) nad `workflow.env`, runtime env, built-in hodnotami a `var` outputs úspěšně doběhlých kroků. Followup bez podmínky se nabízí vždy. Syntaxe se validuje při načtení workflow souboru. V `default.yaml` tak „Git merge" závisí na `PR_CREATED` a `!AGENTIS_AUTO_MERGE` — run bez commitů/PR nebo run s auto-merge akci nenabídne, „Zavřít prostředí" se nabízí vždy.
 
-Workflow bez sekce (`project.yaml`, `merge.yaml`, `close.yaml`) žádné akce nenabízí. Lokální CLI sessions čtou sekci best-effort přes `load_workflow_followups()` — nevalidní soubor znamená jen žádné akce, dokončení runu na něm nespadne. Lokální sessions navíc nemají žádné `var` outputs runu, takže podmíněné followups (`if`) se v nich konzervativně přeskakují — akce s nevyhodnotitelnou podmínkou se nenabízí.
+Workflow bez sekce (`project.yaml`, `merge.yaml`, `close.yaml`) žádné akce nenabízí. Lokální CLI sessions čtou sekci best-effort přes `load_workflow_followups()` — nevalidní soubor znamená jen žádné akce, dokončení runu na něm nespadne. Lokální sessions navíc nemají runtime env ani `var` outputs runu, takže podmíněné followups (`if`) se v nich konzervativně přeskakují — akce s nevyhodnotitelnou podmínkou se nenabízí.
 
 ## Dodávaná workflow
 
