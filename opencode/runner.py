@@ -49,6 +49,7 @@ class OpenCodeEvent:
     type: str
     data: Dict[str, Any] = field(default_factory=dict)
     raw: Optional[Dict[str, Any]] = None
+    session_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +328,7 @@ class OpenCodeRunner:
             message = self._error_message(error) or "OpenCode selhal"
             self.last_error = error if isinstance(error, dict) else {"message": message}
             out.append(OpenCodeEvent("error", {"message": message, "error": error}, raw=event))
-            return out
+            return self._with_session_id(out, session_id)
 
         if etype == "tool.execute.before":
             # `tool.execute.before` nemá `part` ani `messageID` — nese jen callID,
@@ -344,7 +345,7 @@ class OpenCodeRunner:
                     raw=event,
                 )
             )
-            return out
+            return self._with_session_id(out, session_id)
 
         part = event.get("part")
         nested_part = False
@@ -356,14 +357,21 @@ class OpenCodeRunner:
             # `properties.part`; only tool lifecycle and step-finish are safe to
             # consume without tracking message roles.
             if nested_part and part.get("type") not in {"tool", "step-finish"}:
-                return out or [OpenCodeEvent("raw", {"event": event}, raw=event)]
+                return self._with_session_id(out or [OpenCodeEvent("raw", {"event": event}, raw=event)], session_id)
             if part.get("type") == "step-finish":
                 self._capture_usage(part)
             out.append(OpenCodeEvent("part", {"part": part}, raw=event))
-            return out
+            return self._with_session_id(out, session_id)
 
         out.append(OpenCodeEvent("raw", {"event": event}, raw=event))
-        return out
+        return self._with_session_id(out, session_id)
+
+    @staticmethod
+    def _with_session_id(events: List[OpenCodeEvent], session_id: Any) -> List[OpenCodeEvent]:
+        if isinstance(session_id, str) and session_id:
+            for event in events:
+                event.session_id = session_id
+        return events
 
     @staticmethod
     def _error_message(error: Any) -> str:

@@ -192,6 +192,7 @@ def test_normalize_emits_session_start_once_then_part() -> None:
     )
     assert [e.type for e in first] == ["session_start", "part"]
     assert first[0].data == {"session_id": "ses_1"}
+    assert all(event.session_id == "ses_1" for event in first)
     assert client.session_id == "ses_1"
 
     second = client._normalize(
@@ -202,6 +203,7 @@ def test_normalize_emits_session_start_once_then_part() -> None:
         }
     )
     assert [e.type for e in second] == ["part"]
+    assert second[0].session_id == "ses_1"
 
 
 def test_normalize_tool_execute_before_emits_tool_before() -> None:

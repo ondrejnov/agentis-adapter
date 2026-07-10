@@ -257,6 +257,62 @@ def test_wrapper_streams_opencode_and_synthesizes_result(monkeypatch) -> None:
     assert result.data["is_error"] is False
 
 
+def test_wrapper_adds_native_session_id_to_events_from_subtasks(monkeypatch) -> None:
+    lines = [
+        json.dumps(
+            {
+                "type": "text",
+                "sessionID": "ses_main",
+                "part": {"id": "p-main-1", "type": "text", "text": "Delegating"},
+            }
+        )
+        + "\n",
+        json.dumps(
+            {
+                "type": "text",
+                "sessionID": "ses_child",
+                "part": {"id": "p-child-1", "type": "text", "text": "Subtask result"},
+            }
+        )
+        + "\n",
+        json.dumps(
+            {
+                "type": "step_finish",
+                "sessionID": "ses_child",
+                "part": {"type": "step-finish", "tokens": {"input": 2, "output": 1}},
+            }
+        )
+        + "\n",
+        json.dumps(
+            {
+                "type": "text",
+                "sessionID": "ses_main",
+                "part": {"id": "p-main-2", "type": "text", "text": "Done"},
+            }
+        )
+        + "\n",
+    ]
+    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
+
+    async def collect() -> list[AgentEvent]:
+        wrapper = AgentWrapper(AgentConfig(adapter="opencode"))
+        return [event async for event in wrapper.stream("Delegate work")]
+
+    events = asyncio.run(collect())
+
+    assert all(event.data.get("session_id") for event in events)
+    assert [(event.type, event.data["session_id"]) for event in events] == [
+        ("session", "ses_main"),
+        ("text", "ses_main"),
+        ("session", "ses_child"),
+        ("text", "ses_child"),
+        ("step", "ses_child"),
+        ("session", "ses_main"),
+        ("text", "ses_main"),
+        ("result", "ses_main"),
+    ]
+
+
 def test_wrapper_streams_claude_with_native_result(monkeypatch) -> None:
     lines = [
         json.dumps({"type": "system", "subtype": "init", "session_id": "s1", "model": "claude-x", "cwd": "/w"}) + "\n",

@@ -39,5 +39,18 @@
   },
   "experimental": {
     "mcp_timeout": 900000
+  },
+  "provider": {
+    "openai": {
+      "models": {
+        "gpt-5.6-sol": {
+           "options": {
+              "reasoningEffort": "high",
+              "textVerbosity": "medium",
+              "reasoningSummary": "detailed"
+            }
+        }
+      }
+    }
   }
 }

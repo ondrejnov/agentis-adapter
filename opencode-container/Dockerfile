@@ -100,8 +100,8 @@ COPY ./rtk /root/.local/bin
 RUN curl -fsSL https://cli.tavily.com/install.sh | bash
 
 RUN npm install prettier -g
-RUN npm install -g @anthropic-ai/claude-code@2.1.172
-RUN npm install -g opencode-ai@1.16.2 opencode-linux-x64-baseline@1.16.2
+RUN npm install -g @anthropic-ai/claude-code@2.1.206
+RUN npm install -g opencode-ai@1.17.18 opencode-linux-x64-baseline@1.17.18
 
 # kubectl pro workflow kroky (apply DevServer CR pro agentis-kubernetes-operator)
 RUN KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" \

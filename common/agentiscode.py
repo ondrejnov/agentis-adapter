@@ -497,6 +497,10 @@ class AgentWrapper:
         emitted_result = False
         async for native in self._runner.stream(prompt, on_proc_started=on_proc_started):
             for unified in self._translate(native):
+                if self.adapter == OPENCODE:
+                    session_id = native.session_id or self._runner.session_id
+                    if session_id:
+                        unified.data.setdefault("session_id", session_id)
                 if unified.type == "result":
                     emitted_result = True
                 yield unified
