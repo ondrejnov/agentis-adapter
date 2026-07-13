@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from app.agentiscode import run
+from app.agentiscode import _append_context_ids, run
 from common.agentiscode import (
     AgentConfig,
     AgentEvent,
@@ -374,6 +374,13 @@ def test_cli_requires_prompt(monkeypatch) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     with pytest.raises(SystemExit):
         run(["--adapter", "opencode"])
+
+
+def test_append_context_ids_to_prompt() -> None:
+    assert _append_context_ids("udelej X", "task-1", "project-1") == (
+        "udelej X\n\n<agentis_task_id>task-1</agentis_task_id>\n<agentis_project_id>project-1</agentis_project_id>"
+    )
+    assert _append_context_ids("udelej X", None, None) == "udelej X"
 
 
 def test_cli_task_id_requires_agentis_api(monkeypatch) -> None:

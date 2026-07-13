@@ -18,6 +18,7 @@ proto se všechna volání obalují a případná chyba se jen ohlásí přes ``
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
@@ -25,6 +26,14 @@ from claude.activity_mapper import ClaudeActivityMapper
 from claude.client import ClaudeEvent
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 from common.agentiscode import AgentEvent
+
+
+@dataclass
+class _SessionTelemetryState:
+    mapper: ClaudeActivityMapper
+    bound: bool = False
+    dirty: bool = False
+    step_seen: bool = False
 
 
 def _unified_to_native(event: AgentEvent) -> Optional[ClaudeEvent]:
@@ -130,12 +139,12 @@ class AgentisTelemetry:
                 timeout=timeout,
             )
 
-        self._mapper = ClaudeActivityMapper(prompt=prompt, mode=mode, agent=adapter, cwd=cwd)
+        self._prompt = prompt
+        self._mode = mode
+        self._cwd = cwd
+        self._sessions: dict[str, _SessionTelemetryState] = {}
         self.session_id: Optional[str] = None
-        self._session_bound = False
-        self._dirty = False
         self._is_error = False
-        self._step_seen = False
         self._final_text_chunks: list[str] = []
         self._final_text_open = False
 
@@ -176,42 +185,62 @@ class AgentisTelemetry:
         if self.run_id is None:
             return
 
-        if event.type == "error" or (event.type == "result" and event.data.get("is_error")):
+        event_session_id = event.data.get("session_id")
+        if not isinstance(event_session_id, str) or not event_session_id:
+            event_session_id = self.session_id
+
+        state = self._sessions.get(event_session_id) if event_session_id else None
+        if event.type == "session" and event_session_id and state is None:
+            is_primary = self.session_id is None
+            state = _SessionTelemetryState(
+                mapper=ClaudeActivityMapper(
+                    prompt=self._prompt if is_primary else "",
+                    mode=self._mode,
+                    agent=self.adapter,
+                    cwd=self._cwd,
+                    session_id_hint=event_session_id,
+                )
+            )
+            self._sessions[event_session_id] = state
+            if is_primary:
+                self.session_id = event_session_id
+            self._bind_session(event_session_id, state, primary=self.primary_session if is_primary else False)
+
+        if state is None:
+            return
+        assert event_session_id is not None
+
+        is_primary_event = event_session_id == self.session_id
+        if is_primary_event and (event.type == "error" or (event.type == "result" and event.data.get("is_error"))):
             print(str(event))
             self._is_error = True
 
-        if event.type == "text":
+        if is_primary_event and event.type == "text":
             text = event.data.get("text")
             if isinstance(text, str) and text:
                 if not self._final_text_open:
                     self._final_text_chunks.clear()
                 self._final_text_chunks.append(text)
                 self._final_text_open = True
-        elif event.type in {"reasoning", "tool", "step"}:
+        elif is_primary_event and event.type in {"reasoning", "tool", "step"}:
             self._final_text_open = False
 
         if event.type == "step":
-            self._step_seen = True
-        elif event.type == "result" and self._step_seen:
+            state.step_seen = True
+        elif event.type == "result" and state.step_seen:
             # Per-turn tokeny už máme z `step` eventů; finální `result` by je jen
             # zopakoval (u OpenCode dokonce jen poslední turn) → do transcriptu
             # ho už nepouštíme. Run-end (is_error) je zachycen výše, zbytek řeší
             # finish().
             return
 
-        if event.type == "session" and not self._session_bound:
-            session_id = event.data.get("session_id")
-            if isinstance(session_id, str) and session_id:
-                self.session_id = session_id
-                self._bind_session(session_id)
-
         native = _unified_to_native(event)
         if native is None:
             return
-        if self._mapper.consume(native):
-            self._dirty = True
-            if self._session_bound:
-                self._push_activity_log()
+        if state.mapper.consume(native):
+            state.dirty = True
+            if state.bound:
+                self._push_activity_log(event_session_id, state)
 
     def finish(self) -> None:
         """Dopošle zbylou aktivitu a uzavře run.
@@ -229,8 +258,9 @@ class AgentisTelemetry:
         """
         if self.run_id is None:
             return
-        if self._session_bound and self._dirty:
-            self._push_activity_log()
+        for session_id, state in self._sessions.items():
+            if state.bound and state.dirty:
+                self._push_activity_log(session_id, state)
 
         status = "failed" if self._is_error else "success"
         message = "agentiscode běh selhal." if self._is_error else "agentiscode běh doběhl."
@@ -250,20 +280,20 @@ class AgentisTelemetry:
     # Internals
     # ------------------------------------------------------------------
 
-    def _bind_session(self, session_id: str) -> None:
+    def _bind_session(self, session_id: str, state: _SessionTelemetryState, *, primary: bool) -> None:
         # Agentis hledá run podle session_id, takže binding musí proběhnout dřív,
         # než dává smysl posílat `session.store_activity_log`.
         result = self._call(
             "run.store_session_id",
-            {"run_id": self.run_id, "session_id": session_id, "primary": self.primary_session},
+            {"run_id": self.run_id, "session_id": session_id, "primary": primary},
         )
-        self._session_bound = result is not None
-        if self._session_bound and self._dirty:
-            self._push_activity_log()
+        state.bound = result is not None
+        if state.bound and state.dirty:
+            self._push_activity_log(session_id, state)
 
-    def _push_activity_log(self) -> None:
-        self._call("session.store_activity_log", {"session_id": self.session_id, "messages": self._mapper.snapshot()})
-        self._dirty = False
+    def _push_activity_log(self, session_id: str, state: _SessionTelemetryState) -> None:
+        self._call("session.store_activity_log", {"session_id": session_id, "messages": state.mapper.snapshot()})
+        state.dirty = False
 
     def _post_final_comment(self) -> None:
         # Doručí finální odpověď do tasku jen na explicitní požadavek CLI.

@@ -38,6 +38,7 @@ workflow:
           --effort "$AGENTIS_EFFORT" \
           --run-id "$AGENTIS_RUN_ID" \
           --task-id "$AGENTIS_TASK_ID" \
+          --project-id "$AGENTIS_PROJECT_ID" \
           --final-output "$OUTPUT_DIR/final-comment.md" \
           --session-output "$OUTPUT_DIR/session-id" \
           < "$AGENTIS_PROMPT_FILE" \

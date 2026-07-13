@@ -417,6 +417,7 @@ class WorkflowManager:
             {
                 "AGENTIS_RUN_ID": run.context.run_id,
                 "AGENTIS_TASK_ID": run.context.task_id,
+                "AGENTIS_PROJECT_ID": str(run.context.project_id) if run.context.project_id is not None else "",
                 "AGENTIS_RUN_DIR": str(run.run_dir),
                 "AGENTIS_PROMPT_FILE": str(run.prompt_file),
                 "AGENTIS_CONTEXT_FILE": str(run.context_file),

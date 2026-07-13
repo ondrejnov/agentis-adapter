@@ -217,6 +217,12 @@ def _parser() -> argparse.ArgumentParser:
         help="Agentis task id — založí k němu run a průběžně do něj posílá aktivitu (telemetrie).",
     )
     parser.add_argument(
+        "--project-id",
+        metavar="PROJECT_ID",
+        default=os.environ.get("AGENTIS_PROJECT_ID"),
+        help="Agentis project id přidané do promptu (default: $AGENTIS_PROJECT_ID).",
+    )
+    parser.add_argument(
         "--run-id",
         metavar="RUN_ID",
         help="Existující Agentis run id — telemetry se zapíše do něj místo založení nového runu.",
@@ -281,6 +287,17 @@ def _read_prompt(parts: Sequence[str]) -> str:
     if not sys.stdin.isatty():
         return sys.stdin.read().strip()
     return ""
+
+
+def _append_context_ids(prompt: str, task_id: Optional[str], project_id: Optional[str]) -> str:
+    tags = []
+    if task_id:
+        tags.append(f"<agentis_task_id>{task_id}</agentis_task_id>")
+    if project_id:
+        tags.append(f"<agentis_project_id>{project_id}</agentis_project_id>")
+    if not tags:
+        return prompt
+    return f"{prompt.rstrip()}\n\n" + "\n".join(tags)
 
 
 def _parse_bool(value: str) -> bool:
@@ -376,6 +393,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     prompt = _read_prompt(args.prompt)
     if not prompt:
         _parser().error("Chybí prompt (zadej ho jako argument nebo na stdin).")
+    prompt = _append_context_ids(prompt, args.task_id, args.project_id)
 
     cwd = args.cwd or os.getcwd()
     config = AgentConfig(

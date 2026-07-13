@@ -185,6 +185,52 @@ def test_telemetry_can_bind_secondary_session() -> None:
     }
 
 
+def test_telemetry_stores_subagent_messages_under_its_own_session() -> None:
+    client = FakeClient()
+    telemetry = AgentisTelemetry(
+        task_id="task-1", prompt="Delegate work", adapter="opencode", run_id="run-existing", client=client
+    )
+    telemetry.start()
+
+    events = [
+        AgentEvent("session", {"session_id": "ses-main"}),
+        AgentEvent("text", {"text": "Delegating", "session_id": "ses-main"}),
+        AgentEvent("session", {"session_id": "ses-child"}),
+        AgentEvent("text", {"text": "Subtask result", "session_id": "ses-child"}),
+        AgentEvent(
+            "step",
+            {"usage": {"input_tokens": 2, "output_tokens": 1}, "cost_usd": 0.01, "session_id": "ses-child"},
+        ),
+        AgentEvent("session", {"session_id": "ses-main"}),
+        AgentEvent("text", {"text": "Done", "session_id": "ses-main"}),
+    ]
+    for event in events:
+        telemetry.handle(event)
+    telemetry.finish()
+
+    bindings = [call["params"] for call in client.calls if call["method"] == "run.store_session_id"]
+    assert bindings == [
+        {"run_id": "run-existing", "session_id": "ses-main", "primary": True},
+        {"run_id": "run-existing", "session_id": "ses-child", "primary": False},
+    ]
+
+    logs = [call["params"] for call in client.calls if call["method"] == "session.store_activity_log"]
+    child_log = next(log for log in reversed(logs) if log["session_id"] == "ses-child")
+    main_log = next(log for log in reversed(logs) if log["session_id"] == "ses-main")
+
+    assert any(
+        part.get("text") == "Subtask result" for message in child_log["messages"] for part in message["parts"]
+    )
+    assert not any(
+        part.get("text") == "Subtask result" for message in main_log["messages"] for part in message["parts"]
+    )
+    for log in (main_log, child_log):
+        assert all(message["info"]["sessionID"] == log["session_id"] for message in log["messages"])
+        assert all(
+            part["sessionID"] == log["session_id"] for message in log["messages"] for part in message["parts"]
+        )
+
+
 def test_telemetry_final_comment_can_set_task_status() -> None:
     client = FakeClient()
     telemetry = AgentisTelemetry(
