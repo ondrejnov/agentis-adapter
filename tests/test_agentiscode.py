@@ -383,6 +383,48 @@ def test_append_context_ids_to_prompt() -> None:
     assert _append_context_ids("udelej X", None, None) == "udelej X"
 
 
+def test_cli_resume_does_not_append_context_ids(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeTelemetry:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["telemetry_task_id"] = kwargs["task_id"]
+
+        def close(self) -> None:
+            pass
+
+    async def fake_run(config: AgentConfig, prompt: str, *_args: Any) -> int:
+        captured["prompt"] = prompt
+        captured["resume_session_id"] = config.resume_session_id
+        return 0
+
+    monkeypatch.setattr("app.agentiscode.AgentisTelemetry", FakeTelemetry)
+    monkeypatch.setattr("app.agentiscode._run", fake_run)
+
+    exit_code = run(
+        [
+            "--adapter",
+            "opencode",
+            "--resume",
+            "session-1",
+            "--task-id",
+            "task-1",
+            "--project-id",
+            "project-1",
+            "--agentis-api",
+            "http://agentis.local/api",
+            "pokracuj",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured == {
+        "telemetry_task_id": "task-1",
+        "prompt": "pokracuj",
+        "resume_session_id": "session-1",
+    }
+
+
 def test_cli_task_id_requires_agentis_api(monkeypatch) -> None:
     monkeypatch.delenv("AGENTIS_ENDPOINT", raising=False)
     with pytest.raises(SystemExit):

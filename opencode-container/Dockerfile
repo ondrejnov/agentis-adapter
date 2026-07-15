@@ -88,6 +88,7 @@ RUN pip install /opt/agentis-adapter
 RUN python -c "from fastembed import LateInteractionTextEmbedding, SparseTextEmbedding; list(SparseTextEmbedding(model_name='Qdrant/bm25').embed(['agdoc cache probe'])); list(LateInteractionTextEmbedding(model_name='answerdotai/answerai-colbert-small-v1').embed(['agdoc cache probe']))" \
     && HF_HUB_OFFLINE=1 python -c "from fastembed import LateInteractionTextEmbedding, SparseTextEmbedding; list(SparseTextEmbedding(model_name='Qdrant/bm25', local_files_only=True).embed(['agdoc cache probe'])); list(LateInteractionTextEmbedding(model_name='answerdotai/answerai-colbert-small-v1', local_files_only=True).embed(['agdoc cache probe']))" \
     && chmod -R a+rX /opt/fastembed_cache /opt/huggingface_cache
+ENV AGDOC_QDRANT_URL=http://qdrant.agdoc:6333
 
 RUN npm install -g pyright
 

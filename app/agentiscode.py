@@ -393,7 +393,8 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     prompt = _read_prompt(args.prompt)
     if not prompt:
         _parser().error("Chybí prompt (zadej ho jako argument nebo na stdin).")
-    prompt = _append_context_ids(prompt, args.task_id, args.project_id)
+    if not args.resume:
+        prompt = _append_context_ids(prompt, args.task_id, args.project_id)
 
     cwd = args.cwd or os.getcwd()
     config = AgentConfig(
