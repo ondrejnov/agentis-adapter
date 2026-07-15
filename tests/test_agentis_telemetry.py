@@ -218,17 +218,13 @@ def test_telemetry_stores_subagent_messages_under_its_own_session() -> None:
     child_log = next(log for log in reversed(logs) if log["session_id"] == "ses-child")
     main_log = next(log for log in reversed(logs) if log["session_id"] == "ses-main")
 
-    assert any(
-        part.get("text") == "Subtask result" for message in child_log["messages"] for part in message["parts"]
-    )
+    assert any(part.get("text") == "Subtask result" for message in child_log["messages"] for part in message["parts"])
     assert not any(
         part.get("text") == "Subtask result" for message in main_log["messages"] for part in message["parts"]
     )
     for log in (main_log, child_log):
         assert all(message["info"]["sessionID"] == log["session_id"] for message in log["messages"])
-        assert all(
-            part["sessionID"] == log["session_id"] for message in log["messages"] for part in message["parts"]
-        )
+        assert all(part["sessionID"] == log["session_id"] for message in log["messages"] for part in message["parts"])
 
 
 def test_telemetry_final_comment_can_set_task_status() -> None:
@@ -318,6 +314,120 @@ def test_telemetry_swallows_rpc_errors() -> None:
         telemetry.handle(event)
     telemetry.finish()
     assert any("session.store_activity_log" in message for message in errors)
+
+
+def test_telemetry_retries_completed_snapshot_after_transient_store_failure() -> None:
+    class FlakyStoreClient(FakeClient):
+        failed_completed_snapshot = False
+
+        def call(self, *, method: str, params: dict[str, Any], request_id: Any | None = None) -> Any:
+            self.calls.append({"method": method, "params": params})
+            has_completed_tool = any(
+                part.get("state", {}).get("status") == "completed"
+                for message in params.get("messages", [])
+                for part in message.get("parts", [])
+                if isinstance(part.get("state"), dict)
+            )
+            if method == "session.store_activity_log" and has_completed_tool and not self.failed_completed_snapshot:
+                self.failed_completed_snapshot = True
+                from common.agentis import AgentisJsonRpcError
+
+                raise AgentisJsonRpcError("temporary failure")
+            return self.results.get(method, {"ok": True})
+
+    client = FlakyStoreClient()
+    telemetry = AgentisTelemetry(task_id="task-1", prompt="x", adapter="opencode", run_id="run-existing", client=client)
+    telemetry.start()
+    telemetry.handle(AgentEvent("session", {"session_id": "ses_1"}))
+    telemetry.handle(
+        AgentEvent("tool", {"id": "t1", "name": "bash", "status": "running", "input": {"command": "true"}})
+    )
+    telemetry.handle(AgentEvent("tool", {"id": "t1", "status": "completed", "output": "ok"}))
+    telemetry.finish()
+
+    completed_calls = [
+        call
+        for call in client.calls
+        if call["method"] == "session.store_activity_log"
+        and any(
+            part.get("state", {}).get("status") == "completed"
+            for message in call["params"]["messages"]
+            for part in message["parts"]
+            if isinstance(part.get("state"), dict)
+        )
+    ]
+    assert len(completed_calls) == 2
+
+
+def test_telemetry_stores_completed_tool_without_running_event() -> None:
+    client = FakeClient()
+    telemetry = AgentisTelemetry(task_id="task-1", prompt="x", adapter="opencode", run_id="run-existing", client=client)
+    telemetry.start()
+    telemetry.handle(AgentEvent("session", {"session_id": "ses_1"}))
+    telemetry.handle(
+        AgentEvent(
+            "tool",
+            {
+                "id": "t1",
+                "name": "bash",
+                "status": "completed",
+                "input": {"command": "true"},
+                "output": "ok",
+            },
+        )
+    )
+
+    messages = [call for call in client.calls if call["method"] == "session.store_activity_log"][-1]["params"][
+        "messages"
+    ]
+    tool = next(part for message in messages for part in message["parts"] if part.get("callID") == "t1")
+    assert tool["tool"] == "bash"
+    assert tool["state"]["status"] == "completed"
+    assert tool["state"]["output"] == "ok"
+
+
+def test_telemetry_retries_failed_session_binding_on_next_event() -> None:
+    class FlakyBindingClient(FakeClient):
+        binding_attempts = 0
+
+        def call(self, *, method: str, params: dict[str, Any], request_id: Any | None = None) -> Any:
+            self.calls.append({"method": method, "params": params})
+            if method == "run.store_session_id":
+                self.binding_attempts += 1
+                if self.binding_attempts == 1:
+                    from common.agentis import AgentisJsonRpcError
+
+                    raise AgentisJsonRpcError("temporary failure")
+            return self.results.get(method, {"ok": True})
+
+    client = FlakyBindingClient()
+    telemetry = AgentisTelemetry(task_id="task-1", prompt="x", adapter="opencode", run_id="run-existing", client=client)
+    telemetry.start()
+    telemetry.handle(AgentEvent("session", {"session_id": "ses_1"}))
+    telemetry.handle(AgentEvent("text", {"session_id": "ses_1", "text": "done"}))
+
+    assert client.binding_attempts == 2
+    assert "session.store_activity_log" in client.methods()
+
+
+def test_telemetry_treats_ok_false_as_failed_store() -> None:
+    client = FakeClient(results={"session.store_activity_log": {"ok": False, "error": "run not found"}})
+    errors: list[str] = []
+    telemetry = AgentisTelemetry(
+        task_id="task-1",
+        prompt="x",
+        adapter="opencode",
+        run_id="run-existing",
+        client=client,
+        on_error=errors.append,
+    )
+    telemetry.start()
+    telemetry.handle(AgentEvent("session", {"session_id": "ses_1"}))
+    attempts_before_finish = client.methods().count("session.store_activity_log")
+    telemetry.finish()
+
+    assert client.methods().count("session.store_activity_log") == attempts_before_finish + 1
+    assert any("run not found" in message for message in errors)
 
 
 def test_telemetry_requires_task_id_and_endpoint() -> None:

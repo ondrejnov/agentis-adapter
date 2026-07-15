@@ -61,7 +61,11 @@ def _unified_to_native(event: AgentEvent) -> Optional[ClaudeEvent]:
         if status in ("completed", "error"):
             is_error = status == "error"
             content = d.get("error") if is_error else d.get("output")
-            return ClaudeEvent("tool_result", {"tool_use_id": d.get("id"), "content": content, "is_error": is_error})
+            result_data = {"tool_use_id": d.get("id"), "content": content, "is_error": is_error}
+            for key in ("name", "input", "message_id"):
+                if key in d:
+                    result_data[key] = d[key]
+            return ClaudeEvent("tool_result", result_data)
         return None
     if t == "step":
         return ClaudeEvent("step_finish", {"usage": d.get("usage"), "cost_usd": d.get("cost_usd")})
@@ -204,11 +208,17 @@ class AgentisTelemetry:
             self._sessions[event_session_id] = state
             if is_primary:
                 self.session_id = event_session_id
-            self._bind_session(event_session_id, state, primary=self.primary_session if is_primary else False)
 
         if state is None:
             return
         assert event_session_id is not None
+
+        if not state.bound:
+            self._bind_session(
+                event_session_id,
+                state,
+                primary=self.primary_session if event_session_id == self.session_id else False,
+            )
 
         is_primary_event = event_session_id == self.session_id
         if is_primary_event and (event.type == "error" or (event.type == "result" and event.data.get("is_error"))):
@@ -259,6 +269,12 @@ class AgentisTelemetry:
         if self.run_id is None:
             return
         for session_id, state in self._sessions.items():
+            if not state.bound:
+                self._bind_session(
+                    session_id,
+                    state,
+                    primary=self.primary_session if session_id == self.session_id else False,
+                )
             if state.bound and state.dirty:
                 self._push_activity_log(session_id, state)
 
@@ -283,17 +299,19 @@ class AgentisTelemetry:
     def _bind_session(self, session_id: str, state: _SessionTelemetryState, *, primary: bool) -> None:
         # Agentis hledá run podle session_id, takže binding musí proběhnout dřív,
         # než dává smysl posílat `session.store_activity_log`.
-        result = self._call(
+        state.bound = self._call_succeeded(
             "run.store_session_id",
             {"run_id": self.run_id, "session_id": session_id, "primary": primary},
         )
-        state.bound = result is not None
         if state.bound and state.dirty:
             self._push_activity_log(session_id, state)
 
     def _push_activity_log(self, session_id: str, state: _SessionTelemetryState) -> None:
-        self._call("session.store_activity_log", {"session_id": session_id, "messages": state.mapper.snapshot()})
-        state.dirty = False
+        if self._call_succeeded(
+            "session.store_activity_log",
+            {"session_id": session_id, "messages": state.mapper.snapshot()},
+        ):
+            state.dirty = False
 
     def _post_final_comment(self) -> None:
         # Doručí finální odpověď do tasku jen na explicitní požadavek CLI.
@@ -344,6 +362,16 @@ class AgentisTelemetry:
         except Exception as exc:  # noqa: BLE001
             self._on_error(f"Agentis {method} nečekaná chyba: {exc!r}")
         return None
+
+    def _call_succeeded(self, method: str, params: dict[str, Any]) -> bool:
+        result = self._call(method, params)
+        if result is None:
+            return False
+        if isinstance(result, dict) and result.get("ok") is False:
+            detail = result.get("error") or "Agentis vrátil ok=false"
+            self._on_error(f"Agentis {method} selhalo: {detail}")
+            return False
+        return True
 
 
 __all__ = ["AgentisTelemetry"]

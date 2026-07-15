@@ -261,6 +261,31 @@ def test_normalize_vscode_stream_tool_part_updated_emits_part() -> None:
     assert events[1].data["part"]["state"]["status"] == "completed"
 
 
+def test_normalize_vscode_stream_uses_session_id_from_part() -> None:
+    client = OpenCodeRunner(config=OpenCodeRunConfig(command="opencode"))
+
+    events = client._normalize(
+        {
+            "source": "stream",
+            "type": "message.part.updated",
+            "properties": {
+                "part": {
+                    "id": "prt_tool",
+                    "messageID": "msg_1",
+                    "sessionID": "ses_from_part",
+                    "type": "tool",
+                    "tool": "bash",
+                    "callID": "call_bash",
+                    "state": {"status": "completed", "input": {"command": "true"}, "output": ""},
+                },
+            },
+        }
+    )
+
+    assert [event.type for event in events] == ["session_start", "part"]
+    assert all(event.session_id == "ses_from_part" for event in events)
+
+
 def test_normalize_vscode_stream_ignores_nested_text_parts() -> None:
     client = OpenCodeRunner(config=OpenCodeRunConfig(command="opencode"))
     client.session_id = "ses_1"

@@ -458,6 +458,16 @@ class ClaudeActivityMapper:
             return False
         # Najdi ToolPart napříč zprávami (může být v dřívější assistant zprávě)
         part = self._find_tool_part(call_id)
+        if part is None and ("name" in data or "input" in data):
+            self._on_tool_use(
+                {
+                    "id": call_id,
+                    "name": data.get("name"),
+                    "input": data.get("input"),
+                    "message_id": data.get("message_id"),
+                }
+            )
+            part = self._find_tool_part(call_id)
         if part is None:
             return False
         is_error = bool(data.get("is_error"))

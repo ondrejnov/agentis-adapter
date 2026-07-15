@@ -314,9 +314,17 @@ class OpenCodeRunner:
 
         raw_properties = event.get("properties")
         properties: Dict[str, Any] = raw_properties if isinstance(raw_properties, dict) else {}
+        part = event.get("part")
+        nested_part = False
+        if not isinstance(part, dict) and isinstance(properties.get("part"), dict):
+            part = properties["part"]
+            nested_part = True
+
         session_id = event.get("sessionID") or event.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             session_id = properties.get("sessionID") or properties.get("session_id")
+        if (not isinstance(session_id, str) or not session_id) and isinstance(part, dict):
+            session_id = part.get("sessionID") or part.get("session_id")
         if isinstance(session_id, str) and session_id and session_id != self.session_id:
             self.session_id = session_id
             out.append(OpenCodeEvent("session_start", {"session_id": session_id}, raw=event))
@@ -347,11 +355,6 @@ class OpenCodeRunner:
             )
             return self._with_session_id(out, session_id)
 
-        part = event.get("part")
-        nested_part = False
-        if not isinstance(part, dict) and isinstance(properties.get("part"), dict):
-            part = properties["part"]
-            nested_part = True
         if isinstance(part, dict):
             # VS Code/OpenCode stream events include user and assistant parts under
             # `properties.part`; only tool lifecycle and step-finish are safe to
