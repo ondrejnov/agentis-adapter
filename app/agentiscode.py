@@ -29,6 +29,7 @@ import asyncio
 import contextlib
 import json
 import os
+import shlex
 import signal
 import sys
 from pathlib import Path
@@ -309,6 +310,24 @@ def _parse_bool(value: str) -> bool:
     raise argparse.ArgumentTypeError("expected true/false")
 
 
+def _command_display(argv: Sequence[str], *, executable: str = "agentiscode") -> str:
+    sensitive_options = {"--agentis-token", "--agentis-service-token"}
+    display_args = [executable]
+    redact_next = False
+    for arg in argv:
+        if redact_next:
+            display_args.append("REDACTED")
+            redact_next = False
+            continue
+        option, separator, _value = arg.partition("=")
+        if option in sensitive_options:
+            display_args.append(f"{option}=REDACTED" if separator else option)
+            redact_next = not separator
+            continue
+        display_args.append(arg)
+    return shlex.join(display_args)
+
+
 async def _run(
     config: AgentConfig,
     prompt: str,
@@ -383,7 +402,12 @@ def _kill(proc: Optional[asyncio.subprocess.Process]) -> None:
 
 
 def run(argv: Optional[Sequence[str]] = None) -> int:
-    args = _parser().parse_args(argv)
+    cli_args = list(sys.argv[1:] if argv is None else argv)
+    executable = sys.argv[0] if argv is None else "agentiscode"
+    sys.stderr.write(f"[agentiscode] command: {_command_display(cli_args, executable=executable)}\n")
+    sys.stderr.flush()
+
+    args = _parser().parse_args(cli_args)
 
     try:
         normalize_adapter(args.adapter)
