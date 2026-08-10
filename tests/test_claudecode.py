@@ -136,15 +136,27 @@ def test_mapper_dedupes_repeated_assistant_message_id_into_single_message():
     mapper.consume(_event("session_start", {"session_id": "sid"}))
 
     mid = "msg_aaa"
-    usage1 = {"input_tokens": 10, "output_tokens": 3, "cache_read_input_tokens": 22040, "cache_creation_input_tokens": 9133}
+    usage1 = {
+        "input_tokens": 10,
+        "output_tokens": 3,
+        "cache_read_input_tokens": 22040,
+        "cache_creation_input_tokens": 9133,
+    }
     mapper.consume(_event("thinking", {"text": "", "message_id": mid}))
     mapper.consume(_event("assistant_message", {"message_id": mid, "message": {"id": mid, "usage": usage1}}))
-    mapper.consume(_event("tool_use", {"id": "toolu_1", "name": "Bash", "input": {"command": "pwd"}, "message_id": mid}))
+    mapper.consume(
+        _event("tool_use", {"id": "toolu_1", "name": "Bash", "input": {"command": "pwd"}, "message_id": mid})
+    )
     mapper.consume(_event("assistant_message", {"message_id": mid, "message": {"id": mid, "usage": usage1}}))
     mapper.consume(_event("tool_result", {"tool_use_id": "toolu_1", "content": "/var/www/clarp", "is_error": False}))
 
     mid2 = "msg_bbb"
-    usage2 = {"input_tokens": 8, "output_tokens": 2, "cache_read_input_tokens": 31173, "cache_creation_input_tokens": 172}
+    usage2 = {
+        "input_tokens": 8,
+        "output_tokens": 2,
+        "cache_read_input_tokens": 31173,
+        "cache_creation_input_tokens": 172,
+    }
     mapper.consume(_event("text", {"text": "Hotovo", "message_id": mid2}))
     mapper.consume(_event("assistant_message", {"message_id": mid2, "message": {"id": mid2, "usage": usage2}}))
     # Finální (kumulativní) result tokeny už nesmí přidat — jen dovře poslední zprávu.
@@ -182,6 +194,37 @@ def test_mapper_falls_back_to_result_tokens_without_per_turn_usage():
     assert len(assistant) == 1
     assert assistant[0]["info"]["tokens"]["input"] == 7
     assert assistant[0]["info"]["tokens"]["output"] == 3
+
+
+def test_mapper_step_finish_completes_tool_with_missing_terminal_event():
+    mapper = ClaudeActivityMapper(prompt="x")
+    mapper.consume(_event("session_start", {"session_id": "sid"}))
+    mapper.consume(_event("tool_use", {"id": "toolu_1", "name": "Read", "input": {"file_path": "/tmp/a"}}))
+
+    mapper.consume(_event("step_finish", {"usage": {"input_tokens": 1, "output_tokens": 1}}))
+
+    [tool] = [part for message in mapper.snapshot() for part in message["parts"] if part.get("type") == "tool"]
+    assert tool["state"]["status"] == "completed"
+    assert tool["state"]["time"]["end"] >= tool["state"]["time"]["start"]
+
+
+def test_mapper_does_not_reopen_completed_tool_after_step_finish():
+    mapper = ClaudeActivityMapper(prompt="x")
+    mapper.consume(_event("session_start", {"session_id": "sid"}))
+    mapper.consume(_event("tool_use", {"id": "toolu_1", "name": "Read", "input": {"file_path": "/tmp/a"}}))
+    mapper.consume(_event("tool_result", {"tool_use_id": "toolu_1", "content": "done", "is_error": False}))
+    mapper.consume(_event("step_finish", {"usage": {"input_tokens": 1, "output_tokens": 1}}))
+
+    changed = mapper.consume(_event("tool_use", {"id": "toolu_1", "name": "Read", "input": {"file_path": "/tmp/a"}}))
+
+    tools = [
+        part
+        for message in mapper.snapshot()
+        for part in message["parts"]
+        if part.get("type") == "tool" and part.get("callID") == "toolu_1"
+    ]
+    assert changed is False
+    assert [tool["state"]["status"] for tool in tools] == ["completed"]
 
 
 def test_mapper_tool_use_bash_title_falls_back_to_command_when_no_description():

@@ -99,10 +99,11 @@ RUN curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/instal
 COPY ./rtk /root/.local/bin
 
 RUN curl -fsSL https://cli.tavily.com/install.sh | bash
+RUN curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/destructive_command_guard/main/install.sh?$(date +%s)" | bash -s -- --easy-mode
 
 RUN npm install prettier -g
 RUN npm install -g @anthropic-ai/claude-code@2.1.206
-RUN npm install -g opencode-ai@1.17.18 opencode-linux-x64-baseline@1.17.18
+RUN npm install -g opencode-ai@1.18.10 opencode-linux-x64-baseline@1.18.10
 
 # kubectl pro workflow kroky (apply DevServer CR pro agentis-kubernetes-operator)
 RUN KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" \

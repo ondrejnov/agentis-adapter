@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from app.agentiscode import _append_context_ids, run
+from app.agentiscode import _append_context_ids, _command_display, run
 from common.agentiscode import (
     AgentConfig,
     AgentEvent,
@@ -423,6 +423,35 @@ def test_cli_resume_does_not_append_context_ids(monkeypatch) -> None:
         "prompt": "pokracuj",
         "resume_session_id": "session-1",
     }
+
+
+def test_cli_logs_complete_command(monkeypatch, capsys) -> None:
+    async def fake_run(*_args: Any) -> int:
+        return 0
+
+    monkeypatch.setattr("app.agentiscode._run", fake_run)
+
+    assert run(["--adapter", "opencode", "prompt with spaces"]) == 0
+    assert capsys.readouterr().err == ("[agentiscode] command: agentiscode --adapter opencode 'prompt with spaces'\n")
+
+
+def test_command_display_redacts_explicit_tokens() -> None:
+    command = _command_display(
+        [
+            "--adapter",
+            "opencode",
+            "--agentis-token",
+            "user-secret",
+            "--agentis-service-token=service-secret",
+            "prompt",
+        ]
+    )
+
+    assert command == (
+        "agentiscode --adapter opencode --agentis-token REDACTED --agentis-service-token=REDACTED prompt"
+    )
+    assert "user-secret" not in command
+    assert "service-secret" not in command
 
 
 def test_cli_task_id_requires_agentis_api(monkeypatch) -> None:

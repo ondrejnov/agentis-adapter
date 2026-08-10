@@ -420,9 +420,9 @@ class ClaudeActivityMapper:
         call_id = data.get("id")
         if not call_id:
             return False
-        state = self._ensure_assistant(data.get("message_id"))
-        if call_id in state.tool_part_idx:
+        if self._find_tool_part(call_id) is not None:
             return False
+        state = self._ensure_assistant(data.get("message_id"))
         msg_id = self._assistant_message_id(state)
         parts = self._messages[state.msg_idx]["parts"]
         tool_name = data.get("name") or ""
@@ -525,8 +525,26 @@ class ClaudeActivityMapper:
         if state.closed:
             return False
         info = self._messages[state.msg_idx]["info"]
+        parts = self._messages[state.msg_idx]["parts"]
+        now = _now()
+        # Step boundary proves every tool in this turn returned, even if its
+        # terminal stream event was dropped or arrived out of order.
+        for part in parts:
+            tool_state = part.get("state")
+            if part.get("type") != "tool" or not isinstance(tool_state, dict):
+                continue
+            if tool_state.get("status") not in {"pending", "running"}:
+                continue
+            completed_state = dict(tool_state)
+            completed_state["status"] = "completed"
+            completed_state.setdefault("output", "")
+            time_obj = dict(tool_state.get("time") or {})
+            time_obj.setdefault("start", now)
+            time_obj["end"] = now
+            completed_state["time"] = time_obj
+            part["state"] = completed_state
         # StepFinishPart — užitečné pro UI v Agentisu
-        self._messages[state.msg_idx]["parts"].append(
+        parts.append(
             {
                 "id": _prt_id(),
                 "sessionID": self.session_id,
