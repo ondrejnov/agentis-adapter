@@ -16,6 +16,7 @@ import subprocess
 import threading
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -165,8 +166,9 @@ def build_job_manifest(
 class KubectlJobRunner:
     """Tenký wrapper nad `kubectl` pro životní cyklus workflow Jobů."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, kube_context: str | None = None) -> None:
         self.settings = settings
+        self.kube_context = kube_context
 
     # ------------------------------------------------------------------
     # WorkflowStepRunner protokol
@@ -202,8 +204,13 @@ class KubectlJobRunner:
         return StepResult(status=status, log_tail=log_tail)
 
     def abort(self, namespace: str, labels: dict[str, str]) -> str:
-        jobs = self.delete_jobs_by_labels(namespace, labels)
-        pods = self.delete_pods_by_labels(namespace, labels)
+        # Force-delete Podu nesmí čekat na dokončení mazání Jobu; oba požadavky
+        # odstartujeme současně a až potom sestavíme výsledek abortu.
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="workflow-abort") as executor:
+            jobs_future = executor.submit(self.delete_jobs_by_labels, namespace, labels)
+            pods_future = executor.submit(self.delete_pods_by_labels, namespace, labels)
+            jobs = jobs_future.result()
+            pods = pods_future.result()
         return f"jobs: {jobs}; pods: {pods}".strip()
 
     def delete_namespace(self, namespace: str) -> None:
@@ -215,8 +222,9 @@ class KubectlJobRunner:
     # ------------------------------------------------------------------
 
     def _run(self, *args: str, stdin: str | None = None, timeout: float = _KUBECTL_TIMEOUT_SEC) -> str:
+        context_args = ["--context", self.kube_context] if self.kube_context else []
         completed = subprocess.run(
-            [self.settings.kubectl_command, *args],
+            [self.settings.kubectl_command, *context_args, *args],
             input=stdin,
             capture_output=True,
             text=True,
@@ -225,7 +233,7 @@ class KubectlJobRunner:
         )
         if completed.returncode != 0:
             stderr = completed.stderr.strip() or completed.stdout.strip() or "unknown kubectl error"
-            raise RuntimeError(f"kubectl {' '.join(args)} failed: {stderr}")
+            raise RuntimeError(f"kubectl {' '.join([*context_args, *args])} failed: {stderr}")
         return completed.stdout
 
     def ensure_namespace(self, namespace: str) -> None:

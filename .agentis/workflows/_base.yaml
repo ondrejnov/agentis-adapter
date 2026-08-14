@@ -4,6 +4,7 @@ version: 1
 # Sémantika merge: viz docs/workflow.md, sekce „Dědičnost (`extends`)“.
 workflow:
   image: rg.nl-ams.scw.cloud/reactis/opencode:1.3
+  context: microk8s
   imagePullSecrets:
     - name: registry
   workingDir: "[%WORKDIR%]"

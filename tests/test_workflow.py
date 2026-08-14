@@ -225,6 +225,16 @@ def test_workflow_schema_parses_and_interpolates(tmp_path: Path) -> None:
     assert spec.mounts[0].volume() == {"name": "www", "hostPath": {"path": "/var/www"}}
 
 
+def test_workflow_schema_accepts_optional_kubernetes_context(tmp_path: Path) -> None:
+    path = tmp_path / "context.yaml"
+    path.write_text(
+        "version: 1\nworkflow:\n  context: microk8s\n  image: x\n  steps:\n    - name: a\n      run: echo\n",
+        encoding="utf-8",
+    )
+
+    assert load_workflow_file(path, _values(tmp_path)).workflow.context == "microk8s"
+
+
 def test_workflow_schema_rejects_mount_without_volume_source(tmp_path: Path) -> None:
     path = tmp_path / "ci.yaml"
     path.write_text(
@@ -2167,7 +2177,7 @@ def test_kubernetes_abort_force_deletes_pods_without_waiting(tmp_path: Path) -> 
     result = runner.abort("task-77", {"agentis.task_id": "task-77", "agentis.run_id": "run-12345678"})
 
     assert result == "jobs: deleted; pods: deleted"
-    assert runner.commands == [
+    assert set(runner.commands) == {
         (
             "delete",
             "job",
@@ -2190,7 +2200,56 @@ def test_kubernetes_abort_force_deletes_pods_without_waiting(tmp_path: Path) -> 
             "--force",
             "--wait=false",
         ),
-    ]
+    }
+
+
+def test_kubernetes_abort_starts_pod_force_delete_without_waiting_for_job_delete(tmp_path: Path) -> None:
+    class BlockingJobDeleteRunner(KubectlJobRunner):
+        def __init__(self) -> None:
+            super().__init__(_settings(tmp_path), kube_context="microk8s")
+            self.pod_delete_started = threading.Event()
+            self.pod_started_while_job_waited = False
+
+        def _run(self, *args: str, stdin: str | None = None, timeout: float = 60.0) -> str:
+            resource = args[1]
+            if resource == "job":
+                self.pod_started_while_job_waited = self.pod_delete_started.wait(timeout=1.0)
+            elif resource == "pod":
+                self.pod_delete_started.set()
+            return "deleted"
+
+    runner = BlockingJobDeleteRunner()
+
+    runner.abort("task-77", {"agentis.task_id": "task-77"})
+
+    assert runner.pod_started_while_job_waited
+
+
+@pytest.mark.parametrize(
+    ("kube_context", "expected_command"),
+    [
+        ("microk8s", ["kubectl", "--context", "microk8s", "get", "namespace", "default"]),
+        (None, ["kubectl", "get", "namespace", "default"]),
+    ],
+)
+def test_kubectl_runner_uses_configured_or_current_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    kube_context: str | None,
+    expected_command: list[str],
+) -> None:
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> Any:
+        commands.append(command)
+        return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr("common.workflow.runtime.subprocess.run", fake_run)
+    runner = KubectlJobRunner(_settings(tmp_path), kube_context=kube_context)
+
+    runner._run("get", "namespace", "default")
+
+    assert commands == [expected_command]
 
 
 def test_kubernetes_run_step_abort_deletes_created_job_and_pods(tmp_path: Path) -> None:

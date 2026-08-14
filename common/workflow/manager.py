@@ -132,19 +132,24 @@ class WorkflowManager:
         self.settings = settings
         #: Explicitní runner (testy) má přednost před výběrem podle executoru.
         self._runner_override = runner
-        self._runners: dict[str, WorkflowStepRunner] = {}
+        self._runners: dict[tuple[str, str | None], WorkflowStepRunner] = {}
         self._runs: dict[str, _WorkflowRun] = {}
         self._lock = threading.Lock()
 
-    def _runner_for(self, executor: str) -> WorkflowStepRunner:
+    def _runner_for(self, executor: str, kube_context: str | None = None) -> WorkflowStepRunner:
         if self._runner_override is not None:
             return self._runner_override
         if executor not in WORKFLOW_EXECUTORS:
             raise ValueError(f"Unknown workflow executor {executor!r}; expected one of {WORKFLOW_EXECUTORS}")
-        runner = self._runners.get(executor)
+        key = (executor, kube_context if executor == "kubernetes" else None)
+        runner = self._runners.get(key)
         if runner is None:
-            runner = LocalProcessRunner(self.settings) if executor == "local" else KubectlJobRunner(self.settings)
-            self._runners[executor] = runner
+            runner = (
+                LocalProcessRunner(self.settings)
+                if executor == "local"
+                else KubectlJobRunner(self.settings, kube_context=kube_context)
+            )
+            self._runners[key] = runner
         return runner
 
     def _resolve_executor(self, context: AgentExecutionContextPayload, workflow: WorkflowFile) -> str:
@@ -228,7 +233,7 @@ class WorkflowManager:
         values = self._interpolation_values(context, worktree_path, namespace, run_dir=run_dir)
         workflow = load_workflow_file(workflow_path, values)
         executor = self._resolve_executor(context, workflow)
-        runner = self._runner_for(executor)
+        runner = self._runner_for(executor, workflow.workflow.context)
         if executor == "kubernetes":
             self._require_images(workflow, workflow_relpath)
         if runner.has_active_run(namespace, task_label):

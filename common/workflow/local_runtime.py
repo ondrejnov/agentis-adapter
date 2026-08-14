@@ -170,6 +170,8 @@ class LocalProcessRunner:
     def _ignored_fields(workflow: WorkflowFile) -> list[str]:
         spec = workflow.workflow
         ignored: list[str] = []
+        if spec.context:
+            ignored.append("context")
         if spec.image:
             ignored.append("image")
         if spec.imagePullSecrets:

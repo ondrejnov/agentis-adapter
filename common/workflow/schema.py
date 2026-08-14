@@ -369,6 +369,8 @@ class WorkflowSpec(BaseModel):
 
     #: Kde kroky poběží; bez hodnoty platí default adapteru (`WORKFLOW_EXECUTOR`).
     executor: Literal["kubernetes", "local"] | None = None
+    #: Kubectl context pro Kubernetes executor; bez hodnoty se použije current context.
+    context: str | None = Field(default=None, min_length=1)
     #: Container image; povinný jen pro executor `kubernetes` (validuje WorkflowManager).
     image: str | None = None
     #: Po úspěšném doběhnutí workflow smaže celý namespace; platí jen pro executor
