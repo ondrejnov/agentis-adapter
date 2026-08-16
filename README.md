@@ -73,7 +73,7 @@ Adapter se sám připojí k Agentisu a začne přijímat tasky. Není potřeba v
 
 Každý repozitář může řídit chování agenta pomocí `.agentis/workflows/default.yaml`. Díky tomu není postup ukrytý v adapteru a může se verzovat společně s projektem.
 
-Anonymizovaný příklad projektového workflow postaveného nad dodanou šablonou `_base.yaml`:
+Příklad agentního workflow:
 
 ```yaml
 version: 1
@@ -136,15 +136,26 @@ workflow:
           printf '%s' "$lock_hash" > .venv/.lock-hash
         fi
 
-    - name: Prepare agent context
-      if: ENV_READY != 'true'
-      run: make prepare-agent
-
     - name: Run agent
-      uses: run-agent
-      env:
-        RUN_AGENT_FLAGS: ""
-        RUN_AGENT_OUTPUT_DIR: .agentis/outputs
+      run: |
+        OUTPUT_DIR="${RUN_AGENT_OUTPUT_DIR:-$AGENTIS_RUN_DIR/outputs}"
+        mkdir -p "$OUTPUT_DIR"
+        MODEL="${AGENTIS_MODEL:-openai/gpt-5.6-luna}"
+        printf 'Agent - %s' "$MODEL" > "$OUTPUT_DIR/agent-name"
+        case "$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]')" in
+          *claude*) ADAPTER=claude ;;
+          *) ADAPTER=opencode ;;
+        esac
+        agentiscode ${RUN_AGENT_FLAGS:-} --adapter "$ADAPTER" \
+          ${AGENTIS_SESSION_ID:+--resume "$AGENTIS_SESSION_ID"} \
+          --model "$MODEL" \
+          --effort "$AGENTIS_EFFORT" \
+          --run-id "$AGENTIS_RUN_ID" \
+          --task-id "$AGENTIS_TASK_ID" \
+          --final-output "$OUTPUT_DIR/final-comment.md" \
+          --session-output "$OUTPUT_DIR/session-id" \
+          < "$AGENTIS_PROMPT_FILE" \
+          | ${RUN_AGENT_STREAM_FILTER:-cat}
       outputs:
         - type: agent_comment
           bodyFrom: .agentis/outputs/final-comment.md
