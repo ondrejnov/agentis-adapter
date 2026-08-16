@@ -21,7 +21,6 @@ from common.models import (
     UndoParams,
 )
 from common.rpc.jsonrpc import AgentJsonRpcService
-from common.rpc.session_registry import SessionContextRegistry
 
 
 _DISPATCH: dict[str, JsonRpcRoute] = {
@@ -32,10 +31,9 @@ _DISPATCH: dict[str, JsonRpcRoute] = {
 }
 
 
-def _configure_services(app: FastAPI, settings: Settings, session_registry: SessionContextRegistry) -> None:
+def _configure_services(app: FastAPI, settings: Settings) -> None:
     app.state.agent_jsonrpc_service = AgentJsonRpcService(
         settings=settings,
-        session_registry=session_registry,
         adapter_factory=lambda context: GitAdapterService(context=context, settings=settings),
     )
 

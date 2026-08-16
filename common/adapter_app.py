@@ -7,7 +7,6 @@ from fastapi import FastAPI, HTTPException
 
 from common.config import Settings
 from common.rpc.dispatcher import JsonRpcRoute
-from common.rpc.session_registry import SessionContextRegistry
 from common.status import get_status_registry
 
 
@@ -18,7 +17,7 @@ def create_adapter_app(
     *,
     title: str,
     settings: Settings,
-    configure_services: Callable[[FastAPI, Settings, SessionContextRegistry], None],
+    configure_services: Callable[[FastAPI, Settings], None],
     version: str = "0.1.0",
 ) -> FastAPI:
     """Build the adapter's service container.
@@ -31,9 +30,7 @@ def create_adapter_app(
     logs).
     """
     app = FastAPI(title=title, version=version)
-    session_registry = SessionContextRegistry()
-    app.state.session_registry = session_registry
-    configure_services(app, settings, session_registry)
+    configure_services(app, settings)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

@@ -19,7 +19,6 @@ from common.models import (
 from common.adapter_base import BaseAdapterService
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 from common.attachments import build_attachments_block, materialize_attachments, next_attachment_index
-from common.rpc.session_registry import SessionContextRegistry
 from common.status import get_status_registry
 from common.workflow.manager import WorkflowBusyError, WorkflowManager
 from opencode.utils import OpenCodeUtils
@@ -38,12 +37,10 @@ class AgentJsonRpcService:
         self,
         settings: Settings,
         adapter_factory: Callable[[AgentExecutionContextPayload], BaseAdapterService],
-        session_registry: SessionContextRegistry | None = None,
         workflow_manager: WorkflowManager | None = None,
     ):
         self.settings = settings
         self._adapter_factory = adapter_factory
-        self.session_registry = session_registry or SessionContextRegistry()
         self._workflow_manager = workflow_manager
 
     @property

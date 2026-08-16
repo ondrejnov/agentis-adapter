@@ -10,7 +10,6 @@ from common.models import (
     AdapterOptionsPayload,
 )
 from common.git_adapter import GitAdapterService
-from common.artifacts.expected import collect_expected_artifacts
 from common.namespaces import dev_server_url_for_context, namespace_for_context
 from common.rpc.jsonrpc import AgentJsonRpcService
 from tests.support import RpcTestClient
@@ -20,7 +19,6 @@ def make_client(service: AgentJsonRpcService | None = None) -> RpcTestClient:
     app = create_app()
     if service is not None:
         app.state.agent_jsonrpc_service = service
-        app.state.session_registry = service.session_registry
     return RpcTestClient(app, _DISPATCH)
 
 
@@ -35,40 +33,6 @@ def make_settings(**overrides: Any) -> Settings:
     }
     values.update(overrides)
     return Settings(**values)
-
-
-def test_collect_expected_artifacts_upload_payload(tmp_path):
-    report = tmp_path / "dist" / "report.json"
-    report.parent.mkdir()
-    report.write_text('{"ok": true}', encoding="utf-8")
-
-    context = AgentExecutionContextPayload(
-        run_id="run-1",
-        task_id="task-1",
-        title="Task",
-        expected_artifacts=[{"path": "dist/report.json", "name": "report"}],
-    )
-
-    assert collect_expected_artifacts(context, tmp_path) == [
-        {
-            "name": "report",
-            "filename": "report.json",
-            "content": "eyJvayI6IHRydWV9",
-        }
-    ]
-
-
-def test_collect_expected_artifacts_ignores_paths_outside_root(tmp_path):
-    outside = tmp_path.parent / "outside.txt"
-    outside.write_text("secret", encoding="utf-8")
-    context = AgentExecutionContextPayload(
-        run_id="run-1",
-        task_id="task-1",
-        title="Task",
-        expected_artifacts=["../outside.txt"],
-    )
-
-    assert collect_expected_artifacts(context, tmp_path) == []
 
 
 def fake_agentis_client_factory(captured_calls: list[dict[str, Any]]):

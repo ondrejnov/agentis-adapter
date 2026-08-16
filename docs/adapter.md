@@ -171,6 +171,6 @@ Selhání průběžné telemetrie je best-effort a loguje se na stderr; selhán�
 - HTTP klient a autentizační hlavičky: `tests/test_agentis_rpc.py`,
 - CLI wrapper, normalizace agentů a telemetrie: `tests/test_agentiscode.py`, `tests/test_agentis_telemetry.py`, `tests/test_claudecode.py`, `tests/test_opencode.py`, `tests/test_claude_client.py`,
 - observabilita a shutdown: `tests/test_status.py`, `tests/test_shutdown.py`,
-- snapshoty, screenshoty a git/PR pomocné funkce: `tests/test_source_snapshot.py`, `tests/test_screenshots.py`, `tests/test_github_pr.py`.
+- snapshoty a screenshoty: `tests/test_source_snapshot.py`, `tests/test_screenshots.py`.
 
 Celá sada se spouští přes `poetry run pytest -q`; statická kontrola přes `poetry run ruff check .`.
