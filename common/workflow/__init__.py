@@ -22,6 +22,7 @@ from common.workflow.runtime import (
     safe_step_name,
 )
 from common.workflow.local_runtime import LocalProcessRunner
+from common.workflow.docker_runtime import DockerContainerRunner
 from common.workflow.manager import WorkflowBusyError, WorkflowManager
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "interpolate_tokens",
     "load_workflow_file",
     "KubectlJobRunner",
+    "DockerContainerRunner",
     "LocalProcessRunner",
     "StepResult",
     "WorkflowStepRunner",

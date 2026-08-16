@@ -1,9 +1,10 @@
-"""Testy deklarativního workflow režimu (Kubernetes i lokální executor)."""
+"""Testy deklarativního workflow režimu a jeho executorů."""
 
 from __future__ import annotations
 
 import base64
 import json
+import subprocess
 import threading
 import time
 from dataclasses import replace
@@ -23,6 +24,7 @@ from common.models import (
     UndoParams,
 )
 from common.rpc.jsonrpc import AgentJsonRpcException, AgentJsonRpcService
+from common.workflow.docker_runtime import DockerContainerRunner
 from common.workflow.local_runtime import LocalProcessRunner
 from common.workflow.manager import WorkflowBusyError, WorkflowManager
 from common.workflow.runtime import (
@@ -2558,6 +2560,155 @@ def test_local_executor_abort_kills_running_process(tmp_path: Path) -> None:
     assert not run.runner.has_active_run(run.namespace, "task-77")
 
 
+DOCKER_WORKFLOW_YAML = """
+version: 1
+workflow:
+  executor: kubernetes
+  image: test-agent:latest
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 30
+  env:
+    CONTAINER_MARKER: docker
+    HOME: /container-home
+  mounts:
+    - name: worktree
+      mountPath: "[%WORKDIR%]"
+      hostPath:
+        path: "[%WORKDIR%]"
+  steps:
+    - name: Run agent
+      run: |
+        [ "$CONTAINER_MARKER" = docker ]
+        [ "$HOME" = /container-home ]
+        mkdir -p .agentis/outputs
+        printf 'Hotovo v Dockeru: %s' "$(cat "$AGENTIS_PROMPT_FILE")" > .agentis/outputs/final-comment.md
+      outputs:
+        - type: agent_comment
+          bodyFrom: .agentis/outputs/final-comment.md
+          status: 4
+"""
+
+
+def _fake_docker(tmp_path: Path) -> Path:
+    executable = tmp_path / "fake-docker"
+    executable.write_text(
+        """#!/bin/bash
+set -euo pipefail
+command="$1"
+shift
+case "$command" in
+  ps|rm)
+    exit 0
+    ;;
+  run)
+    printf '%s' "$HOME" > "$FAKE_DOCKER_CLIENT_HOME_FILE"
+    printf '%s\\n' "$@" > "$FAKE_DOCKER_ARGS_FILE"
+    entrypoint=""
+    while [[ "${1:-}" == --* ]]; do
+      case "$1" in
+        --rm|--init) shift ;;
+        --env)
+          if [[ "$2" == *=* ]]; then export "$2"; fi
+          shift 2
+          ;;
+        --entrypoint) entrypoint="$2"; shift 2 ;;
+        --name|--label|--mount|--workdir) shift 2 ;;
+        *) exit 64 ;;
+      esac
+    done
+    shift # image
+    exec "$entrypoint" "$@"
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    return executable
+
+
+def test_runtime_docker_runs_step_in_container_and_applies_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, DOCKER_WORKFLOW_YAML)
+    args_file = tmp_path / "docker-args"
+    client_home_file = tmp_path / "docker-client-home"
+    monkeypatch.setenv("FAKE_DOCKER_ARGS_FILE", str(args_file))
+    monkeypatch.setenv("FAKE_DOCKER_CLIENT_HOME_FILE", str(client_home_file))
+    monkeypatch.setenv("HOME", "/host-home")
+    settings = replace(_settings(tmp_path), docker_command=str(_fake_docker(tmp_path)))
+    manager = WorkflowManager(settings)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    manager._agentis_call = lambda method, params: calls.append((method, params))  # type: ignore[method-assign]
+    context = _context(adapter={"runtime": "docker", "agent": "build"})
+
+    result = manager.start_workflow(context, str(worktree), "udelej X")
+    assert result["executor"] == "docker"
+    _wait_done(manager, context.task_id)
+
+    run = manager._runs[context.task_id]
+    assert run.status == "success"
+    assert isinstance(run.runner, DockerContainerRunner)
+    comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
+    assert comment_calls[0]["body"] == "Hotovo v Dockeru: udelej X"
+
+    docker_args = args_file.read_text(encoding="utf-8").splitlines()
+    assert "--rm" in docker_args
+    assert "--init" in docker_args
+    assert "--env" in docker_args
+    assert "--entrypoint" in docker_args
+    assert "/bin/bash" in docker_args
+    assert "AGENTIS_RUN_ID" in docker_args
+    assert f"type=bind,source={worktree},target={worktree}" in docker_args
+    assert "test-agent:latest" in docker_args
+    assert client_home_file.read_text(encoding="utf-8") == "/host-home"
+
+
+def test_docker_executor_requires_image(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow_yaml(worktree, LOCAL_NO_EXECUTOR_YAML)
+    manager, _calls = _manager(tmp_path, FakeRunner())
+
+    with pytest.raises(ValueError, match="docker.*image"):
+        manager.start_workflow(_context(adapter={"runtime": "docker"}), str(worktree), "udelej X")
+
+
+def test_abort_without_in_memory_run_uses_context_docker_runtime(tmp_path: Path) -> None:
+    manager = WorkflowManager(_settings(tmp_path))
+    runner = FakeRunner()
+    selected: list[str] = []
+
+    def select_runner(executor: str, kube_context: str | None = None) -> FakeRunner:
+        selected.append(executor)
+        return runner
+
+    manager._runner_for = select_runner  # type: ignore[method-assign]
+    manager._agentis_call = lambda method, params: None  # type: ignore[method-assign]
+
+    manager.abort(_context(adapter={"runtime": "docker"}))
+
+    assert selected == ["docker"]
+    assert len(runner.deleted) == 1
+
+
+def test_docker_cli_timeout_is_reported_as_runtime_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = DockerContainerRunner(_settings(tmp_path))
+
+    def timeout(*args: Any, **kwargs: Any) -> None:
+        raise subprocess.TimeoutExpired("docker", 60)
+
+    monkeypatch.setattr("common.workflow.docker_runtime.subprocess.run", timeout)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        runner.has_active_run("task-77", "task-77")
+
+
 def test_kubernetes_executor_requires_image(tmp_path: Path) -> None:
     worktree = tmp_path / "wt"
     _write_workflow_yaml(worktree, LOCAL_NO_EXECUTOR_YAML)  # bez image, executor default = kubernetes
@@ -2570,7 +2721,7 @@ def test_kubernetes_executor_requires_image(tmp_path: Path) -> None:
 def test_workflow_schema_rejects_unknown_executor(tmp_path: Path) -> None:
     path = tmp_path / "ci.yaml"
     path.write_text(
-        "version: 1\nworkflow:\n  executor: docker\n  steps:\n    - name: a\n      run: echo\n",
+        "version: 1\nworkflow:\n  executor: podman\n  steps:\n    - name: a\n      run: echo\n",
         encoding="utf-8",
     )
     with pytest.raises(ValidationError):

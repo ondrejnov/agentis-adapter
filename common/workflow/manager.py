@@ -1,8 +1,8 @@
 """Background orchestrace deklarativního workflow režimu.
 
 `WorkflowManager` drží běžící workflow runy per task, spouští jednotlivé kroky
-přes :class:`WorkflowStepRunner` (Kubernetes Joby přes :class:`KubectlJobRunner`,
-nebo lokální bash procesy přes :class:`LocalProcessRunner` — podle executoru)
+přes :class:`WorkflowStepRunner` (Kubernetes Joby, Docker kontejnery nebo
+lokální bash procesy podle executoru)
 a po dokončení workflow aplikuje `outputs` úspěšně doběhlých kroků do Agentisu
 (i po selhání — `always` krok tak může doručit failure komentář).
 `start` / `add_message` vrací rychle — workflow běží v daemon threadu.
@@ -31,6 +31,7 @@ from common.artifacts.source_snapshot import (
     write_changes_diff_best_effort,
 )
 from common.config import Settings
+from common.workflow.docker_runtime import DockerContainerRunner
 from common.git_adapter import GitAdapterService
 from common.namespaces import namespace_for_context
 from common.models import AgentExecutionContextPayload, task_header_env
@@ -144,26 +145,27 @@ class WorkflowManager:
         key = (executor, kube_context if executor == "kubernetes" else None)
         runner = self._runners.get(key)
         if runner is None:
-            runner = (
-                LocalProcessRunner(self.settings)
-                if executor == "local"
-                else KubectlJobRunner(self.settings, kube_context=kube_context)
-            )
+            if executor == "local":
+                runner = LocalProcessRunner(self.settings)
+            elif executor == "docker":
+                runner = DockerContainerRunner(self.settings)
+            else:
+                runner = KubectlJobRunner(self.settings, kube_context=kube_context)
             self._runners[key] = runner
         return runner
 
     def _resolve_executor(self, context: AgentExecutionContextPayload, workflow: WorkflowFile) -> str:
         """Vybere executor pro run.
 
-        Runtime `local` (`context.adapter.runtime`) vynutí lokální executor bez
+        Runtime `local` nebo `docker` (`context.adapter.runtime`) vynutí odpovídající executor bez
         ohledu na `workflow.executor` / `WORKFLOW_EXECUTOR` — runtime je
         autoritativní signál prostředí. Jinak platí YAML `executor`, pak env
         default (`settings.workflow_executor`, default `kubernetes`).
         """
 
         runtime = (context.adapter.runtime if context.adapter and context.adapter.runtime else "").strip().lower()
-        if runtime == "local":
-            return "local"
+        if runtime in {"local", "docker"}:
+            return runtime
         return (workflow.workflow.executor or self.settings.workflow_executor).strip().lower()
 
     # ------------------------------------------------------------------
@@ -234,8 +236,8 @@ class WorkflowManager:
         workflow = load_workflow_file(workflow_path, values)
         executor = self._resolve_executor(context, workflow)
         runner = self._runner_for(executor, workflow.workflow.context)
-        if executor == "kubernetes":
-            self._require_images(workflow, workflow_relpath)
+        if executor in {"kubernetes", "docker"}:
+            self._require_images(workflow, workflow_relpath, executor)
         if runner.has_active_run(namespace, task_label):
             raise WorkflowBusyError(f"Workflow jobs for task {context.task_id} are still active in {namespace}")
 
@@ -314,7 +316,11 @@ class WorkflowManager:
             "agentis.task_id": self._task_label(context),
             "agentis.run_id": self._run_label(context),
         }
-        runner = run.runner if run is not None else self._runner_for(self.settings.workflow_executor)
+        if run is not None:
+            runner = run.runner
+        else:
+            runtime = (context.adapter.runtime if context.adapter and context.adapter.runtime else "").strip().lower()
+            runner = self._runner_for(runtime if runtime in {"local", "docker"} else self.settings.workflow_executor)
         deleted = runner.abort(namespace, labels)
         self._emit_adapter_event(
             context,
@@ -364,14 +370,14 @@ class WorkflowManager:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _require_images(workflow: WorkflowFile, workflow_relpath: str) -> None:
-        """Executor `kubernetes` potřebuje image pro každý krok; lokální executor je ignoruje."""
+    def _require_images(workflow: WorkflowFile, workflow_relpath: str, executor: str) -> None:
+        """Container executors need an image for every step; the local executor ignores it."""
 
         spec = workflow.workflow
         missing = [step.name for step in spec.steps if not (step.image or spec.image)]
         if missing:
             raise ValueError(
-                f"Workflow executor 'kubernetes' vyžaduje 'image' v {workflow_relpath} "
+                f"Workflow executor {executor!r} vyžaduje 'image' v {workflow_relpath} "
                 f"(chybí pro kroky: {', '.join(missing)})"
             )
 

@@ -26,6 +26,7 @@ class Settings:
     namespace_prefix: str = "Task"
     project_run_root: Path = Path("/tmp/agentis")
     kubectl_command: str = "kubectl"
+    docker_command: str = "docker"
     workflow_executor: str = "kubernetes"
     #: Předpřipravené workflow zabalené v adapteru; fallback, když projekt nemá vlastní
     #: `.agentis/workflows/<soubor>`. Default `workflows/` v rootu repa.
@@ -89,6 +90,7 @@ def _build_settings() -> Settings:
         namespace_prefix=_get_env("ADAPTER_NAMESPACE_PREFIX", "Task") or "Task",
         project_run_root=Path(_get_env("ADAPTER_PROJECT_RUN_ROOT", "/tmp/agentis") or "/tmp/agentis").resolve(),
         kubectl_command=_get_env("KUBECTL_COMMAND", "kubectl") or "kubectl",
+        docker_command=_get_env("DOCKER_COMMAND", "docker") or "docker",
         workflow_executor=(_get_env("WORKFLOW_EXECUTOR", "kubernetes") or "kubernetes").strip().lower(),
         bundled_workflow_dir=Path(
             _get_env("ADAPTER_BUNDLED_WORKFLOW_DIR", str(project_root / "workflows")) or str(project_root / "workflows")

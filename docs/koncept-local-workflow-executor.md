@@ -26,9 +26,10 @@ jeho kroky poběží.
 Priorita je:
 
 1. `context.adapter.runtime == "local"` vždy vynutí lokální executor.
-2. Jinak se použije `workflow.executor` z vybraného YAML souboru.
-3. Když YAML executor neurčí, použije se `WORKFLOW_EXECUTOR` adapteru.
-4. Výchozí hodnota `WORKFLOW_EXECUTOR` je `kubernetes`.
+2. `context.adapter.runtime == "docker"` vždy vynutí Docker executor.
+3. Jinak se použije `workflow.executor` z vybraného YAML souboru.
+4. Když YAML executor neurčí, použije se `WORKFLOW_EXECUTOR` adapteru.
+5. Výchozí hodnota `WORKFLOW_EXECUTOR` je `kubernetes`.
 
 Hodnota `context.adapter.runtime == "workflow"` samostatný executor nevybírá;
 ponechá rozhodnutí na YAML a konfiguraci adapteru.
@@ -50,7 +51,7 @@ Globální default lze nastavit v prostředí adapteru:
 WORKFLOW_EXECUTOR=local
 ```
 
-Schema přijímá pouze `kubernetes` a `local`. Kubernetes executor vyžaduje
+Schema přijímá `kubernetes`, `docker` a `local`. Kubernetes a Docker executor vyžadují
 `image` na workflow nebo na každém kroku; lokální executor image nevyžaduje.
 Runner se vybírá pro každý run a instance se cachují podle executoru a u
 Kubernetes také podle `workflow.context`.
@@ -201,17 +202,17 @@ Testy v `tests/test_workflow.py` pokrývají:
 - chybějící bash a chybu spuštění,
 - selhání kroku a přenos konce logu,
 - timeout a abort celého stromu procesů,
-- požadavek na image pouze pro Kubernetes executor,
+- požadavek na image pro Kubernetes a Docker executor,
 - odmítnutí neznámého executoru schématem.
 
 Relevantní ověření lze spustit příkazem:
 
 ```bash
-poetry run pytest -q tests/test_workflow.py -k "local_executor or runtime_local or kubernetes_executor_requires_image or unknown_executor"
+poetry run pytest -q tests/test_workflow.py -k "local_executor or runtime_local or docker or kubernetes_executor_requires_image or unknown_executor"
 ```
 
 ## Možná rozšíření
 
-- Izolovaný executor přes Docker nebo Podman se stejným protokolem.
+- Alternativní kontejnerový executor přes Podman se stejným protokolem.
 - Per-executor limity souběhu napříč workflow runy.
 - Perzistentní evidence lokálních procesů a recovery nebo úklid po restartu.

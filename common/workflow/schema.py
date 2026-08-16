@@ -360,18 +360,18 @@ class WorkflowStep(WorkflowStepTemplate):
         return self
 
 
-#: Podporované executory workflow kroků: Kubernetes Joby vs. lokální bash procesy.
-WORKFLOW_EXECUTORS = ("kubernetes", "local")
+#: Podporované executory workflow kroků: Kubernetes Joby, Docker kontejnery a lokální bash procesy.
+WORKFLOW_EXECUTORS = ("kubernetes", "docker", "local")
 
 
 class WorkflowSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     #: Kde kroky poběží; bez hodnoty platí default adapteru (`WORKFLOW_EXECUTOR`).
-    executor: Literal["kubernetes", "local"] | None = None
+    executor: Literal["kubernetes", "docker", "local"] | None = None
     #: Kubectl context pro Kubernetes executor; bez hodnoty se použije current context.
     context: str | None = Field(default=None, min_length=1)
-    #: Container image; povinný jen pro executor `kubernetes` (validuje WorkflowManager).
+    #: Container image; povinný pro executory `kubernetes` a `docker` (validuje WorkflowManager).
     image: str | None = None
     #: Po úspěšném doběhnutí workflow smaže celý namespace; platí jen pro executor
     #: `kubernetes` (lokální executor žádné namespacy nevytváří a flag ignoruje).

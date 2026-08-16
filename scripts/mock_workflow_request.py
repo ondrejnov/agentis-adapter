@@ -33,9 +33,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--scope", choices=("project", "task", "worktree"), default="project", help="Adapter scope.")
     parser.add_argument(
         "--runtime",
-        choices=("local", "workflow"),
+        choices=("docker", "local", "workflow"),
         default="local",
-        help="Adapter runtime. 'local' forces the local workflow executor.",
+        help="Adapter runtime. 'docker' or 'local' forces the corresponding workflow executor.",
     )
     parser.add_argument("--working-dir", default=str(Path.cwd()), help="Project directory used as context.working_dir.")
     parser.add_argument("--project-slug", default=None, help="Project slug. Defaults to working directory name.")

@@ -4,7 +4,7 @@
 
 Workflow režim přesouvá projektově proměnlivou logiku běhu agenta (příprava prostředí, spuštění agenta, commit, pull request, úklid) z Python adapteru do deklarativního YAML souboru ve worktree projektu. Adapter pak jen orchestruje: načte YAML, naplánuje kroky podle závislostí, spouští je přes zvolený executor a po doběhnutí aplikuje výstupy úspěšných kroků (komentář, přílohy, artefakty) do Agentisu.
 
-Workflow je jediný běhový model adapteru pro spuštění agenta. Hodnota `context.adapter.runtime = "local"` už nevolí samostatný CLI runtime; pouze vynutí lokální executor workflow, takže jeho kroky běží jako procesy na hostu. Samotný agent je jedním z kroků workflow (typicky `agentiscode` v kroku „Run agent“), nikoli proces spouštěný natvrdo přímo adapterem.
+Workflow je jediný běhový model adapteru pro spuštění agenta. Hodnota `context.adapter.runtime = "docker"` nebo `"local"` už nevolí samostatný CLI runtime; pouze vynutí odpovídající executor workflow. Samotný agent je jedním z kroků workflow (typicky `agentiscode` v kroku „Run agent“), nikoli proces spouštěný natvrdo přímo adapterem.
 
 Klíčové zdrojáky:
 
@@ -13,12 +13,13 @@ Klíčové zdrojáky:
 | `common/workflow/schema.py` | Pydantic schema YAML, interpolace tokenů, `if` podmínky |
 | `common/workflow/manager.py` | `WorkflowManager` — orchestrace runů, outputs, eventy do Agentisu |
 | `common/workflow/runtime.py` | Protokol `WorkflowStepRunner` + Kubernetes executor (`KubectlJobRunner`) |
+| `common/workflow/docker_runtime.py` | Nativní Docker executor (`DockerContainerRunner`) |
 | `common/workflow/local_runtime.py` | Lokální executor (`LocalProcessRunner`) |
 | `.agentis/workflows/*.yaml` | Konfigurace workflow v repozitáři projektu |
 
 ## Kdy se workflow spustí
 
-JSON-RPC metody `start` a `add_message` vždy používají workflow runtime. `context.adapter.runtime` už nerozhoduje o routingu; hodnota `local` pouze vynutí lokální executor. Pojmenované workflow vybírá `context.adapter.workflow = "<name>"` (typicky followup akce jako merge/close), jinak se podle scope použije `default.yaml` nebo `project.yaml`.
+JSON-RPC metody `start` a `add_message` vždy používají workflow runtime. `context.adapter.runtime` už nerozhoduje o routingu; hodnota `docker` nebo `local` pouze vynutí odpovídající executor. Pojmenované workflow vybírá `context.adapter.workflow = "<name>"` (typicky followup akce jako merge/close), jinak se podle scope použije `default.yaml` nebo `project.yaml`.
 
 `start` / `add_message` vrací rychle — workflow běží na pozadí v daemon threadu, průběh se hlásí do Agentisu přes `run.adapter_event` (`workflow`, `workflow_step`, na konci `idle`). Produkční dispatch vystavuje jen `start`, `add_message`, `abort` a `undo`; `question` / `approve` vrátí JSON-RPC `Method not found`. `abort` nastaví run jako abortovaný a smaže nebo zastaví aktivní kroky podle labels; funguje idempotentně i bez aktivního runu známého procesu.
 
@@ -48,7 +49,7 @@ Adapter pro každý pokus (attempt) zapíše `prompt.md` a `context.json` a krok
 
 ## Executory
 
-Kde kroky fyzicky poběží, určuje v první řadě `context.adapter.runtime = "local"`, které vždy vynutí lokální executor. Jinak rozhoduje `workflow.executor` v YAML; bez něj platí env `WORKFLOW_EXECUTOR` adapteru, default `kubernetes`. Hodnota `workflow` v `context.adapter.runtime` samostatný executor nevybírá.
+Kde kroky fyzicky poběží, určuje v první řadě `context.adapter.runtime = "docker"` nebo `"local"`, které vždy vynutí odpovídající executor. Jinak rozhoduje `workflow.executor` v YAML; bez něj platí env `WORKFLOW_EXECUTOR` adapteru, default `kubernetes`. Hodnota `workflow` v `context.adapter.runtime` samostatný executor nevybírá.
 
 ### `kubernetes`
 
@@ -58,7 +59,13 @@ Každý krok je `batch/v1 Job` obsluhovaný přes `kubectl` (apply / wait / logs
 
 Kroky běží jako lokální bash subprocessy na hostu nad worktree, pod uživatelem adapter procesu, bez izolace. Pole `context`, `image`, `steps[].image`, `mounts`, `imagePullSecrets` a `steps[].resources` se ignorují s varováním. `ttlSecondsAfterFinished` a `deleteNamespace` se ignorují bez varování. Logy kroků jdou do `<run_dir>/logs/<job>.log`. Z hostitelského prostředí se nepropíší `AGENTIS_TOKEN`, `AGENTIS_API_TOKEN` ani `AGENTIS_SERVICE_TOKEN`; runtime env nebo `envFiles` ale mohou potřebné proměnné explicitně dodat.
 
-Oba executory spouští `run` skript kroku přes stejný bash wrapper: `set -euo pipefail`, sourcing `envFiles`, `cd` do `workingDir` kroku (jinak workflow `workingDir`, jinak `$WORKDIR`).
+### `docker`
+
+Každý krok běží jako kontejner spuštěný přes `docker run --rm`; příkaz lze změnit přes `DOCKER_COMMAND`. Executor vyžaduje výslednou `image` stejně jako Kubernetes, ale nepoužívá kube context ani namespace. Kontejnery dostávají stejné labels jako Kubernetes Joby, takže busy-check a `abort` používají `docker ps` a `docker rm --force`. Timeout kontejner rovněž odstraní. Díky lokální image cache odpadá vytváření Kubernetes Jobu a Podu.
+
+Existující absolutní cesty `WORKDIR`, `AGENTIS_RUN_DIR` a `MAIN_DIR` se automaticky bind-mountují na stejnou cestu v kontejneru. `workflow.mounts` se navíc převede na bind mounty, pokud položka používá `hostPath`; `readOnly`, relativní `subPath` a typy `DirectoryOrCreate`/`FileOrCreate` jsou podporované. Jiné Kubernetes volume sources, `subPathExpr` a `mountPropagation` skončí čitelnou chybou. `imagePullSecrets`, `context` a `steps[].resources` se ignorují s varováním; přihlášení k registry musí být připravené v Docker credential store uživatele adapteru. `ttlSecondsAfterFinished` a `deleteNamespace` se ignorují.
+
+Všechny executory spouští `run` skript kroku přes stejný bash wrapper: `set -euo pipefail`, sourcing `envFiles`, `cd` do `workingDir` kroku (jinak workflow `workingDir`, jinak `$WORKDIR`).
 
 ## Struktura YAML
 
@@ -66,7 +73,7 @@ Oba executory spouští `run` skript kroku přes stejný bash wrapper: `set -euo
 version: 1                      # povinné, vždy 1
 extends: _base                  # volitelné: dědičnost z jiného souboru (viz níže)
 workflow:
-  executor: local               # volitelné: kubernetes | local; default dle adapteru
+  executor: docker              # volitelné: kubernetes | docker | local; default dle adapteru
   context: my-kube-context      # volitelné: kubectl context; local jej ignoruje
   image: registry/image:tag     # default image; v K8s musí mít výslednou image každý krok
   imagePullSecrets:
@@ -320,7 +327,7 @@ Projektová workflow dědí přes `.agentis/workflows/_base.yaml` sdílenou infr
 
 ## Časté chyby
 
-- **`Workflow executor 'kubernetes' vyžaduje 'image'`** — krok nemá `image` ani workflow default; doplnit, nebo přepnout `executor: local`.
+- **Workflow executor `kubernetes` nebo `docker` vyžaduje `image`** — krok nemá `image` ani workflow default; doplnit, nebo přepnout `executor: local`.
 - **`Workflow file not found`** — vybraný soubor (u project scope `project.yaml`, u followup akce pojmenované workflow) chybí v projektovém `.agentis/workflows/` i v bundled adresáři adapteru.
 - **`Workflow extends target not found`** — `extends` ukazuje na neexistující soubor v `.agentis/workflows/`.
 - **`chained 'extends' is not supported`** — rodičovský soubor má vlastní `extends`; dědičnost má jen jednu úroveň.

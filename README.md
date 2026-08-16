@@ -19,6 +19,7 @@ flowchart TD
     workflow["WorkflowManager<br/>YAML DAG, run soubory, outputs"]
     executor{"Executor"}
     kubernetes["Kubernetes Jobs<br/>kubectl"]
+    docker["Nativní Docker<br/>krátkodobé kontejnery"]
     local["Lokální bash<br/>subprocesy"]
     agent["agentiscode step<br/>OpenCode / Claude Code"]
     outputs["Workflow outputs<br/>komentář, artefakty, session_id, followups"]
@@ -28,8 +29,10 @@ flowchart TD
     adapter -->|"příprava worktree, prompt.md, context.json"| workflow
     workflow -->|"plánování kroků"| executor
     executor -->|"workflow.executor = kubernetes"| kubernetes
+    executor -->|"workflow.executor = docker"| docker
     executor -->|"workflow.executor = local"| local
     kubernetes --> agent
+    docker --> agent
     local --> agent
     agent --> outputs
     outputs -->|"HTTP JSON-RPC reporting<br/>run.adapter_event, session.store_activity_log, task.add_agent_comment"| agentis
@@ -41,7 +44,7 @@ flowchart TD
     classDef output fill:#fff7ed,stroke:#ea580c,color:#111827
     class agentis external
     class adapter,status adapterNode
-    class workflow,executor,kubernetes,local,agent runtime
+    class workflow,executor,kubernetes,docker,local,agent runtime
     class outputs output
 ```
 
@@ -103,8 +106,9 @@ poetry run agentis-adapter --id my-adapter
 | `ADAPTER_BUNDLED_WORKFLOW_DIR` | `<repo>/workflows` | Fallback workflow šablony zabalené v adapteru. |
 | `ADAPTER_NAMESPACE_PREFIX` | `Task` | Prefix namespace pro workflow běhy. |
 | `ADAPTER_SHUTDOWN_GRACE_PERIOD` | `0` | Čekání na doběhnutí běžících agentů/workflow při shutdownu. `0` znamená bez limitu. |
-| `WORKFLOW_EXECUTOR` | `kubernetes` | Default executor workflow kroků: `kubernetes` nebo `local`. |
+| `WORKFLOW_EXECUTOR` | `kubernetes` | Default executor workflow kroků: `kubernetes`, `docker` nebo `local`. |
 | `KUBECTL_COMMAND` | `kubectl` | Příkaz použitý Kubernetes executorem. |
+| `DOCKER_COMMAND` | `docker` | Příkaz použitý nativním Docker executorem. |
 | `AGENTISCODE_COMMAND` | `agentiscode` | Načítaná setting hodnota pro wrapper; bundled workflow dnes volá přímo `agentiscode`. |
 | `AGENTISCODE_ADAPTER` | `opencode` | Načítaná setting hodnota; `agentiscode` CLI aktuálně vyžaduje `--adapter` a bundled `run-agent` vybírá adaptér podle modelu. |
 | `AGENTIS_WS_HEARTBEAT_INTERVAL` | `30` | Heartbeat WebSocket spojení v sekundách. |
@@ -140,7 +144,7 @@ Nevalidní parametry vrací standardní `Invalid params`. Busy workflow nad stej
 | `attachments` | Přílohy tasku nebo follow-up zprávy; adapter je materializuje do worktree a přidá do promptu blok `<attachments>`. |
 | `adapter.scope` | `task`/`worktree` vytvoří nebo znovu použije task worktree; `project` běží přímo v `working_dir` a použije `project.yaml`. |
 | `adapter.branch` | Přepíše název task větve; default je `task-<task_id>`. |
-| `adapter.runtime` | `local` vynutí lokální workflow executor. Prázdná hodnota nebo `workflow` používá executor z YAML/env. |
+| `adapter.runtime` | `docker` nebo `local` vynutí odpovídající workflow executor. Prázdná hodnota nebo `workflow` používá executor z YAML/env. |
 | `adapter.workflow` | Spustí pojmenované workflow `.agentis/workflows/<name>.yaml`, typicky followup akci. |
 | `adapter.agent`, `adapter.model`, `adapter.effort` | Předává se workflow krokům jako `AGENTIS_AGENT`, `AGENTIS_MODEL`, `AGENTIS_EFFORT`. |
 | `adapter.task_status` | Volitelný vstupní status; workflow komentáře typicky nastavují stav přes output `agent_comment.status`. |
@@ -159,7 +163,7 @@ Výběr workflow souboru:
 `start` a `add_message` se vrací rychle. Samotné workflow běží na pozadí a průběh se hlásí přes adapter eventy.
 
 > [!WARNING]
-> `kubernetes` není adapter runtime. Kubernetes se vybírá jako workflow executor přes YAML nebo `WORKFLOW_EXECUTOR`; `context.adapter.runtime = "local"` pouze vynutí lokální executor.
+> `kubernetes` není adapter runtime. Kubernetes se vybírá jako workflow executor přes YAML nebo `WORKFLOW_EXECUTOR`; `context.adapter.runtime = "docker"` nebo `"local"` vynutí odpovídající executor.
 
 ## Workflow Soubory
 
@@ -183,9 +187,10 @@ Executor určuje, kde fyzicky běží jednotlivé kroky. Lze ho nastavit v YAML 
 | Executor | Popis |
 | --- | --- |
 | `kubernetes` | Každý krok běží jako `batch/v1 Job` přes `kubectl`. Vyžaduje image a platný kube context. |
+| `docker` | Každý krok běží v krátkodobém kontejneru přes nativní Docker CLI. Vyžaduje image a lokální Docker daemon. |
 | `local` | Každý krok běží jako lokální bash subprocess na hostu adapteru. Je jednodušší na vývoj, ale bez izolace. |
 
-Oba executory spouští krok přes bash wrapper se striktním režimem `set -euo pipefail`, aplikují `envFiles`, nastaví pracovní adresář a sbírají logy.
+Všechny executory spouští krok přes bash wrapper se striktním režimem `set -euo pipefail`, aplikují `envFiles`, nastaví pracovní adresář a sbírají logy. Docker executor automaticky bind-mountuje existující `WORKDIR`, `AGENTIS_RUN_DIR` a `MAIN_DIR` na stejné absolutní cesty. Položky `workflow.mounts` podporuje, pokud používají `hostPath`; registry autentizaci čte Docker ze svého credential store na hostiteli.
 
 > [!CAUTION]
 > Lokální executor běží pod uživatelem adapter procesu a nemá sandbox. Nepoužívejte ho pro nedůvěryhodný kód bez další izolace.
@@ -211,8 +216,8 @@ Důležité části workflow:
 | --- | --- |
 | `version` | Povinně `1`. |
 | `extends` | Volitelná jedna úroveň dědičnosti z jiného workflow souboru. |
-| `workflow.executor` | `kubernetes` nebo `local`. |
-| `workflow.image` | Default image pro Kubernetes executor. |
+| `workflow.executor` | `kubernetes`, `docker` nebo `local`. |
+| `workflow.image` | Default image pro Kubernetes a Docker executor. |
 | `workflow.imagePullSecrets` | Kubernetes `imagePullSecrets` pro Job pod. |
 | `workflow.deleteNamespace` | Po úspěšném Kubernetes workflow smaže namespace runu. |
 | `workflow.workingDir` | Pracovní adresář kroků. |
@@ -221,7 +226,7 @@ Důležité části workflow:
 | `workflow.maxParallel` | Maximální počet současně běžících kroků. |
 | `workflow.envFiles` | Soubory sourcované před během kroku. |
 | `workflow.env` | Společné environment proměnné. |
-| `workflow.mounts` | Kubernetes volume konfigurace. |
+| `workflow.mounts` | Kubernetes volume konfigurace; Docker podporuje její `hostPath` variantu jako bind mount. |
 | `workflow.stepTemplates` | Sdílené šablony kroků používané přes `uses`. |
 | `workflow.followups` | Akce nabídnuté po úspěšném completion komentáři. |
 | `workflow.steps` | Seznam kroků workflow. |
@@ -254,7 +259,7 @@ Krok obsahuje bash skript (`run`) nebo odkaz na šablonu (`uses`). Volitelně m�
 | `continueOnError` | Selhání kroku nezastaví celé workflow. |
 | `retries` | Počet opakování selhaného kroku. |
 | `always` | Krok běží i po fatálním selhání dřívějšího kroku. |
-| `image` | Image jen pro tento krok u Kubernetes executoru. |
+| `image` | Image jen pro tento krok u Kubernetes nebo Docker executoru. |
 | `workingDir` | Pracovní adresář jen pro tento krok. |
 | `timeoutSeconds` | Timeout jen pro tento krok. |
 | `ttlSecondsAfterFinished` | TTL Kubernetes Jobu jen pro tento krok. |
@@ -527,7 +532,7 @@ poetry run ruff check .
 | --- | --- |
 | `AGENTIS_ADAPTER_ID is required` | Nastavit `AGENTIS_ADAPTER_ID` nebo spustit `agentis-adapter --id ...`. |
 | WebSocket odmítá `ws://` | Pro ne-localhost endpoint použít `wss://`. |
-| Workflow executor `kubernetes` vyžaduje image | Doplnit `workflow.image` nebo přepnout na `executor: local`. |
+| Workflow executor `kubernetes` nebo `docker` vyžaduje image | Doplnit `workflow.image`, nebo přepnout na `executor: local`. |
 | `Workflow file not found` | Doplnit `.agentis/workflows/<soubor>.yaml` nebo použít bundled fallback. |
 | `uses unknown step template` | Zkontrolovat `extends` a existenci šablony v `workflow.stepTemplates`. |
 | `unknown or future needs` | `needs` smí odkazovat jen na dříve definované kroky. |

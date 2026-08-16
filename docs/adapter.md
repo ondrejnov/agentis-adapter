@@ -99,7 +99,7 @@ Konkrétní CLI agent (`opencode` / `claude` / `claude-p`) se nevybírá na serv
 
 Chyby vrací `AgentJsonRpcException` s kódem, který dispatcher mapuje na HTTP-like status (`404` → not found, `>=500`/`-32603` → internal, jinak 400). Nevalidní parametry = standardní `-32602 Invalid params`.
 
-Centrální vstup do metod je `AgentJsonRpcService` (`common/rpc/jsonrpc.py`). Produkční `_DISPATCH` vystavuje pouze čtyři metody v tabulce; jiné názvy včetně `question` a `approve` vrátí `-32601 Method not found`. `start` i `add_message` připraví workspace a vždy předají řízení `WorkflowManager`u. `context.adapter.runtime` nerozhoduje o routingu: pouze přesná hodnota `local` vynutí lokální workflow executor. Jakákoli jiná hodnota ponechá výběr na `workflow.executor` a `WORKFLOW_EXECUTOR`; model runtime zatím neomezuje na pevný výčet.
+Centrální vstup do metod je `AgentJsonRpcService` (`common/rpc/jsonrpc.py`). Produkční `_DISPATCH` vystavuje pouze čtyři metody v tabulce; jiné názvy včetně `question` a `approve` vrátí `-32601 Method not found`. `start` i `add_message` připraví workspace a vždy předají řízení `WorkflowManager`u. `context.adapter.runtime` nerozhoduje o routingu: hodnoty `docker` a `local` vynutí odpovídající workflow executor. Jakákoli jiná hodnota ponechá výběr na `workflow.executor` a `WORKFLOW_EXECUTOR`; model runtime zatím neomezuje na pevný výčet.
 
 ## Workflow runtime
 
@@ -147,8 +147,9 @@ Selhání průběžné telemetrie je best-effort a loguje se na stderr; selhán�
 | `ADAPTER_BUNDLED_WORKFLOW_DIR` | `<repo>/workflows` | Fallback workflow, pokud projekt nemá vlastní soubor |
 | `ADAPTER_NAMESPACE_PREFIX` | `Task` | Prefix Kubernetes namespace pro číslované tasky |
 | `ADAPTER_SHUTDOWN_GRACE_PERIOD` | `0` | Sekundy čekání na doběhnutí práce při shutdownu (0 = bez limitu) |
-| `WORKFLOW_EXECUTOR` | `kubernetes` | Executor workflow kroků (`kubernetes` / `local`), pokud ho neurčí YAML |
+| `WORKFLOW_EXECUTOR` | `kubernetes` | Executor workflow kroků (`kubernetes` / `docker` / `local`), pokud ho neurčí YAML |
 | `KUBECTL_COMMAND` | `kubectl` | Příkaz pro Kubernetes executor |
+| `DOCKER_COMMAND` | `docker` | Příkaz pro nativní Docker executor |
 | `AGENTIS_WS_HEARTBEAT_INTERVAL`, `AGENTIS_WS_MAX_MESSAGE_SIZE`, `AGENTIS_WS_RECONNECT_*` | viz `common/config.py` | Ladění WebSocket transportu |
 
 `Settings` stále načítá `AGENTISCODE_COMMAND` a `AGENTISCODE_ADAPTER`, ale současný workflow ani CLI tyto hodnoty nekonzumují; dodávaný `_base.yaml` volá `agentiscode` přímo a předává mu explicitní `--adapter`.
