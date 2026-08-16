@@ -9,9 +9,9 @@ __pycache__/
 .agentis/runs
 .code-review-graph
 dist
-opencode-container/registry-secret.yaml
-opencode-container/agdoc/
-opencode-container/clarp/
-opencode-container/agentis-adapter/
+agent-container/registry-secret.yaml
+agent-container/agdoc/
+agent-container/clarp/
+agent-container/agentis-adapter/
 
 .vscode/last-open-files.json

@@ -4,7 +4,7 @@
 
 Workflow režim přesouvá projektově proměnlivou logiku běhu agenta (příprava prostředí, spuštění agenta, commit, pull request, úklid) z Python adapteru do deklarativního YAML souboru ve worktree projektu. Adapter pak jen orchestruje: načte YAML, naplánuje kroky podle závislostí, spouští je přes zvolený executor a po doběhnutí aplikuje výstupy úspěšných kroků (komentář, přílohy, artefakty) do Agentisu.
 
-Je to protějšek lokálního CLI runtime (`local`), kde agent běží jako proces přímo na hostu řízený adapterem. Ve workflow režimu adapter sám žádného agenta nespouští — agent je jen jedním z kroků workflow (typicky `agentiscode` v kroku „Run agent“).
+Workflow je jediný běhový model adapteru pro spuštění agenta. Hodnota `context.adapter.runtime = "local"` už nevolí samostatný CLI runtime; pouze vynutí lokální executor workflow, takže jeho kroky běží jako procesy na hostu. Samotný agent je jedním z kroků workflow (typicky `agentiscode` v kroku „Run agent“), nikoli proces spouštěný natvrdo přímo adapterem.
 
 Klíčové zdrojáky:
 
@@ -18,10 +18,7 @@ Klíčové zdrojáky:
 
 ## Kdy se workflow spustí
 
-Workflow runtime se aktivuje v JSON-RPC metodách `start` / `add_message`, když:
-
-- `context.adapter.runtime == "workflow"`, nebo
-- kontext obsahuje pojmenované workflow `context.adapter.workflow = "<name>"` (followup akce jako merge/close) — to běží přes workflow runtime vždy, bez ohledu na `runtime`.
+JSON-RPC metody `start` a `add_message` vždy používají workflow runtime. `context.adapter.runtime` už nerozhoduje o routingu; hodnota `local` pouze vynutí lokální executor. Pojmenované workflow vybírá `context.adapter.workflow = "<name>"` (typicky followup akce jako merge/close), jinak se podle scope použije `default.yaml` nebo `project.yaml`.
 
 `start` / `add_message` vrací rychle — workflow běží na pozadí v daemon threadu, průběh se hlásí do Agentisu přes `run.adapter_event` (`workflow`, `workflow_step`, na konci `idle`). Metody `question` / `approve` workflow runtime nepodporuje (není IPC do Jobu). `abort` zruší běžící workflow a smaže/zastaví všechny aktivní kroky podle labels.
 
@@ -31,7 +28,7 @@ Per task běží maximálně jedno workflow — pokus o start nad běžícím ta
 
 ## Výběr workflow souboru
 
-Workflow YAML leží ve worktree v `.agentis/workflows/`:
+Projektové workflow YAML leží ve worktree v `.agentis/workflows/`. Pokud vybraný soubor v projektu chybí, adapter hledá soubor stejného názvu v bundled adresáři (`ADAPTER_BUNDLED_WORKFLOW_DIR`, default `workflows/` v instalaci adapteru):
 
 | Soubor | Kdy se použije |
 | --- | --- |
@@ -40,7 +37,7 @@ Workflow YAML leží ve worktree v `.agentis/workflows/`:
 | `<name>.yaml` (`merge.yaml`, `close.yaml`, …) | Pojmenované workflow z `context.adapter.workflow`; typicky followup akce |
 | `_base.yaml` | Sdílený základ pro `extends` (viz Dědičnost níže); nemá `steps`, samostatně se spustit nedá |
 
-Soubor se načte, vyřeší se `extends`, interpoluje a **zmrazí jednou na začátku runu** — pozdější změny ve worktree běžící workflow neovlivní. Chybějící soubor pro pojmenované workflow nebo project scope je chyba startu.
+Soubor se načte, vyřeší se `extends`, interpoluje a **zmrazí jednou na začátku runu** — pozdější změny ve worktree běžící workflow neovlivní. Start skončí chybou až tehdy, když vybraný soubor neexistuje ani v projektu, ani v bundled adresáři.
 
 ### Run soubory
 
@@ -51,7 +48,7 @@ Adapter pro každý pokus (attempt) zapíše `prompt.md` a `context.json` a krok
 
 ## Executory
 
-Kde kroky fyzicky poběží, určuje `workflow.executor` v YAML; bez něj platí env `WORKFLOW_EXECUTOR` adapteru, default `kubernetes`.
+Kde kroky fyzicky poběží, určuje v první řadě `context.adapter.runtime = "local"`, které vždy vynutí lokální executor. Jinak rozhoduje `workflow.executor` v YAML; bez něj platí env `WORKFLOW_EXECUTOR` adapteru, default `kubernetes`. Hodnota `workflow` v `context.adapter.runtime` samostatný executor nevybírá.
 
 ### `kubernetes`
 
@@ -293,7 +290,7 @@ followups:
 
 Volitelné `if` podmíní nabídku akce výsledkem konkrétního runu: vyhodnocuje se stejnou gramatikou jako `if` kroků (viz výše) nad `workflow.env`, runtime env, built-in hodnotami a `var` outputs úspěšně doběhlých kroků. Followup bez podmínky se nabízí vždy. Syntaxe se validuje při načtení workflow souboru. V `default.yaml` tak „Git merge" závisí na `PR_CREATED` a `!AGENTIS_AUTO_MERGE` — run bez commitů/PR nebo run s auto-merge akci nenabídne, „Zavřít prostředí" se nabízí vždy.
 
-Workflow bez sekce (`project.yaml`, `merge.yaml`, `close.yaml`) žádné akce nenabízí. Lokální CLI sessions čtou sekci best-effort přes `load_workflow_followups()` — nevalidní soubor znamená jen žádné akce, dokončení runu na něm nespadne. Lokální sessions navíc nemají runtime env ani `var` outputs runu, takže podmíněné followups (`if`) se v nich konzervativně přeskakují — akce s nevyhodnotitelnou podmínkou se nenabízí.
+Workflow bez sekce (`project.yaml`, `merge.yaml`, `close.yaml`) žádné akce nenabízí.
 
 ## Dodávaná workflow
 
@@ -311,7 +308,7 @@ Workflow `default.yaml`, `project.yaml`, `slack.yaml`, `merge.yaml` a `close.yam
 ## Časté chyby
 
 - **`Workflow executor 'kubernetes' vyžaduje 'image'`** — krok nemá `image` ani workflow default; doplnit, nebo přepnout `executor: local`.
-- **`Workflow file not found`** — ve worktree chybí `.agentis/workflows/<soubor>.yaml` (u project scope `project.yaml`, u followup akce soubor pojmenovaného workflow).
+- **`Workflow file not found`** — vybraný soubor (u project scope `project.yaml`, u followup akce pojmenované workflow) chybí v projektovém `.agentis/workflows/` i v bundled adresáři adapteru.
 - **`Workflow extends target not found`** — `extends` ukazuje na neexistující soubor v `.agentis/workflows/`.
 - **`chained 'extends' is not supported`** — rodičovský soubor má vlastní `extends`; dědičnost má jen jednu úroveň.
 - **`uses unknown step template`** — krok odkazuje šablonu, která po `extends` merge není ve `workflow.stepTemplates`.

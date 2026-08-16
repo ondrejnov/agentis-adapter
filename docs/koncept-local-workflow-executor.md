@@ -6,12 +6,12 @@
 
 ## Motivace
 
-Workflow režim (`context.adapter.runtime = "workflow"`) dnes spouští kroky z
+Před zavedením lokálního executoru workflow spouštělo kroky z
 `.agentis/workflows/default.yaml` výhradně jako Kubernetes Joby přes `kubectl`.
 Deklarativní část (sekvenční kroky, `if` podmínky, `var`/`agent_comment`/`artifact`
 outputs, interpolace `[%TOKEN%]`, prompt/context soubory) ale na Kubernetes nijak
-nezávisí — dává smysl umět tytéž kroky spustit jako lokální bash procesy přímo
-nad worktree/projektovým adresářem, stejně jako běží `local` runtime.
+nezávisí, proto dává smysl umět tytéž kroky spustit jako lokální bash procesy
+přímo nad worktree nebo projektovým adresářem.
 
 Cíl: jedna konfigurační volba rozhodne, jestli workflow poběží v Kubernetes,
 nebo lokálně v bashi. Workflow YAML i chování outputs zůstávají stejné.
@@ -116,13 +116,14 @@ workflow:
 
 → `WorkflowSpec.executor: Literal["kubernetes", "local"] | None = None`.
 
-`WorkflowManager.start_workflow()` po načtení YAML vybere runner:
+`WorkflowManager.start_workflow()` po načtení YAML vybere runner. Hodnota
+`context.adapter.runtime == "local"` vynutí lokální executor; jinak platí
 `workflow.workflow.executor or settings.workflow_executor`. Runner se volí per
 run (cache obou instancí v manageru), takže jeden adapter může souběžně
 obsluhovat K8s i lokální workflow.
 
-Aktivace workflow režimu jako takového zůstává beze změny přes
-`context.adapter.runtime == "workflow"` — executor jen říká *kde* kroky poběží.
+Workflow runtime se používá pro všechny runy. Executor určuje jen *kde* jeho
+kroky poběží; nejde o samostatný běhový režim adapteru.
 
 ### 4. Mapování polí default.yaml na lokální běh
 

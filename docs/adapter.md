@@ -2,22 +2,20 @@
 
 ## K čemu adapter slouží
 
-Adapter je most mezi ticket systémem **Agentis** a CLI coding agenty (Claude Code, OpenCode, sjednocený wrapper `agentiscode`). Přijímá od Agentisu JSON-RPC příkazy (`start`, `add_message`, `abort`, `undo`), pro task připraví git worktree, spustí v něm agenta a průběžně streamuje jeho aktivitu zpět do Agentisu. Po doběhnutí agenta zapíše do tasku completion komentář s přílohami a nabídkou followup akcí. Commit změn a založení GitHub PR dělá jen workflow runtime (kroky ve workflow YAML), lokální sessions ne.
+Adapter je most mezi ticket systémem **Agentis** a CLI coding agenty (Claude Code, OpenCode, sjednocený wrapper `agentiscode`). Přijímá od Agentisu JSON-RPC příkazy (`start`, `add_message`, `abort`, `undo`), pro task připraví git worktree a spustí deklarativní workflow. Agent, příprava prostředí, testy, commit, pull request i úklid jsou kroky workflow; jejich průběh a výstupy adapter posílá zpět do Agentisu.
 
 Klíčové zdrojáky:
 
 | Soubor | Role |
 | --- | --- |
-| `app/cli.py` | Entrypoint `agentis-adapter` — výběr adapteru, spuštění transportů |
+| `app/cli.py` | Entrypoint `agentis-adapter` — spuštění transportů |
 | `common/rpc/passive_websocket.py` | WebSocket transport k Agentisu pro příjem JSON-RPC |
 | `common/rpc/dispatcher.py` | JSON-RPC dispatch — validace, mapování metod, chybové kódy |
 | `common/rpc/jsonrpc.py` | `AgentJsonRpcService` — logika metod `start`/`add_message`/`abort`/`undo` |
-| `common/adapter_base.py` | `BaseAdapterService` — lifecycle agenta + reporting do Agentisu |
+| `common/adapter_base.py` | `BaseAdapterService` — společné workspace a reporting operace |
 | `common/git_adapter.py` | `GitAdapterService` — worktree a branch per task |
-| `common/cli_adapter.py` | `CliAdapterService` — sdílený lifecycle lokálních CLI adaptérů |
-| `common/session_manager.py` | `BaseSessionManager` — background běh CLI agenta a streaming aktivity |
 | `common/agentis.py` | `AgentisJsonRpcClient` — HTTP JSON-RPC klient na Agentis backend |
-| `common/workflow/` | Workflow režim (viz [docs/workflow.md](workflow.md)) |
+| `common/workflow/` | Workflow runtime a executory (viz [docs/workflow.md](workflow.md)) |
 
 ## Architektura v kostce
 
@@ -28,8 +26,6 @@ flowchart LR
     dispatcher["JSON-RPC dispatcher<br/>common/rpc/dispatcher.py"]
     service["AgentJsonRpcService<br/>start / add_message / abort / undo"]
     git["GitAdapterService<br/>worktree, branch, snapshots"]
-    mode{"Běhový režim"}
-    local["Local CLI runtime<br/>session manager + CLI proces"]
     workflow["Workflow runtime<br/>WorkflowManager + YAML kroky"]
     executor{"Executor kroků"}
     k8s["Kubernetes Job<br/>kubectl"]
@@ -38,13 +34,10 @@ flowchart LR
     status["FastAPI observabilita<br/>/health, /status, /log"]
 
     agentis -->|"JSON-RPC příkazy<br/>wss, spojení iniciuje adapter"| websocket
-    websocket --> dispatcher --> service --> git --> mode
-    mode -->|"local"| local
-    mode -->|"workflow nebo pojmenovaný followup"| workflow
+    websocket --> dispatcher --> service --> git --> workflow
     workflow --> executor
-    executor -->|"workflow.executor = kubernetes"| k8s
-    executor -->|"workflow.executor = local"| bash
-    local --> reporting
+    executor -->|"kubernetes"| k8s
+    executor -->|"local"| bash
     k8s --> reporting
     bash --> reporting
     reporting -->|"HTTP JSON-RPC"| agentis
@@ -58,7 +51,7 @@ flowchart LR
     class agentis external
     class websocket,dispatcher transport
     class service,git,status adapter
-    class mode,local,workflow,executor,k8s,bash runtime
+    class workflow,executor,k8s,bash runtime
     class reporting report
 ```
 
@@ -66,7 +59,7 @@ Důležité vlastnosti:
 
 - **Spojení iniciuje adapter** — drží outbound WebSocket na Agentis (`AGENTIS_WS_ENDPOINT`), Agentis do adapteru nevolá žádné HTTP. Adapter tak může běžet za NATem.
 - **HTTP server adapteru je jen observabilita** — `/health`, `/status`, `/log`, `/runs/{run_id}/log`. Žádné JSON-RPC přes HTTP.
-- **Stav je in-memory** — registry sessions a runů nepřežijí restart procesu, záměrně bez perzistence.
+- **Stav je in-memory** — registry workflow runů nepřežije restart procesu, záměrně bez perzistence.
 
 ## Vstupní body
 
@@ -98,52 +91,30 @@ Konkrétní CLI agent (`opencode` / `claude` / `claude-p`) se nevybírá na serv
 
 | Metoda | Parametry | Co dělá |
 | --- | --- | --- |
-| `start` | `context` (+ `fork_from_session_id`) | Připraví worktree a spustí agenta / workflow; vrací `run` + provedené adapter kroky |
-| `add_message` | `run_id`, `context`, `message`, `attachments` | Pošle follow-up prompt do existující session (`--resume`), resp. spustí workflow run nad zprávou |
-| `abort` | `context` | Zabije běžící CLI session (celou process group), resp. zruší běžící workflow |
+| `start` | `context` (+ `fork_from_session_id`) | Připraví worktree a spustí workflow; vrací `run` + provedené adapter kroky |
+| `add_message` | `run_id`, `context`, `message`, `attachments` | Spustí workflow run s follow-up promptem; agentí krok může navázat přes uložené session ID |
+| `abort` | `context` | Zruší běžící workflow a jeho aktivní kroky |
 | `undo` | `context` | Vrátí worktree do source snapshotu pořízeného před posledním během |
 
 Chyby vrací `AgentJsonRpcException` s kódem, který dispatcher mapuje na HTTP-like status (`404` → not found, `>=500`/`-32603` → internal, jinak 400). Nevalidní parametry = standardní `-32602 Invalid params`.
 
-Centrální vstup do metod je `AgentJsonRpcService` (`common/rpc/jsonrpc.py`). Ta na začátku každé metody rozhodne mezi dvěma běhovými režimy (viz níže) a u local runtime postupně volá lifecycle kroky adapteru přes `_run_adapter_step()` — každý krok hlásí `started`/`success`/`failed` event do Agentisu (`run.adapter_event`) a do lokálního status registru.
+Centrální vstup do metod je `AgentJsonRpcService` (`common/rpc/jsonrpc.py`). `start` i `add_message` připraví workspace a vždy předají řízení `WorkflowManager`u. `context.adapter.runtime` nerozhoduje o routingu: hodnota `local` pouze vynutí lokální workflow executor, zatímco prázdná hodnota nebo `workflow` ponechá výběr na `workflow.executor` a `WORKFLOW_EXECUTOR`.
 
-## Dva běhové režimy
+## Workflow runtime
 
-### 1. Local CLI runtime (default)
+Průběh `start` / `add_message`:
 
-Agent běží jako lokální proces na hostu, řízený session managerem. Lifecycle `start`:
+1. **Workspace** — `GitAdapterService` pro task scope založí nebo znovu použije worktree `<ADAPTER_WORKTREE_ROOT>/<task-safe-id>` na task větvi. Project scope běží přímo v `context.working_dir`.
+2. **Prompt a přílohy** — adapter složí prompt z kontextu nebo follow-up zprávy a materializuje přílohy do workspace.
+3. **Výběr workflow** — pojmenovaná akce použije `<name>.yaml`, project scope `project.yaml`, ostatní runy `default.yaml`. Projektový soubor má přednost před bundled fallbackem z `ADAPTER_BUNDLED_WORKFLOW_DIR`.
+4. **Spuštění** — `WorkflowManager` pořídí source snapshot pro `undo`, zmrazí YAML a na pozadí spustí jeho DAG přes Kubernetes Joby nebo lokální bash procesy. `start` / `add_message` proto vrací rychle a bez `session_id`.
+5. **Reporting** — workflow posílá `run.adapter_event`; agentí krok s `agentiscode` může navíc průběžně posílat session ID a aktivitu. Po doběhnutí manager aplikuje deklarované outputs, například completion komentář, přílohy, artefakty a followup akce.
 
-1. **`create_worktree`** — `GitAdapterService` založí (nebo znovu použije) git worktree `<ADAPTER_WORKTREE_ROOT>/<task-safe-id>` na větvi `task-<task_id>` (resp. `context.adapter.branch`) z `context.base_branch`. Pro `context.adapter.scope == "project"` se přeskakuje — běží se přímo v adresáři projektu.
-2. **`deploy`** + **`wait_ready`** — u lokálních CLI adaptérů no-opy (zůstávají kvůli jednotnému lifecycle), `wait_ready` vrací URL `local://<runtime_label>`.
-3. **`start_session`** — `CliAdapterService` složí initial prompt (`user_prompt` + `description` + komentáře tasku + materializované přílohy v bloku `<attachments>`) a předá ho session manageru. Vrácené `session_id` se uloží do Agentisu (`run.store_session_id`) a do lokální `SessionContextRegistry` (spolu se snapshot klíčem pro `undo`).
+Per task běží maximálně jedno workflow; souběžný start vrací chybu 409 (busy). `abort` zastaví jeho aktivní kroky a `undo` obnoví worktree ze snapshotu posledního runu. Detailně viz [docs/workflow.md](workflow.md).
 
-`add_message` dělá totéž, ale prompt posílá do existující session (`session_id` z kontextu je povinné) — nový běh CLI s `--resume <session_id>`.
+## `agentiscode`
 
-### 2. Workflow runtime
-
-Aktivuje se, když `context.adapter.runtime == "workflow"` nebo kontext nese pojmenované workflow `context.adapter.workflow` (followup akce merge/close — ty jdou přes workflow vždy). Adapter pak žádného agenta sám nespouští: založí worktree, materializuje přílohy a předá řízení `WorkflowManager`u, který na pozadí (daemon thread) vykonává kroky deklarované v `.agentis/workflows/*.yaml` přes zvolený executor (Kubernetes Joby nebo lokální bash). `start`/`add_message` vrací hned, bez `session_id`. Detailně viz [docs/workflow.md](workflow.md).
-
-Per task běží maximálně jedno workflow — souběžný start vrací chybu 409 (busy).
-
-## Session manager — běh agenta a streaming
-
-`BaseSessionManager` (`common/session_manager.py`) je agent-agnostická orchestrace: pro každou session drží jeden řídicí thread, který přes asyncio streamuje výstup CLI agenta. Konkrétní agenti (Claude Code, OpenCode) jen dědí a přepisují hooky (`_AGENT_LABEL`, `_make_mapper`, `_build_client`).
-
-Průběh jednoho běhu:
-
-1. Před spuštěním se pořídí **source snapshot** worktree (klíč se vrací nahoru a slouží metodě `undo`).
-2. CLI proces se spustí přes `bash -c 'exec …'` s `start_new_session=True` (vlastní process group — `abort` pak killuje celou skupinu).
-3. Z eventu `session_start` se převezme **skutečné agentí `session_id`** — do té doby je session registrovaná pod pending klíčem; `start` blokuje (max 300 s), dokud session_id nedorazí. Nová session se ohlásí do Agentisu (`session.session_created`).
-4. Eventy agenta (text, reasoning, tool cally) průběžně mapuje **activity mapper** na zprávy a posílá je do Agentisu přes `session.store_activity_log`.
-5. Po doběhnutí (`_finish_session_actions`, jen pro task scope s GitHub repem) se sestaví přílohy completion komentáře: odkaz na worktree pro IDE (`context.ide`) a diff proti snapshotu. Commit, pull request ani dev server lokální session nedělá — to obstarávají kroky workflow runtime.
-6. Finální text agenta se zapíše jako **completion komentář** (`task.add_agent_comment`) se status změnou tasku (`IN_REVIEW`, u project scope `DONE`, lze přepsat `adapter.task_status`), screenshoty, očekávanými artefakty a followup akcemi načtenými z `workflow.followups` sekce workflow YAML.
-7. Nakonec odejde adapter event `<label>_idle` s cenou a usage, run se ve status registru označí `success`/`failed`/`aborted`.
-
-### Specifikum `agentiscode` adapteru
-
-`AgentisCodeSessionManager` nepoužívá streaming přes `BaseSessionManager` — spouští CLI `agentiscode --json --task-id … --agentis-api …` a **telemetrii do Agentisu posílá samo CLI** (`common/agentis_telemetry.py`). Session manager jen čte JSON Lines výstup, hlídá session_id/abort a dělá completion akce. Podkladového agenta volí z `context.adapter.runtime`/`model` (`claude` vs. `opencode`).
-
-`agentiscode` je zároveň samostatně použitelný příkaz (`app/agentiscode.py`): sjednocuje `opencode run` a `claude` do jednoho proudu `AgentEvent` (viz docstring `common/agentiscode.py`), bez `--json` chová se unixově (stdout = odpověď, stderr = aktivita).
+`agentiscode` je samostatně použitelný příkaz (`app/agentiscode.py`) a zároveň standardní agentí krok dodávaných workflow. Sjednocuje `opencode run` a `claude` do proudu `AgentEvent` (viz `common/agentiscode.py`). Když dostane údaje pro Agentis, `common/agentis_telemetry.py` průběžně posílá session ID a aktivitu; finální odpověď a session ID současně zapisuje do souborů pro workflow outputs.
 
 ## Komunikace s Agentisem
 
@@ -169,7 +140,8 @@ Selhání reportingu běh agenta neshazuje (best-effort, loguje se na stderr). `
 | `AGENTIS_ADAPTER_ID` | — | Identita adapteru vůči Agentisu (povinné; lze předat `--id`) |
 | `ADAPTER_HOST` / `ADAPTER_PORT` | `0.0.0.0` / `8001` | Status HTTP server |
 | `ADAPTER_WORKTREE_ROOT` | `<repo>/worktrees` | Kořen pro task worktrees |
-| `ADAPTER_PROJECT_RUN_ROOT` | `/tmp/agentis` | Run soubory pojmenovaných workflow (mimo worktree) |
+| `ADAPTER_PROJECT_RUN_ROOT` | `/tmp/agentis` | Run soubory project scope a pojmenovaných workflow (mimo worktree) |
+| `ADAPTER_BUNDLED_WORKFLOW_DIR` | `<repo>/workflows` | Fallback workflow, pokud projekt nemá vlastní soubor |
 | `ADAPTER_SHUTDOWN_GRACE_PERIOD` | `0` | Sekundy čekání na doběhnutí práce při shutdownu (0 = bez limitu) |
 | `WORKFLOW_EXECUTOR` | `kubernetes` | Executor workflow kroků (`kubernetes` / `local`), pokud ho neurčí YAML |
 | `KUBECTL_COMMAND` | `kubectl` | Příkaz pro Kubernetes executor |
