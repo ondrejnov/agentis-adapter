@@ -16,6 +16,7 @@ Klíčové zdrojáky:
 | `common/git_adapter.py` | `GitAdapterService` — worktree a branch per task |
 | `common/agentis.py` | `AgentisJsonRpcClient` — HTTP JSON-RPC klient na Agentis backend |
 | `common/workflow/` | Workflow runtime a executory (viz [docs/workflow.md](workflow.md)) |
+| `agentiscode/cli.py`, `app/agentiscode.py` | Console entrypoint a implementace sjednoceného CLI wrapperu |
 
 ## Architektura v kostce
 
@@ -58,7 +59,7 @@ flowchart LR
 Důležité vlastnosti:
 
 - **Spojení iniciuje adapter** — drží outbound WebSocket na Agentis (`AGENTIS_WS_ENDPOINT`), Agentis do adapteru nevolá žádné HTTP. Adapter tak může běžet za NATem.
-- **HTTP server adapteru je jen observabilita** — `/health`, `/status`, `/log`, `/runs/{run_id}/log`. Žádné JSON-RPC přes HTTP.
+- **Aplikační HTTP endpointy jsou jen read-only observabilita** — `/health`, `/status`, `/log`, `/runs/{run_id}/log`. JSON-RPC přes HTTP adapter nevystavuje; FastAPI navíc standardně nabízí `/docs`, `/redoc` a `/openapi.json`.
 - **Stav je in-memory** — registry workflow runů nepřežije restart procesu, záměrně bez perzistence.
 
 ## Vstupní body
@@ -82,7 +83,7 @@ Konkrétní CLI agent (`opencode` / `claude` / `claude-p`) se nevybírá na serv
 
 `PassiveWebSocketClient` (`common/rpc/passive_websocket.py`):
 
-- připojuje se na `AGENTIS_WS_ENDPOINT` s hlavičkami `Authorization: Bearer <AGENTIS_TOKEN>` a `X-Agentis-Adapter-Id: <AGENTIS_ADAPTER_ID>`; pro ne-localhost vyžaduje `wss://`,
+- připojuje se na `AGENTIS_WS_ENDPOINT` s hlavičkami `Authorization: Bearer <API token>` a `X-Agentis-Adapter-Id: <AGENTIS_ADAPTER_ID>`; API token se bere z `AGENTIS_API_TOKEN`, jinak `AGENTIS_TOKEN`, a pro ne-localhost se vyžaduje `wss://`,
 - každou přijatou zprávu parsne jako JSON-RPC 2.0, zvaliduje parametry přes Pydantic model z `_DISPATCH` a handler spustí v threadu (`asyncio.to_thread`); odpověď posílá zpět jen pokud request měl `id`,
 - při výpadku reconnectuje s exponenciálním backoffem (konfigurovatelné `AGENTIS_WS_RECONNECT_*`),
 - **graceful shutdown**: první SIGTERM/SIGINT zavře WebSocket (žádné nové zprávy), rozpracovaný dispatch doběhne a pak se čeká na běžící agenty a workflow až `ADAPTER_SHUTDOWN_GRACE_PERIOD` sekund (0 = bez limitu). Druhý signál ukončí proces okamžitě.
@@ -91,14 +92,14 @@ Konkrétní CLI agent (`opencode` / `claude` / `claude-p`) se nevybírá na serv
 
 | Metoda | Parametry | Co dělá |
 | --- | --- | --- |
-| `start` | `context` (+ `fork_from_session_id`) | Připraví worktree a spustí workflow; vrací `run` + provedené adapter kroky |
-| `add_message` | `run_id`, `context`, `message`, `attachments` | Spustí workflow run s follow-up promptem; agentí krok může navázat přes uložené session ID |
-| `abort` | `context` | Zruší běžící workflow a jeho aktivní kroky |
-| `undo` | `context` | Vrátí worktree do source snapshotu pořízeného před posledním během |
+| `start` | `context`, volitelně `fork_from_session_id` | Připraví workspace a spustí workflow; `fork_from_session_id` se přijme, ale aktuálně se nepoužívá |
+| `add_message` | `run_id`, `context`, `message`, `role`, `attachments` | Spustí workflow s follow-up promptem; `role` má default `user`, ale handler jej aktuálně nerozlišuje |
+| `abort` | `context` | Idempotentně označí známý run jako abortovaný a ukončí kroky odpovídající labelům; může uspět i bez známého aktivního runu |
+| `undo` | `context` | Vrátí workspace do source snapshotu evidovaného u posledního runu tasku |
 
 Chyby vrací `AgentJsonRpcException` s kódem, který dispatcher mapuje na HTTP-like status (`404` → not found, `>=500`/`-32603` → internal, jinak 400). Nevalidní parametry = standardní `-32602 Invalid params`.
 
-Centrální vstup do metod je `AgentJsonRpcService` (`common/rpc/jsonrpc.py`). `start` i `add_message` připraví workspace a vždy předají řízení `WorkflowManager`u. `context.adapter.runtime` nerozhoduje o routingu: hodnota `local` pouze vynutí lokální workflow executor, zatímco prázdná hodnota nebo `workflow` ponechá výběr na `workflow.executor` a `WORKFLOW_EXECUTOR`.
+Centrální vstup do metod je `AgentJsonRpcService` (`common/rpc/jsonrpc.py`). Produkční `_DISPATCH` vystavuje pouze čtyři metody v tabulce; jiné názvy včetně `question` a `approve` vrátí `-32601 Method not found`. `start` i `add_message` připraví workspace a vždy předají řízení `WorkflowManager`u. `context.adapter.runtime` nerozhoduje o routingu: pouze přesná hodnota `local` vynutí lokální workflow executor. Jakákoli jiná hodnota ponechá výběr na `workflow.executor` a `WORKFLOW_EXECUTOR`; model runtime zatím neomezuje na pevný výčet.
 
 ## Workflow runtime
 
@@ -106,55 +107,69 @@ Průběh `start` / `add_message`:
 
 1. **Workspace** — `GitAdapterService` pro task scope založí nebo znovu použije worktree `<ADAPTER_WORKTREE_ROOT>/<task-safe-id>` na task větvi. Project scope běží přímo v `context.working_dir`.
 2. **Prompt a přílohy** — adapter složí prompt z kontextu nebo follow-up zprávy a materializuje přílohy do workspace.
-3. **Výběr workflow** — pojmenovaná akce použije `<name>.yaml`, project scope `project.yaml`, ostatní runy `default.yaml`. Projektový soubor má přednost před bundled fallbackem z `ADAPTER_BUNDLED_WORKFLOW_DIR`.
-4. **Spuštění** — `WorkflowManager` pořídí source snapshot pro `undo`, zmrazí YAML a na pozadí spustí jeho DAG přes Kubernetes Joby nebo lokální bash procesy. `start` / `add_message` proto vrací rychle a bez `session_id`.
+3. **Výběr a validace workflow** — pojmenovaná akce použije `<name>.yaml`, project scope `project.yaml`, ostatní runy `default.yaml`. Projektový soubor má přednost před bundled fallbackem z `ADAPTER_BUNDLED_WORKFLOW_DIR`. YAML se synchronně načte, vyřeší, interpoluje a zvaliduje; zároveň vzniknou `prompt.md` a `context.json`.
+4. **Spuštění** — manager zaregistruje run a spustí background thread. Ten pořídí source snapshot, připraví executor a vykoná DAG přes Kubernetes Joby nebo lokální bash procesy. `start` / `add_message` proto vrací rychle a bez `session_id`.
 5. **Reporting** — workflow posílá `run.adapter_event`; agentí krok s `agentiscode` může navíc průběžně posílat session ID a aktivitu. Po doběhnutí manager aplikuje deklarované outputs, například completion komentář, přílohy, artefakty a followup akce.
 
-Per task běží maximálně jedno workflow; souběžný start vrací chybu 409 (busy). `abort` zastaví jeho aktivní kroky a `undo` obnoví worktree ze snapshotu posledního runu. Detailně viz [docs/workflow.md](workflow.md).
+Manager blokuje start, pokud v tomto procesu už eviduje aktivní workflow stejného tasku, chybou 409 (busy); evidence není sdílená mezi procesy. `undo` funguje jen se snapshotem dostupným v in-memory evidenci. Pojmenovaná workflow snapshot nevytvářejí a po přepsání evidence tasku proto může `undo` vrátit chybu; project scope naopak obnovuje přímo projektový workspace. Detailně viz [docs/workflow.md](workflow.md).
 
 ## `agentiscode`
 
-`agentiscode` je samostatně použitelný příkaz (`app/agentiscode.py`) a zároveň standardní agentí krok dodávaných workflow. Sjednocuje `opencode run` a `claude` do proudu `AgentEvent` (viz `common/agentiscode.py`). Když dostane údaje pro Agentis, `common/agentis_telemetry.py` průběžně posílá session ID a aktivitu; finální odpověď a session ID současně zapisuje do souborů pro workflow outputs.
+Console script `agentiscode` vstupuje přes `agentiscode/cli.py`, který načte implementaci z `app/agentiscode.py`. Příkaz je samostatně použitelný a zároveň tvoří standardní agentí krok dodávaných workflow. Sjednocuje `opencode run` a `claude` do proudu `AgentEvent` (viz `common/agentiscode.py`). Když dostane údaje pro Agentis, `common/agentis_telemetry.py` průběžně posílá session ID a aktivitu. Session ID zapisuje do workflow outputu hned, jak je známé; finální odpověď až při nepřerušeném dokončení běhu.
 
 ## Komunikace s Agentisem
 
-Veškerý reporting jde přes `AgentisJsonRpcClient` (HTTP JSON-RPC na `AGENTIS_ENDPOINT`, Bearer `AGENTIS_TOKEN`). Používané metody:
+Veškerý reporting jde přes `AgentisJsonRpcClient` jako HTTP JSON-RPC na `AGENTIS_ENDPOINT`. Běžné metody používají `X-Auth-Token`; metody v `SERVICE_TOKEN_METHODS` (například komentáře a session activity) používají `X-Service-Token`, pokud je service token nastaven. Bearer autentizace patří pouze WebSocket spojení, které adapter iniciuje vůči Agentisu.
 
 | Metoda | Kdy |
 | --- | --- |
-| `run.adapter_event` | Průběh lifecycle kroků a běhu agenta (`kind` + `status` started/success/failed) |
+| `task.start_run` | Samostatný `agentiscode` běh bez již předaného `run_id` |
+| `run.adapter_event` | Průběh lifecycle a workflow kroků (`started`, `success`, `failed`, `skipped`) |
 | `run.store_session_id` | Po založení session — Agentis si session přiřadí k runu |
-| `session.session_created` | První ohlášení nové agentí session |
 | `session.store_activity_log` | Průběžný snapshot aktivity agenta (zprávy/tool cally) |
 | `task.add_agent_comment` | Completion komentář s přílohami, artefakty, status změnou a followup akcemi |
 
-Selhání reportingu běh agenta neshazuje (best-effort, loguje se na stderr). `agentis_token` se nikdy nevrací v API odpovědích ani nelogu­je (`RunStatePayload.safe_dump()`).
+Selhání průběžné telemetrie je best-effort a loguje se na stderr; selhání některých závěrečných workflow RPC může podle místa volání shodit zpracování runu. Autentizační tokeny jsou uloženy v settings, ne v běžném run payloadu. `RunStatePayload.safe_dump()` je však aktuálně pouze `model_dump()` a neprovádí rekurzivní scrub libovolných tokenových hodnot vložených například do `context.headers`; citlivá data proto do kontextu nepatří.
 
 ## Konfigurace (env / `.env`)
 
 | Proměnná | Default | Význam |
 | --- | --- | --- |
-| `AGENTIS_ENDPOINT` | `http://127.0.0.1:8891` | HTTP JSON-RPC endpoint Agentisu |
-| `AGENTIS_TOKEN` | `1234` | Bearer token pro HTTP i WebSocket |
-| `AGENTIS_WS_ENDPOINT` | — | `ws(s)://` endpoint pro WebSocket spojení adapteru (povinné) |
+| `AGENTIS_ENDPOINT` | `https://agentis.cz/api` | HTTP JSON-RPC endpoint Agentisu |
+| `AGENTIS_API_TOKEN` / `AGENTIS_TOKEN` | `1234` | API token; `AGENTIS_API_TOKEN` má přednost. HTTP jej posílá jako `X-Auth-Token`, WebSocket jako Bearer |
+| `AGENTIS_SERVICE_TOKEN` | — | Token pro service RPC (`X-Service-Token`) a callbacky agentího kroku |
+| `AGENTIS_WS_ENDPOINT` | `wss://agentis.cz/api/adapters/passive/ws` | WebSocket endpoint; výsledná hodnota musí být `ws(s)://`, mimo localhost `wss://` |
 | `AGENTIS_ADAPTER_ID` | — | Identita adapteru vůči Agentisu (povinné; lze předat `--id`) |
 | `ADAPTER_HOST` / `ADAPTER_PORT` | `0.0.0.0` / `8001` | Status HTTP server |
+| `ADAPTER_PUBLIC_URL` | odvozeno nebo — | Veřejná URL adapteru; bez ní se může odvodit z `K8S_SERVICE_NAME`, `K8S_NAMESPACE` a `K8S_SERVICE_PORT` |
 | `ADAPTER_WORKTREE_ROOT` | `<repo>/worktrees` | Kořen pro task worktrees |
 | `ADAPTER_PROJECT_RUN_ROOT` | `/tmp/agentis` | Run soubory project scope a pojmenovaných workflow (mimo worktree) |
 | `ADAPTER_BUNDLED_WORKFLOW_DIR` | `<repo>/workflows` | Fallback workflow, pokud projekt nemá vlastní soubor |
+| `ADAPTER_NAMESPACE_PREFIX` | `Task` | Prefix Kubernetes namespace pro číslované tasky |
 | `ADAPTER_SHUTDOWN_GRACE_PERIOD` | `0` | Sekundy čekání na doběhnutí práce při shutdownu (0 = bez limitu) |
 | `WORKFLOW_EXECUTOR` | `kubernetes` | Executor workflow kroků (`kubernetes` / `local`), pokud ho neurčí YAML |
 | `KUBECTL_COMMAND` | `kubectl` | Příkaz pro Kubernetes executor |
-| `AGENTISCODE_COMMAND` | `agentiscode` | Příkaz CLI wrapperu |
-| `AGENTISCODE_ADAPTER` | `opencode` | Default podkladový agent wrapperu |
 | `AGENTIS_WS_HEARTBEAT_INTERVAL`, `AGENTIS_WS_MAX_MESSAGE_SIZE`, `AGENTIS_WS_RECONNECT_*` | viz `common/config.py` | Ladění WebSocket transportu |
+
+`Settings` stále načítá `AGENTISCODE_COMMAND` a `AGENTISCODE_ADAPTER`, ale současný workflow ani CLI tyto hodnoty nekonzumují; dodávaný `_base.yaml` volá `agentiscode` přímo a předává mu explicitní `--adapter`.
 
 ## Observabilita
 
 - `GET /health` — liveness.
 - `GET /status` — snapshot status registru: stav WebSocket spojení, běžící/dokončené runy, statistiky od startu.
-- `GET /log?after=&limit=` — globální log adapteru; `GET /runs/{run_id}/log` — log konkrétního runu.
+- `GET /log?after=&limit=` — in-memory ring buffer strukturovaných záznamů poslaných přes `log_json`; nezahrnuje automaticky Python logging, stderr ani log soubory kroků.
+- `GET /runs/{run_id}/log?after=&limit=` — krátký in-memory activity feed runu, nikoli stdout/stderr executoru; neznámý run vrátí 404.
+- `GET /docs`, `/redoc`, `/openapi.json` — standardní FastAPI dokumentace read-only HTTP endpointů.
 
 ## Testy
 
-End-to-end testy JSON-RPC chování jdou přes `fastapi.testclient.TestClient` v `tests/test_api.py` (helper v `tests/support.py` routuje payloady na dispatcher, jako by přišly WebSocketem). Workflow režim pokrývá `tests/test_workflow.py`, jednotliví agenti `tests/test_claudecode.py`, `tests/test_opencode.py`, `tests/test_agentiscode*.py`. Spouštění: `poetry run pytest -q` + `poetry run ruff check .`.
+`tests/test_api.py` jsou in-process integrační testy Pydantic kontraktu a dispatcheru; helper v `tests/support.py` payload předá přímo dispatcheru, nejde o síťový end-to-end test. Hlavní oblasti:
+
+- workflow, executory a outputs: `tests/test_workflow.py`,
+- WebSocket transport a reconnect: `tests/test_passive_websocket.py`,
+- HTTP klient a autentizační hlavičky: `tests/test_agentis_rpc.py`,
+- CLI wrapper, normalizace agentů a telemetrie: `tests/test_agentiscode.py`, `tests/test_agentis_telemetry.py`, `tests/test_claudecode.py`, `tests/test_opencode.py`, `tests/test_claude_client.py`,
+- observabilita a shutdown: `tests/test_status.py`, `tests/test_shutdown.py`,
+- snapshoty, screenshoty a git/PR pomocné funkce: `tests/test_source_snapshot.py`, `tests/test_screenshots.py`, `tests/test_github_pr.py`.
+
+Celá sada se spouští přes `poetry run pytest -q`; statická kontrola přes `poetry run ruff check .`.

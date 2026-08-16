@@ -1,54 +1,72 @@
-# Koncept: lokální executor pro workflow režim
+# Lokální workflow executor
 
-> **Stav: implementováno.** Viz `common/workflow/local_runtime.py`,
-> `WORKFLOW_EXECUTOR` v `common/config.py` a sekci „Workflow runtime"
-> v `docs/development.md`.
+> **Stav: implementováno.** Zdrojáky jsou v
+> `common/workflow/local_runtime.py`, společný protokol a Kubernetes executor v
+> `common/workflow/runtime.py`. Uživatelský popis workflow je v
+> [docs/workflow.md](workflow.md).
 
-## Motivace
+## Účel
 
-Před zavedením lokálního executoru workflow spouštělo kroky z
-`.agentis/workflows/default.yaml` výhradně jako Kubernetes Joby přes `kubectl`.
-Deklarativní část (sekvenční kroky, `if` podmínky, `var`/`agent_comment`/`artifact`
-outputs, interpolace `[%TOKEN%]`, prompt/context soubory) ale na Kubernetes nijak
-nezávisí, proto dává smysl umět tytéž kroky spustit jako lokální bash procesy
-přímo nad worktree nebo projektovým adresářem.
+Workflow runtime umí stejné YAML kroky spouštět dvěma způsoby:
 
-Cíl: jedna konfigurační volba rozhodne, jestli workflow poběží v Kubernetes,
-nebo lokálně v bashi. Workflow YAML i chování outputs zůstávají stejné.
+- `kubernetes` vytvoří pro každý krok Kubernetes Job přes `kubectl`,
+- `local` spustí krok jako lokální bash proces přímo na hostu adapteru.
 
-## Proč to jde snadno
+Orchestrace je pro oba executory společná. `WorkflowManager` řeší DAG kroků,
+`needs`, `if`, paralelismus, retry, fail-fast a `always` kroky, outputs i eventy
+do Agentisu. Executor řeší pouze fyzické spuštění, čekání, log a ukončení
+jednoho kroku.
 
-`WorkflowManager` (`common/workflow/manager.py`) drží celou orchestraci
-(pořadí kroků, `if` podmínky, vars, outputs, adapter eventy) a s exekucí
-komunikuje jen přes `KubectlJobRunner`:
+Workflow runtime se používá pro každý `start` a `add_message`. `local` není
+samostatný CLI runtime a neurčuje, zda se workflow použije; určuje pouze, kde
+jeho kroky poběží.
 
-- `ensure_namespace(namespace)`
-- `has_active_jobs(namespace, task_label)`
-- `apply_job(manifest)` + `wait_for_job(...)` → `succeeded|failed|timeout|aborted`
-- `job_log_tail(namespace, name)`
-- `delete_jobs_by_labels(namespace, labels)`
+## Výběr executoru
 
-Jediné místo, kde manager „ví" o Kubernetes, je stavba manifestu
-(`build_job_manifest`). Stačí tedy rozhraní posunout o úroveň výš — na
-granularitu *kroku* — a Kubernetes detaily schovat do runneru.
+Priorita je:
 
-## Návrh
+1. `context.adapter.runtime == "local"` vždy vynutí lokální executor.
+2. Jinak se použije `workflow.executor` z vybraného YAML souboru.
+3. Když YAML executor neurčí, použije se `WORKFLOW_EXECUTOR` adapteru.
+4. Výchozí hodnota `WORKFLOW_EXECUTOR` je `kubernetes`.
 
-### 1. Protokol `WorkflowStepRunner`
+Hodnota `context.adapter.runtime == "workflow"` samostatný executor nevybírá;
+ponechá rozhodnutí na YAML a konfiguraci adapteru.
 
-V `common/workflow/runtime.py` definovat protokol, který manager používá místo
-přímé práce s manifesty:
+```yaml
+version: 1
+workflow:
+  executor: local
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 600
+  steps:
+    - name: Run agent
+      run: agentiscode < "$AGENTIS_PROMPT_FILE"
+```
+
+Globální default lze nastavit v prostředí adapteru:
+
+```bash
+WORKFLOW_EXECUTOR=local
+```
+
+Schema přijímá pouze `kubernetes` a `local`. Kubernetes executor vyžaduje
+`image` na workflow nebo na každém kroku; lokální executor image nevyžaduje.
+Runner se vybírá pro každý run a instance se cachují podle executoru a u
+Kubernetes také podle `workflow.context`.
+
+## Společné rozhraní
+
+`WorkflowManager` komunikuje s executory přes protokol `WorkflowStepRunner`:
 
 ```python
-@dataclass
-class StepResult:
-    status: str          # "succeeded" | "failed" | "timeout" | "aborted"
-    log_tail: str        # posledních ~50 řádek výstupu (pro failed event)
-
-
 class WorkflowStepRunner(Protocol):
-    def prepare(self, *, namespace: str, run_dir: Path) -> None: ...
+    def prepare(
+        self, workflow: WorkflowFile, *, namespace: str, run_dir: Path
+    ) -> None: ...
+
     def has_active_run(self, namespace: str, task_label: str) -> bool: ...
+
     def run_step(
         self,
         workflow: WorkflowFile,
@@ -60,128 +78,140 @@ class WorkflowStepRunner(Protocol):
         env: dict[str, str],
         timeout: float,
         abort_event: threading.Event,
+        run_dir: Path,
     ) -> StepResult: ...
+
     def abort(self, namespace: str, labels: dict[str, str]) -> str: ...
+    def delete_namespace(self, namespace: str) -> None: ...
 ```
 
-`KubectlJobRunner` protokol implementuje tím, co dělá dnes (postaví manifest,
-`apply`, `wait_for_job`, při failu `job_log_tail`, abort = `delete_jobs_by_labels`).
-Manager pak neimportuje `build_job_manifest` vůbec.
+`StepResult.status` je `succeeded`, `failed`, `timeout` nebo `aborted`.
+`log_tail` obsahuje posledních 50 řádků výstupu jen při chybě nebo timeoutu.
 
-### 2. `LocalProcessRunner` (nový `common/workflow/local_runtime.py`)
+`KubectlJobRunner` uvnitř `run_step()` sestaví Job manifest, provede `apply`,
+čeká na stav Jobu a při neúspěchu načte log Podu. `LocalProcessRunner` používá
+stejný kontrakt nad procesy hostitele. Manager proto neřeší detaily konkrétního
+prostředí.
 
-Lokální implementace spouští krok jako subprocess:
+## Lokální proces
 
-- Příkaz: `/bin/bash -lc build_bash_wrapper(spec.envFiles, step.run)` —
-  stávající wrapper (`set -euo pipefail`, sourcing envFiles, `cd "$WORKDIR"`)
-  funguje lokálně beze změny; envFiles jako
-  `/root/.config/agentis/agentis.env` jsou stejně hostPath soubory na hostu.
-- Env: `{**spec.env, **runtime_env, **step.env}` přes `os.environ` jako základ
-  (lokální proces potřebuje PATH atd. hosta).
-- Cwd: `step.workingDir or spec.workingDir or WORKDIR`.
-- Log: stdout+stderr do `run_dir/logs/<index>-<safe_step_name>.log`;
-  `log_tail` čte posledních 50 řádek z tohoto souboru.
-- Timeout a abort: `Popen` ve vlastní process group (`start_new_session=True`),
-  poll smyčka hlídá `abort_event` a deadline; při timeoutu/abortu
-  `os.killpg(..., SIGTERM)` a po grace period `SIGKILL`.
-- `has_active_run`: in-memory registr běžících procesů per task label
-  (lokální adapter je single-process, víc netřeba).
-- `prepare`: jen `mkdir -p run_dir/logs` — žádný namespace.
+### Příkaz a pracovní adresář
 
-### 3. Konfigurace
+Runner hledá `bash` přes `PATH`; na POSIX má fallback `/bin/bash`. Na Windows je
+nutný bash dostupný přes `PATH`, například Git Bash nebo WSL. Chybějící bash či
+chyba při vytvoření procesu vrátí neúspěšný `StepResult` a objeví se ve stderr i
+v `workflow_step` eventu.
 
-Dvě úrovně, YAML má přednost:
+Krok se spouští jako:
 
-**a) Default adapteru** — env proměnná / `.env`:
+```text
+bash -lc <wrapper>
+```
+
+Wrapper je společný s Kubernetes executorem:
+
+1. zapne `set -euo pipefail`,
+2. se `set -a` načte všechny `workflow.envFiles`,
+3. přejde do `step.workingDir`, jinak `workflow.workingDir`, jinak `$WORKDIR`,
+4. spustí `step.run`.
+
+Stejný pracovní adresář runner používá také jako `cwd` procesu. Bez explicitního
+`workingDir` použije `WORKDIR`, případně jako poslední fallback `run_dir`.
+
+### Prostředí
+
+Prostředí procesu se skládá v tomto pořadí, pozdější hodnota vyhrává:
+
+1. prostředí procesu adapteru,
+2. `workflow.env`,
+3. runtime env vytvořené `WorkflowManagerem`,
+4. `step.env`.
+
+Z hostitelského prostředí se před merge odstraní `AGENTIS_TOKEN`,
+`AGENTIS_API_TOKEN` a `AGENTIS_SERVICE_TOKEN`. Tím tokeny adapteru neprosáknou
+do lokálních kroků automaticky. YAML nebo soubor uvedený v `envFiles` však může
+proměnné explicitně znovu definovat, proto musí být workflow důvěryhodné.
+
+### Logy
+
+Stdout a stderr kroku se zapisují společně do:
+
+```text
+<run_dir>/logs/<job_name>.log
+```
+
+`job_name` generuje manager z runu, attemptu, indexu a bezpečného názvu kroku.
+Retry používá odlišné jméno, takže každý pokus má vlastní log. Při `failed` nebo
+`timeout` runner pošle posledních 50 řádků do eventu a vypíše chybu také na
+stderr adapteru. Úspěšný ani abortovaný krok `log_tail` neposílá.
+
+### Timeout a abort
+
+Každý proces běží ve vlastní process group. Poll smyčka sleduje dokončení,
+`timeoutSeconds` a sdílený `abort_event`.
+
+- Na POSIX runner pošle celé process group `SIGTERM`, počká 5 sekund a případně
+  použije `SIGKILL`.
+- Na Windows spustí `taskkill /F /T` a jako fallback ukončí hlavní proces.
+- `abort()` ukončí všechny procesy registrované pod task labelem.
+
+Registr procesů je pouze in-memory. Používá se pro busy-check a abort v rámci
+jednoho běžícího adapter procesu; není to globální lock mezi více instancemi.
+
+## Chování YAML polí
+
+| Pole | Kubernetes | Local |
+| --- | --- | --- |
+| `run`, `if`, `needs`, `always`, `continueOnError`, `retries` | společná orchestrace | společná orchestrace |
+| `env`, `envFiles`, `workingDir`, `timeoutSeconds`, `outputs` | použito | použito |
+| `maxParallel` | použito managerem | použito managerem |
+| `image`, `steps[].image` | použito a vyžadováno | ignorováno, varování |
+| `context` | kubectl context | ignorováno, varování |
+| `imagePullSecrets`, `mounts`, `steps[].resources` | promítnuto do Jobu | ignorováno, varování |
+| `ttlSecondsAfterFinished`, `steps[].ttlSecondsAfterFinished` | TTL Jobu | ignorováno bez varování |
+| `deleteNamespace` | po úspěchu může smazat namespace | ignorováno bez varování |
+
+`LocalProcessRunner.prepare()` vytvoří adresář `logs` a jednou za run vypíše
+varování pro nastavená Kubernetes pole, která kontroluje. Namespace se i u
+lokálního runu počítá kvůli jednotným eventům a labelům, ale žádný Kubernetes
+namespace se nevytváří; `delete_namespace()` je no-op.
+
+## Souběh a bezpečnost
+
+- Lokální kroky běží bez kontejnerové izolace a se stejnými oprávněními jako
+  proces adapteru. Mohou měnit hostitele i soubory mimo worktree.
+- Per task může běžet nejvýše jedno workflow. Různé tasky ale mohou běžet
+  souběžně a kolidovat přes porty, globální cache nebo sdílené adresáře.
+- `maxParallel` omezuje počet současných kroků jednoho runu, ne počet procesů
+  napříč runy.
+- Po restartu adapteru se in-memory registry neobnoví. Náhle ukončené potomky
+  nelze po startu znovu dohledat ani spravovat a podle způsobu ukončení a
+  platformy mohou zůstat běžet. Kubernetes Joby naproti tomu existují nezávisle
+  na procesu adapteru.
+- `envFiles` a workflow skripty jsou spouštěný kód. Lokální executor je vhodný
+  pouze pro důvěryhodné workflow.
+
+## Ověření
+
+Testy v `tests/test_workflow.py` pokrývají:
+
+- výběr local executoru z YAML, `WORKFLOW_EXECUTOR` i vynucení přes runtime,
+- běh skutečného bash procesu a aplikaci outputs,
+- odstranění Agentis tokenů z hostitelského prostředí,
+- chybějící bash a chybu spuštění,
+- selhání kroku a přenos konce logu,
+- timeout a abort celého stromu procesů,
+- požadavek na image pouze pro Kubernetes executor,
+- odmítnutí neznámého executoru schématem.
+
+Relevantní ověření lze spustit příkazem:
 
 ```bash
-# .env
-WORKFLOW_EXECUTOR=local   # nebo "kubernetes" (default, zpětně kompatibilní)
+poetry run pytest -q tests/test_workflow.py -k "local_executor or runtime_local or kubernetes_executor_requires_image or unknown_executor"
 ```
 
-→ `Settings.workflow_executor: str = "kubernetes"` v `common/config.py`.
+## Možná rozšíření
 
-**b) Per-workflow override** — volitelné pole ve workflow YAML:
-
-```yaml
-version: 1
-workflow:
-  executor: local        # volitelné; bez něj platí WORKFLOW_EXECUTOR
-  workingDir: "[%WORKDIR%]"
-  steps:
-    - name: Run agent
-      run: |
-        agentiscode --adapter claude ... < "$AGENTIS_PROMPT_FILE"
-```
-
-→ `WorkflowSpec.executor: Literal["kubernetes", "local"] | None = None`.
-
-`WorkflowManager.start_workflow()` po načtení YAML vybere runner. Hodnota
-`context.adapter.runtime == "local"` vynutí lokální executor; jinak platí
-`workflow.workflow.executor or settings.workflow_executor`. Runner se volí per
-run (cache obou instancí v manageru), takže jeden adapter může souběžně
-obsluhovat K8s i lokální workflow.
-
-Workflow runtime se používá pro všechny runy. Executor určuje jen *kde* jeho
-kroky poběží; nejde o samostatný běhový režim adapteru.
-
-### 4. Mapování polí default.yaml na lokální běh
-
-| Pole | kubernetes | local |
-|---|---|---|
-| `run`, `if`, `env`, `envFiles`, `outputs` | beze změny | beze změny |
-| `workingDir` | container workingDir | cwd subprocesů |
-| `timeoutSeconds` | `activeDeadlineSeconds` | deadline poll smyčky |
-| `image`, `imagePullSecrets` | povinné / použité | ignorováno |
-| `mounts` | mounty | ignorováno (běží přímo na hostu) |
-| `resources`, `ttlSecondsAfterFinished` | Job spec | ignorováno |
-
-- `image` ve schématu povolit jako `str | None`; validátor vyžaduje image jen
-  pro `executor == "kubernetes"` (resp. když se workflow reálně spouští v K8s,
-  vyhodí `LocalProcessRunner`/manager srozumitelnou chybu naopak nikdy).
-- Ignorovaná pole lokální runner jednou za run zaloguje na stderr
-  (`[workflow] local executor ignoruje: mounts, ...`), aby
-  nepřekvapilo, že mounty „nefungují".
-- `namespace` zůstává jen jako label/hodnota v eventech (`data.namespace`),
-  reálně se nic nevytváří.
-
-### 5. Co se nemění
-
-- Celý `WorkflowManager`: prompt/context soubory v `run_dir`, attempt id,
-  `var` outputs + `if` podmínky, aplikace outputs do Agentisu
-  (`task.add_agent_comment`, `run.store_session_id`), adapter eventy
-  (`workflow`, `workflow_step`, `idle`), project scope (`project.yaml`,
-  `project_run_root`).
-- JSON-RPC kontrakt (`start`/`add_message`/`abort`) a chování busy-checku
-  (jen jeho implementace je per executor).
-
-## Dotčené soubory
-
-- `common/config.py` — `workflow_executor` setting (+ čtení `WORKFLOW_EXECUTOR`).
-- `common/workflow/schema.py` — `executor` pole, `image` volitelné s validací.
-- `common/workflow/runtime.py` — `StepResult`, protokol, `KubectlJobRunner.run_step`.
-- `common/workflow/local_runtime.py` — nový `LocalProcessRunner`.
-- `common/workflow/manager.py` — výběr runneru, volání `run_step` místo
-  manifest/apply/wait/log_tail.
-- `tests/test_workflow.py` — stávající fake runner přejde na nový protokol;
-  nové testy pro `LocalProcessRunner` s reálnými `echo`/`exit 1` kroky
-  (timeout, abort, log tail, ignorovaná pole).
-
-## Rizika a vědomé kompromisy
-
-- **Žádná izolace**: lokální kroky běží pod uživatelem adapteru přímo nad
-  worktree — stejný trade-off jako `local` runtime, jen to explicitně
-  zdokumentovat.
-- **Souběh**: víc workflow runů nad stejným projektem si lokálně může šlapat
-  po prostředí (porty, globální cache). Busy-check per task to řeší stejně
-  jako dnes; mezi tasky to neřešíme (stejné jako u K8s s hostPath workspace).
-- **Recovery po restartu adapteru**: lokální procesy umřou s adapterem
-  (daemon thready). U K8s Joby přežijí. V1 plně v duchu stávajícího
-  rozhodnutí „bez full recovery".
-
-## Možná rozšíření (mimo v1)
-
-- Per-run volba přes `context.adapter.executor` z Agentisu (přednost před
-  YAML), kdyby měl jeden projekt jezdit oběma způsoby podle typu tasku.
-- Třetí executor `docker`/`podman` — stejný protokol, `image` by se znovu
-  využilo, mounty přes `-v`.
+- Izolovaný executor přes Docker nebo Podman se stejným protokolem.
+- Per-executor limity souběhu napříč workflow runy.
+- Perzistentní evidence lokálních procesů a recovery nebo úklid po restartu.
