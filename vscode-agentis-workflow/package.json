@@ -1,0 +1,58 @@
+{
+  "name": "agentis-workflow",
+  "displayName": "Agentis Workflow",
+  "description": "Language support for Agentis workflow YAML files.",
+  "version": "0.11.0",
+  "publisher": "agentis",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "extensionDependencies": [
+    "redhat.vscode-yaml"
+  ],
+  "activationEvents": [
+    "onLanguage:yaml",
+    "workspaceContains:**/.agentis/workflows/*.yaml"
+  ],
+  "main": "./dist/extension.cjs",
+  "contributes": {
+    "grammars": [
+      {
+        "scopeName": "agentis.workflow.injection",
+        "path": "./syntaxes/agentis-workflow.tmLanguage.json",
+        "injectTo": [
+          "source.yaml"
+        ]
+      }
+    ],
+    "yamlValidation": [
+      {
+        "fileMatch": "**/.agentis/workflows/*.yaml",
+        "url": "./schemas/agentis-workflow.schema.json"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "npm run package",
+    "build:extension": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.cjs --sourcemap",
+    "package": "npm run test && npm run typecheck && npm run build:extension && vsce package --out dist/agentis-workflow.vsix",
+    "test": "node scripts/test-language-assets.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "25.6.0",
+    "@types/vscode": "^1.92.0",
+    "@vscode/vsce": "^3.9.1",
+    "ajv": "^8.20.0",
+    "esbuild": "0.28.0",
+    "typescript": "6.0.3"
+  }
+}

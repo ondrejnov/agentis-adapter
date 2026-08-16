@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Agentis Workflow YAML",
+  "scopeName": "agentis.workflow.injection",
+  "injectionSelector": "L:source.yaml",
+  "patterns": [
+    {
+      "include": "#interpolation"
+    }
+  ],
+  "repository": {
+    "interpolation": {
+      "match": "(\\[%)(NAMESPACE|WORKDIR|RUN_DIR|MAIN_DIR|RUN_ID|TASK_ID|TASK_NUMBER|TASK_TITLE|BRANCH|BASE_BRANCH|GITHUB_REPO)(%\\])",
+      "name": "meta.interpolation.agentis-workflow",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.variable.begin.agentis-workflow"
+        },
+        "2": {
+          "name": "variable.other.constant.agentis-workflow"
+        },
+        "3": {
+          "name": "punctuation.definition.variable.end.agentis-workflow"
+        }
+      }
+    }
+  }
+}

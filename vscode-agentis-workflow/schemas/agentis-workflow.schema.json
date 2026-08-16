@@ -1,0 +1,488 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://agentis.cz/schemas/agentis-workflow.schema.json",
+  "title": "Agentis workflow",
+  "description": "Declarative Agentis workflow stored in .agentis/workflows/*.yaml.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "workflow"],
+  "properties": {
+    "version": {
+      "const": 1,
+      "description": "Workflow schema version. Only version 1 is supported."
+    },
+    "extends": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_.-]+$",
+      "description": "Parent workflow name from the same directory, without .yaml. Only one inheritance level is supported."
+    },
+    "workflow": {
+      "$ref": "#/definitions/workflow"
+    }
+  },
+  "defaultSnippets": [
+    {
+      "label": "Executable Agentis workflow",
+      "body": {
+        "version": 1,
+        "workflow": {
+          "steps": [
+            {
+              "name": "Run agent",
+              "run": "$1"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "Agentis workflow extending _base",
+      "body": {
+        "version": 1,
+        "extends": "_base",
+        "workflow": {
+          "steps": [
+            {
+              "name": "Run agent",
+              "uses": "run-agent"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Workflow settings. Executable files need at least one step; an inheritance parent may omit steps.",
+      "properties": {
+        "executor": {
+          "enum": ["kubernetes", "docker", "local", null],
+          "description": "Step executor. Runtime local/docker overrides this value."
+        },
+        "context": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "kubectl context for the Kubernetes executor."
+        },
+        "image": {
+          "type": ["string", "null"],
+          "description": "Default image for Kubernetes and Docker steps."
+        },
+        "deleteNamespace": {
+          "type": "boolean",
+          "default": false
+        },
+        "workingDir": {
+          "type": ["string", "null"]
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "default": 14400
+        },
+        "maxParallel": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4
+        },
+        "ttlSecondsAfterFinished": {
+          "type": "integer",
+          "default": 3600
+        },
+        "env": {
+          "$ref": "#/definitions/environment"
+        },
+        "envFiles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "File sourced by Bash before the step. Avoid spaces and shell metacharacters."
+          },
+          "default": []
+        },
+        "mounts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/mount"
+          },
+          "default": []
+        },
+        "imagePullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "default": []
+        },
+        "stepTemplates": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/stepTemplate"
+          },
+          "default": {},
+          "description": "Reusable step definitions referenced by steps[].uses."
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/step"
+          }
+        },
+        "followups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/followup"
+          },
+          "default": []
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": true,
+      "default": {},
+      "description": "Environment values are converted to strings by the adapter."
+    },
+    "mount": {
+      "type": "object",
+      "required": ["name", "mountPath"],
+      "minProperties": 3,
+      "additionalProperties": true,
+      "description": "Combined Kubernetes volume and volumeMount. Add a volume source such as hostPath, secret, configMap, emptyDir, or persistentVolumeClaim.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "mountPath": {
+          "type": "string"
+        },
+        "readOnly": {
+          "type": ["boolean", "null"]
+        },
+        "subPath": {
+          "type": ["string", "null"]
+        },
+        "subPathExpr": {
+          "type": ["string", "null"]
+        },
+        "mountPropagation": {
+          "type": ["string", "null"]
+        },
+        "hostPath": {
+          "$ref": "#/definitions/hostPath"
+        },
+        "secret": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "configMap": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "emptyDir": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "persistentVolumeClaim": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "hostPath": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": true,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "",
+            "DirectoryOrCreate",
+            "Directory",
+            "FileOrCreate",
+            "File",
+            "Socket",
+            "CharDevice",
+            "BlockDevice"
+          ]
+        }
+      }
+    },
+    "stepFields": {
+      "type": "object",
+      "properties": {
+        "if": {
+          "$ref": "#/definitions/condition"
+        },
+        "continueOnError": {
+          "type": "boolean",
+          "default": false
+        },
+        "retries": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "always": {
+          "type": "boolean",
+          "default": false
+        },
+        "image": {
+          "type": ["string", "null"]
+        },
+        "env": {
+          "$ref": "#/definitions/environment"
+        },
+        "workingDir": {
+          "type": ["string", "null"]
+        },
+        "timeoutSeconds": {
+          "type": ["integer", "null"]
+        },
+        "ttlSecondsAfterFinished": {
+          "type": ["integer", "null"]
+        },
+        "resources": {
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "outputs": {
+          "$ref": "#/definitions/outputs"
+        }
+      }
+    },
+    "stepTemplate": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/stepFields"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["run"],
+          "properties": {
+            "run": {
+              "type": "string",
+              "description": "Bash script executed with set -euo pipefail."
+            },
+            "if": {},
+            "continueOnError": {},
+            "retries": {},
+            "always": {},
+            "image": {},
+            "env": {},
+            "workingDir": {},
+            "timeoutSeconds": {},
+            "ttlSecondsAfterFinished": {},
+            "resources": {},
+            "outputs": {}
+          }
+        }
+      ]
+    },
+    "step": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/stepFields"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name"],
+          "anyOf": [
+            {
+              "required": ["run"],
+              "properties": {
+                "run": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "required": ["uses"],
+              "properties": {
+                "uses": {
+                  "type": "string"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "uses": {
+              "type": ["string", "null"]
+            },
+            "needs": {
+              "type": ["array", "null"],
+              "uniqueItems": true,
+              "items": {
+                "type": "string"
+              },
+              "description": "Earlier step names. Omitted means the previous step; [] creates a root step."
+            },
+            "run": {
+              "type": ["string", "null"]
+            },
+            "if": {},
+            "continueOnError": {},
+            "retries": {},
+            "always": {},
+            "image": {},
+            "env": {},
+            "workingDir": {},
+            "timeoutSeconds": {},
+            "ttlSecondsAfterFinished": {},
+            "resources": {},
+            "outputs": {}
+          }
+        }
+      ]
+    },
+    "condition": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "pattern": "^\\s*(?:!\\s*[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*(?:\\s*(?:==|!=)\\s*(?:'[^']*'|\"[^\"]*\"|(?:[^\\s'\"&|]|&(?!&)|\\|(?!\\|))+))?)(?:\\s*(?:&&|\\|\\|)\\s*(?:!\\s*[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*(?:\\s*(?:==|!=)\\s*(?:'[^']*'|\"[^\"]*\"|(?:[^\\s'\"&|]|&(?!&)|\\|(?!\\|))+))?))*\\s*$",
+      "description": "VAR, !VAR, VAR == value, or VAR != value joined with && and ||. Parentheses are not supported."
+    },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/output"
+      },
+      "default": []
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": [
+            "agent_comment",
+            "session_id",
+            "url",
+            "text",
+            "artifact",
+            "var"
+          ]
+        },
+        "label": {
+          "type": ["string", "null"]
+        },
+        "bodyFrom": {
+          "type": ["string", "null"]
+        },
+        "valueFrom": {
+          "type": ["string", "null"]
+        },
+        "status": {
+          "oneOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "enum": [
+                "backlog",
+                "todo",
+                "in_progress",
+                "in_review",
+                "done",
+                "cancelled",
+                "blocked"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "type": ["string", "null"]
+        },
+        "name": {
+          "type": ["string", "null"]
+        },
+        "filename": {
+          "type": ["string", "null"],
+          "description": "Accepted by the schema but currently unused by the runtime."
+        },
+        "nameFrom": {
+          "type": ["string", "null"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "var"
+              }
+            }
+          },
+          "then": {
+            "required": ["name", "valueFrom"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              },
+              "valueFrom": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "followup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "workflow"],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "prompt": {
+          "type": "string",
+          "maxLength": 20000,
+          "default": "",
+          "description": "Prompt for the followup run. Some Agentis backends require a non-empty value."
+        },
+        "workflow": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "not": {
+            "enum": [".", ".."]
+          }
+        },
+        "continue_previous_run": {
+          "type": "boolean",
+          "default": false
+        },
+        "if": {
+          "$ref": "#/definitions/condition"
+        }
+      }
+    }
+  }
+}
