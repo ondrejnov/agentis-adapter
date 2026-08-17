@@ -11,3 +11,4 @@ __pycache__/
 dist
 
 .vscode/last-open-files.json
+agent-container
