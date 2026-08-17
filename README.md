@@ -146,7 +146,7 @@ workflow:
           *claude*) ADAPTER=claude ;;
           *) ADAPTER=opencode ;;
         esac
-        agentiscode ${RUN_AGENT_FLAGS:-} --adapter "$ADAPTER" \
+        agentiscode-agentis ${RUN_AGENT_FLAGS:-} --adapter "$ADAPTER" \
           ${AGENTIS_SESSION_ID:+--resume "$AGENTIS_SESSION_ID"} \
           --model "$MODEL" \
           --effort "$AGENTIS_EFFORT" \
@@ -301,7 +301,7 @@ Kompletní formát, executory a outputs popisuje [dokumentace workflow](docs/wor
 
 ## Sjednocené Agent CLI
 
-Součástí projektu je `agentiscode`, tenká společná vrstva nad podporovanými coding agenty. Lze ji použít ve workflow i samostatně:
+Samostatný balíček `agentiscode` je tenká společná vrstva nad podporovanými coding agenty. Adapter jej používá jako lokální Poetry dependency z `/var/www/agentiscode-cli`.
 
 ```bash
 poetry run agentiscode --adapter opencode --model openai/gpt-5 "oprav failing test"
@@ -309,6 +309,8 @@ poetry run agentiscode --adapter claude --model claude-sonnet-4-5 "zreviduj API"
 ```
 
 `agentiscode` sjednocuje stream událostí, finální odpověď a session ID. Workflow tak nemusí řešit rozdíly mezi jednotlivými CLI.
+
+Agentis workflow používá příkaz `agentiscode-agentis`, který zůstává v tomto projektu a nad obecným CLI přidává task/run kontext a telemetrii do Agentisu.
 
 ## Provoz
 

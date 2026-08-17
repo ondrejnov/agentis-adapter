@@ -22,10 +22,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
-from claude.activity_mapper import ClaudeActivityMapper
-from claude.client import ClaudeEvent
+from agentiscode import AgentEvent
+from agentiscode.runners.claude import ClaudeEvent
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
-from common.agentiscode import AgentEvent
+from common.agentis_activity_mapper import ClaudeActivityMapper
 
 
 @dataclass
