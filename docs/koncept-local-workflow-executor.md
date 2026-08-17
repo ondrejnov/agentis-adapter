@@ -42,7 +42,7 @@ workflow:
   timeoutSeconds: 600
   steps:
     - name: Run agent
-      run: agentiscode < "$AGENTIS_PROMPT_FILE"
+      run: ./scripts/run-task.sh < "$AGENTIS_PROMPT_FILE"
 ```
 
 Globální default lze nastavit v prostředí adapteru:

@@ -40,8 +40,6 @@ class Settings:
     websocket_reconnect_max_attempts: int = 0
     #: Kolik sekund po žádosti o shutdown čekat na doběhnutí běžících agentů a workflow; 0 = bez limitu.
     shutdown_grace_period: float = 0.0
-    agentiscode_command: str = "agentiscode"
-    agentiscode_adapter: str = "claude"
 
     def validate_passive_websocket(self) -> None:
         if not self.agentis_ws_endpoint:
@@ -105,8 +103,6 @@ def _build_settings() -> Settings:
         websocket_reconnect_max_delay=float(_get_env("AGENTIS_WS_RECONNECT_MAX_DELAY", "30") or "30"),
         websocket_reconnect_max_attempts=int(_get_env("AGENTIS_WS_RECONNECT_MAX_ATTEMPTS", "0") or "0"),
         shutdown_grace_period=float(_get_env("ADAPTER_SHUTDOWN_GRACE_PERIOD", "0") or "0"),
-        agentiscode_command=_get_env("AGENTISCODE_COMMAND", "agentiscode") or "agentiscode",
-        agentiscode_adapter=(_get_env("AGENTISCODE_ADAPTER", "opencode") or "opencode").strip().lower(),
     )
 
 

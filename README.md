@@ -2,13 +2,13 @@
 
 **Proměňte tickety v řízené běhy AI coding agentů.**
 
-Agentis Adapter propojuje [Agentis](https://agentis.cz) s OpenCode a Claude Code. Vývojář zadá práci v Agentisu, adapter připraví izolovaný workspace, spustí agenta podle workflow projektu a vrátí průběh i výsledek zpět k ticketu.
+Agentis Adapter propojuje [Agentis](https://agentis.cz) s projektovými workflow. Vývojář zadá práci v Agentisu, adapter připraví izolovaný workspace, spustí deklarované kroky a vrátí průběh i výsledek zpět k ticketu.
 
 Místo dalšího chatovacího okna získáte opakovatelný proces pro práci agentů nad skutečnými repozitáři.
 
 ## Proč Agentis Adapter
 
-- **Jeden vstup pro různé agenty**: OpenCode, Claude Code a vlastní kroky v jednom workflow.
+- **Libovolné kroky**: testy, buildy, deploye i volitelní coding agenti v jednom workflow.
 - **Workflow patří projektu**: přípravu prostředí, testy, commit, pull request i úklid definujete v YAML vedle kódu.
 - **Izolované běhy**: každý task může dostat vlastní git worktree a větev.
 - **Průběh přímo u ticketu**: aktivita, komentáře, odkazy a artefakty se vracejí do Agentisu.
@@ -20,8 +20,8 @@ Místo dalšího chatovacího okna získáte opakovatelný proces pro práci age
 flowchart LR
     ticket["Ticket v Agentisu"] --> adapter["Agentis Adapter"]
     adapter --> workspace["Worktree a workflow"]
-    workspace --> agent["OpenCode / Claude Code"]
-    agent --> checks["Testy, PR, vlastní kroky"]
+    workspace --> steps["Libovolné workflow kroky"]
+    steps --> checks["Testy, PR, vlastní nástroje"]
     checks --> result["Komentář, aktivita, artefakty"]
     result --> ticket
 ```
@@ -33,7 +33,6 @@ flowchart LR
 - Python `3.13`
 - [Poetry](https://python-poetry.org/)
 - přístupový token a ID adapteru z Agentisu
-- alespoň jeden podporovaný agent CLI (`opencode`, `claude` nebo `claude-p`)
 - Docker nebo `kubectl` pouze v případě, že je používá zvolený executor
 
 ### 2. Instalace
@@ -299,16 +298,16 @@ Příklad je záměrně obecný. Cesty, příkazy, image, preview doménu a Kube
 
 Kompletní formát, executory a outputs popisuje [dokumentace workflow](docs/workflow.md).
 
-## Sjednocené Agent CLI
+## Volitelný AgentisCode Krok
 
-Součástí projektu je `agentiscode`, tenká společná vrstva nad podporovanými coding agenty. Lze ji použít ve workflow i samostatně:
+Coding agent není součástí ani povinnou závislostí adapteru. Samostatný balíček `agentiscode` lze nainstalovat do hosta nebo workflow image a použít jako jeden volitelný krok:
 
 ```bash
-poetry run agentiscode --adapter opencode --model openai/gpt-5 "oprav failing test"
-poetry run agentiscode --adapter claude --model claude-sonnet-4-5 "zreviduj API"
+agentiscode --adapter opencode --model openai/gpt-5 "oprav failing test"
+agentiscode --adapter claude --model claude-sonnet-4-5 "zreviduj API"
 ```
 
-`agentiscode` sjednocuje stream událostí, finální odpověď a session ID. Workflow tak nemusí řešit rozdíly mezi jednotlivými CLI.
+`agentiscode` nadále podporuje `--task-id`, `--run-id`, průběžný reporting do Agentisu a souborové outputs. Adapter jej neimportuje ani neinstaluje; workflow může stejně dobře spustit jiný příkaz nebo žádného agenta.
 
 ## Provoz
 

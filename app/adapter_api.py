@@ -1,10 +1,9 @@
 """Single generic serving adapter.
 
-Run lifecycle (agent execution, commit, PR) běží přes workflow runtime; serving
-adapter poskytuje jen git worktree/snapshot plumbing z
-:class:`~common.git_adapter.GitAdapterService`. Konkrétní CLI agent (opencode /
-claude / claude-p) se vybírá až v workflow kroku (`agentiscode --adapter …`), ne
-tady — proto stačí jeden generický serving adapter místo per-agent variant.
+Run lifecycle běží přes workflow runtime; serving adapter poskytuje jen git
+worktree/snapshot plumbing z :class:`~common.git_adapter.GitAdapterService`.
+Konkrétní nástroje vybírá až workflow, proto stačí jeden generický serving
+adapter bez importů nebo per-tool variant.
 """
 
 from __future__ import annotations
