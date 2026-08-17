@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from app.agentiscode import _append_context_ids, _command_display, run
-from common.agentiscode import (
+from agentiscode.core import (
     AgentConfig,
     AgentEvent,
     AgentWrapper,
@@ -16,8 +16,8 @@ from common.agentiscode import (
     normalize_adapter,
     tool_title,
 )
-from claude.client import ClaudeEvent
-from opencode.runner import OpenCodeEvent
+from agentiscode.runners.claude import ClaudeEvent
+from agentiscode.runners.opencode import OpenCodeEvent
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +236,7 @@ def test_wrapper_streams_opencode_and_synthesizes_result(monkeypatch) -> None:
         )
         + "\n",
     ]
-    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
+    monkeypatch.setattr("agentiscode.runners.opencode.asyncio.create_subprocess_exec", _fake_subprocess(lines))
 
     async def collect() -> list[AgentEvent]:
         wrapper = AgentWrapper(AgentConfig(adapter="opencode", model="haiku", cwd="/work"))
@@ -292,7 +292,7 @@ def test_wrapper_adds_native_session_id_to_events_from_subtasks(monkeypatch) -> 
         )
         + "\n",
     ]
-    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
+    monkeypatch.setattr("agentiscode.runners.opencode.asyncio.create_subprocess_exec", _fake_subprocess(lines))
 
     async def collect() -> list[AgentEvent]:
         wrapper = AgentWrapper(AgentConfig(adapter="opencode"))
@@ -329,7 +329,7 @@ def test_wrapper_streams_claude_with_native_result(monkeypatch) -> None:
         )
         + "\n",
     ]
-    monkeypatch.setattr("claude.client.asyncio.create_subprocess_exec", _fake_subprocess(lines))
+    monkeypatch.setattr("agentiscode.runners.claude.asyncio.create_subprocess_exec", _fake_subprocess(lines))
 
     async def collect() -> list[AgentEvent]:
         wrapper = AgentWrapper(AgentConfig(adapter="cloud", model="claude-x", cwd="/w"))
@@ -357,7 +357,7 @@ def test_cli_json_mode_emits_json_lines(monkeypatch, capsys) -> None:
         )
         + "\n",
     ]
-    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
+    monkeypatch.setattr("agentiscode.runners.opencode.asyncio.create_subprocess_exec", _fake_subprocess(lines))
 
     exit_code = run(["--adapter", "opencode", "--json", "udelej", "X"])
 
@@ -432,7 +432,9 @@ def test_cli_logs_complete_command(monkeypatch, capsys) -> None:
     monkeypatch.setattr("app.agentiscode._run", fake_run)
 
     assert run(["--adapter", "opencode", "prompt with spaces"]) == 0
-    assert capsys.readouterr().err == ("[agentiscode] command: agentiscode --adapter opencode 'prompt with spaces'\n")
+    assert capsys.readouterr().err == (
+        "[agentiscode-agentis] command: agentiscode-agentis --adapter opencode 'prompt with spaces'\n"
+    )
 
 
 def test_command_display_redacts_explicit_tokens() -> None:
@@ -448,7 +450,7 @@ def test_command_display_redacts_explicit_tokens() -> None:
     )
 
     assert command == (
-        "agentiscode --adapter opencode --agentis-token REDACTED --agentis-service-token=REDACTED prompt"
+        "agentiscode-agentis --adapter opencode --agentis-token REDACTED --agentis-service-token=REDACTED prompt"
     )
     assert "user-secret" not in command
     assert "service-secret" not in command
@@ -471,7 +473,7 @@ def test_cli_task_id_drives_telemetry(monkeypatch) -> None:
         )
         + "\n",
     ]
-    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
+    monkeypatch.setattr("agentiscode.runners.opencode.asyncio.create_subprocess_exec", _fake_subprocess(lines))
 
     events: dict[str, Any] = {"started": False, "handled": 0, "finished": False, "kwargs": None}
 
@@ -534,7 +536,7 @@ def test_cli_primary_session_false_drives_telemetry(monkeypatch) -> None:
         )
         + "\n",
     ]
-    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
+    monkeypatch.setattr("agentiscode.runners.opencode.asyncio.create_subprocess_exec", _fake_subprocess(lines))
 
     events: dict[str, Any] = {"kwargs": None}
 
@@ -586,7 +588,7 @@ def test_cli_last_message_to_comment_enables_final_comment(monkeypatch) -> None:
         )
         + "\n",
     ]
-    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
+    monkeypatch.setattr("agentiscode.runners.opencode.asyncio.create_subprocess_exec", _fake_subprocess(lines))
 
     events: dict[str, Any] = {"kwargs": None}
 
@@ -637,7 +639,7 @@ def test_cli_final_output_and_session_output_write_files(monkeypatch, tmp_path) 
         )
         + "\n",
     ]
-    monkeypatch.setattr("opencode.runner.asyncio.create_subprocess_exec", _fake_subprocess(lines))
+    monkeypatch.setattr("agentiscode.runners.opencode.asyncio.create_subprocess_exec", _fake_subprocess(lines))
 
     final_path = tmp_path / "outputs" / "final-comment.md"
     session_path = tmp_path / "outputs" / "session-id"

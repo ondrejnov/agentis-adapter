@@ -16,7 +16,7 @@ Klíčové zdrojáky:
 | `common/git_adapter.py` | `GitAdapterService` — worktree a branch per task |
 | `common/agentis.py` | `AgentisJsonRpcClient` — HTTP JSON-RPC klient na Agentis backend |
 | `common/workflow/` | Workflow runtime a executory (viz [docs/workflow.md](workflow.md)) |
-| `agentiscode/cli.py`, `app/agentiscode.py` | Console entrypoint a implementace sjednoceného CLI wrapperu |
+| `app/agentiscode.py` | Agentis integrační wrapper `agentiscode-agentis` nad samostatným balíčkem `agentiscode` |
 
 ## Architektura v kostce
 
@@ -67,11 +67,11 @@ Důležité vlastnosti:
 | Příkaz | Co dělá |
 | --- | --- |
 | `agentis-adapter [--id <adapter-id>]` | Spustí adapter proces: FastAPI app (observabilita) + WebSocket transport |
-| `agentiscode …` | Samostatný CLI wrapper nad OpenCode/Claude Code (viz níže) |
+| `agentiscode-agentis …` | Agentis telemetrie a kontext nad samostatným CLI balíčkem `agentiscode` |
 
 Serving adapter je **jeden generický** (`app/adapter_api.py`), žádný `--adapter` výběr. Definuje `create_app()` (FastAPI app se službami na `app.state`) a tabulku `_DISPATCH` (JSON-RPC metody → handler) a `adapter_factory` instancuje `GitAdapterService` napřímo — adapter dělá jen git worktree/snapshot plumbing.
 
-Konkrétní CLI agent (`opencode` / `claude` / `claude-p`) se nevybírá na serving straně, ale až ve workflow kroku `run-agent` (`workflows/_base.yaml`), který podle modelu zavolá `agentiscode --adapter <X>`. Mapování názvů agenta žije v `common/agentiscode.py` (`ADAPTER_ALIASES`):
+Konkrétní CLI agent (`opencode` / `claude` / `claude-p`) se nevybírá na serving straně, ale až ve workflow kroku `run-agent` (`workflows/_base.yaml`), který podle modelu zavolá `agentiscode-agentis --adapter <X>`. Mapování názvů agenta poskytuje samostatný balíček `agentiscode`:
 
 | Adapter (`agentiscode -a`) | Aliasy | Agent |
 | --- | --- | --- |
@@ -109,13 +109,13 @@ Průběh `start` / `add_message`:
 2. **Prompt a přílohy** — adapter složí prompt z kontextu nebo follow-up zprávy a materializuje přílohy do workspace.
 3. **Výběr a validace workflow** — pojmenovaná akce použije `<name>.yaml`, project scope `project.yaml`, ostatní runy `default.yaml`. Projektový soubor má přednost před bundled fallbackem z `ADAPTER_BUNDLED_WORKFLOW_DIR`. YAML se synchronně načte, vyřeší, interpoluje a zvaliduje; zároveň vzniknou `prompt.md` a `context.json`.
 4. **Spuštění** — manager zaregistruje run a spustí background thread. Ten pořídí source snapshot, připraví executor a vykoná DAG přes Kubernetes Joby nebo lokální bash procesy. `start` / `add_message` proto vrací rychle a bez `session_id`.
-5. **Reporting** — workflow posílá `run.adapter_event`; agentí krok s `agentiscode` může navíc průběžně posílat session ID a aktivitu. Po doběhnutí manager aplikuje deklarované outputs, například completion komentář, přílohy, artefakty a followup akce.
+5. **Reporting** — workflow posílá `run.adapter_event`; agentí krok s `agentiscode-agentis` může navíc průběžně posílat session ID a aktivitu. Po doběhnutí manager aplikuje deklarované outputs, například completion komentář, přílohy, artefakty a followup akce.
 
 Manager blokuje start, pokud v tomto procesu už eviduje aktivní workflow stejného tasku, chybou 409 (busy); evidence není sdílená mezi procesy. `undo` funguje jen se snapshotem dostupným v in-memory evidenci. Pojmenovaná workflow snapshot nevytvářejí a po přepsání evidence tasku proto může `undo` vrátit chybu; project scope naopak obnovuje přímo projektový workspace. Detailně viz [docs/workflow.md](workflow.md).
 
-## `agentiscode`
+## `agentiscode-agentis`
 
-Console script `agentiscode` vstupuje přes `agentiscode/cli.py`, který načte implementaci z `app/agentiscode.py`. Příkaz je samostatně použitelný a zároveň tvoří standardní agentí krok dodávaných workflow. Sjednocuje `opencode run` a `claude` do proudu `AgentEvent` (viz `common/agentiscode.py`). Když dostane údaje pro Agentis, `common/agentis_telemetry.py` průběžně posílá session ID a aktivitu. Session ID zapisuje do workflow outputu hned, jak je známé; finální odpověď až při nepřerušeném dokončení běhu.
+Obecný console script `agentiscode`, normalizované eventy a runnery jsou v samostatném projektu `/var/www/agentiscode-cli`. Tento adapter na balíčku závisí a přes `app/agentiscode.py` poskytuje příkaz `agentiscode-agentis`, který přidává task/run parametry, kontextové tagy a `common/agentis_telemetry.py`. Session ID zapisuje do workflow outputu hned, jak je známé; finální odpověď až při nepřerušeném dokončení běhu.
 
 ## Komunikace s Agentisem
 
@@ -123,7 +123,7 @@ Veškerý reporting jde přes `AgentisJsonRpcClient` jako HTTP JSON-RPC na `AGEN
 
 | Metoda | Kdy |
 | --- | --- |
-| `task.start_run` | Samostatný `agentiscode` běh bez již předaného `run_id` |
+| `task.start_run` | Samostatný `agentiscode-agentis` běh bez již předaného `run_id` |
 | `run.adapter_event` | Průběh lifecycle a workflow kroků (`started`, `success`, `failed`, `skipped`) |
 | `run.store_session_id` | Po založení session — Agentis si session přiřadí k runu |
 | `session.store_activity_log` | Průběžný snapshot aktivity agenta (zprávy/tool cally) |
@@ -152,7 +152,7 @@ Selhání průběžné telemetrie je best-effort a loguje se na stderr; selhán�
 | `DOCKER_COMMAND` | `docker` | Příkaz pro nativní Docker executor |
 | `AGENTIS_WS_HEARTBEAT_INTERVAL`, `AGENTIS_WS_MAX_MESSAGE_SIZE`, `AGENTIS_WS_RECONNECT_*` | viz `common/config.py` | Ladění WebSocket transportu |
 
-`Settings` stále načítá `AGENTISCODE_COMMAND` a `AGENTISCODE_ADAPTER`, ale současný workflow ani CLI tyto hodnoty nekonzumují; dodávaný `_base.yaml` volá `agentiscode` přímo a předává mu explicitní `--adapter`.
+`Settings` stále načítá `AGENTISCODE_COMMAND` a `AGENTISCODE_ADAPTER`, ale současný workflow ani CLI tyto hodnoty nekonzumují; dodávaný `_base.yaml` volá `agentiscode-agentis` přímo a předává mu explicitní `--adapter`.
 
 ## Observabilita
 
@@ -169,7 +169,7 @@ Selhání průběžné telemetrie je best-effort a loguje se na stderr; selhán�
 - workflow, executory a outputs: `tests/test_workflow.py`,
 - WebSocket transport a reconnect: `tests/test_passive_websocket.py`,
 - HTTP klient a autentizační hlavičky: `tests/test_agentis_rpc.py`,
-- CLI wrapper, normalizace agentů a telemetrie: `tests/test_agentiscode.py`, `tests/test_agentis_telemetry.py`, `tests/test_claudecode.py`, `tests/test_opencode.py`, `tests/test_claude_client.py`,
+- Agentis CLI integrace a telemetrie: `tests/test_agentiscode.py`, `tests/test_agentis_telemetry.py`, `tests/test_claudecode.py`; obecné CLI a runnery testuje samostatný projekt `agentiscode-cli`,
 - observabilita a shutdown: `tests/test_status.py`, `tests/test_shutdown.py`,
 - snapshoty a screenshoty: `tests/test_source_snapshot.py`, `tests/test_screenshots.py`.
 

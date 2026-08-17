@@ -34,7 +34,7 @@ workflow:
           *claude*) ADAPTER=claude-p ;;
           *) ADAPTER=opencode ;;
         esac
-        agentiscode ${RUN_AGENT_FLAGS:-} --adapter "$ADAPTER" \
+        agentiscode-agentis ${RUN_AGENT_FLAGS:-} --adapter "$ADAPTER" \
           ${AGENTIS_SESSION_ID:+--resume "$AGENTIS_SESSION_ID"} \
           --model "$MODEL" \
           --effort "$AGENTIS_EFFORT" \

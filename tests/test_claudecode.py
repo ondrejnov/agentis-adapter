@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from claude.activity_mapper import ClaudeActivityMapper
+from common.agentis_activity_mapper import ClaudeActivityMapper
 
 
 # ---------------------------------------------------------------------------

@@ -40,7 +40,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from claude.client import ClaudeEvent
+from agentiscode.runners.claude import ClaudeEvent
 
 
 # ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@
 
 Workflow režim přesouvá projektově proměnlivou logiku běhu agenta (příprava prostředí, spuštění agenta, commit, pull request, úklid) z Python adapteru do deklarativního YAML souboru ve worktree projektu. Adapter pak jen orchestruje: načte YAML, naplánuje kroky podle závislostí, spouští je přes zvolený executor a po doběhnutí aplikuje výstupy úspěšných kroků (komentář, přílohy, artefakty) do Agentisu.
 
-Workflow je jediný běhový model adapteru pro spuštění agenta. Hodnota `context.adapter.runtime = "docker"` nebo `"local"` už nevolí samostatný CLI runtime; pouze vynutí odpovídající executor workflow. Samotný agent je jedním z kroků workflow (typicky `agentiscode` v kroku „Run agent“), nikoli proces spouštěný natvrdo přímo adapterem.
+Workflow je jediný běhový model adapteru pro spuštění agenta. Hodnota `context.adapter.runtime = "docker"` nebo `"local"` už nevolí samostatný CLI runtime; pouze vynutí odpovídající executor workflow. Samotný agent je jedním z kroků workflow (typicky `agentiscode-agentis` v kroku „Run agent“), nikoli proces spouštěný natvrdo přímo adapterem.
 
 Klíčové zdrojáky:
 
@@ -147,7 +147,7 @@ workflow:
       env:
         RUN_AGENT_FLAGS: --json
       run: |
-        agentiscode ${RUN_AGENT_FLAGS:-} ...
+        agentiscode-agentis ${RUN_AGENT_FLAGS:-} ...
       outputs:
         - type: session_id
           valueFrom: outputs/session-id
@@ -166,7 +166,7 @@ workflow:
 
 Resoluce proběhne při načtení souboru (po `extends` merge), runtime už vidí jen plně rozbalené kroky. Parametrizace skriptu se dělá přes env proměnné s defaulty v bashi (`${VAR:-default}`), ne přes interpolační tokeny — `[%TOKEN%]` v šabloně se nahradí built-in hodnotami runu jako kdekoli jinde.
 
-Dodávaná šablona `run-agent` v `_base.yaml` spouští agenta (`agentiscode`, adapter CLI podle modelu, resume session) a parametrizuje se přes `RUN_AGENT_FLAGS` (default `--json`), `RUN_AGENT_OUTPUT_DIR` (default `$AGENTIS_RUN_DIR/outputs`; při přepisu je nutné přepsat i `outputs`, jejich cesty se čtou relativně k output rootu runu) a `RUN_AGENT_STREAM_FILTER` (příkaz, kterým proteče stdout agenta, default `cat` — Slack workflow tudy posílá stream do `scripts/slack_stream.py`).
+Dodávaná šablona `run-agent` v `_base.yaml` spouští agenta (`agentiscode-agentis`, adapter CLI podle modelu, resume session) a parametrizuje se přes `RUN_AGENT_FLAGS` (default `--json`), `RUN_AGENT_OUTPUT_DIR` (default `$AGENTIS_RUN_DIR/outputs`; při přepisu je nutné přepsat i `outputs`, jejich cesty se čtou relativně k output rootu runu) a `RUN_AGENT_STREAM_FILTER` (příkaz, kterým proteče stdout agenta, default `cat` — Slack workflow tudy posílá stream do `scripts/slack_stream.py`).
 
 ### Paralelní kroky (`needs` + `maxParallel`)
 

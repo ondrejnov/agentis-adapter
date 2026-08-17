@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from common.agentis_telemetry import AgentisTelemetry, _unified_to_native
-from common.agentiscode import AgentEvent
+from agentiscode import AgentEvent
 
 
 class FakeClient:

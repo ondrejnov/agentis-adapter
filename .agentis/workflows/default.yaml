@@ -37,18 +37,23 @@ workflow:
         - type: var
           name: ENV_READY
           valueFrom: .agentis/outputs/env-ready
+
     - name: Create virtualenv
       if: ENV_READY != 'true'
       run: python3.13 -m venv .venv
+
     - name: Lock dependencies
       if: ENV_READY != 'true'
       run: poetry lock --no-update --no-interaction --no-ansi
+
     - name: Install dependencies
       if: ENV_READY != 'true'
       run: poetry install --no-interaction --no-ansi
+
     - name: Build code-review graph
       if: ENV_READY != 'true'
       run: code-review-graph build
+
     - name: Run agent
       uses: run-agent
       env:
@@ -60,6 +65,7 @@ workflow:
           status: in_review
         - type: session_id
           valueFrom: .agentis/outputs/session-id
+
     - name: Commit changes
       run: |
         git add -A
