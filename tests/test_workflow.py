@@ -1893,9 +1893,48 @@ def test_failed_step_stops_workflow_and_reports_log_tail(tmp_path: Path) -> None
         if method == "run.adapter_event" and params["kind"] == "workflow_step" and params["status"] == "failed"
     ]
     assert len(failed_events) == 1
+    assert failed_events[0]["message"] == "Krok selhal (failed): Run agent"
     assert failed_events[0]["data"]["log_tail"] == "boom log"
+    assert "error" not in failed_events[0]["data"]
     assert not any(method == "task.add_agent_comment" for method, _ in calls)
     assert manager._runs[context.task_id].status == "failed"
+
+
+@pytest.mark.parametrize(
+    "error_event",
+    [
+        {"type": "error", "message": "Provider is temporarily rate-limited."},
+        {"type": "error", "data": {"message": "Legacy provider error."}},
+    ],
+)
+def test_failed_step_reports_agent_error_as_visible_message(tmp_path: Path, error_event: dict[str, Any]) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+    runner = FakeRunner()
+    runner.results = ["failed"]
+    runner.log_tail = "\n".join(
+        [
+            "[agentiscode] command: agentiscode --json",
+            "not valid json",
+            json.dumps(error_event),
+            json.dumps({"type": "result", "is_error": True}),
+        ]
+    )
+    manager, calls = _manager(tmp_path, runner)
+    context = _context()
+
+    manager.start_workflow(context, str(worktree), "udelej X")
+    _wait_done(manager, context.task_id)
+
+    failed_event = next(
+        params
+        for method, params in calls
+        if method == "run.adapter_event" and params["kind"] == "workflow_step" and params["status"] == "failed"
+    )
+    expected_error = error_event.get("message") or error_event["data"]["message"]
+    assert failed_event["message"] == f"Run agent: {expected_error}"
+    assert failed_event["data"]["error"] == expected_error
+    assert failed_event["data"]["log_tail"] == runner.log_tail
 
 
 # ---------------------------------------------------------------------------

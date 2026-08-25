@@ -777,23 +777,46 @@ class WorkflowManager:
         step: WorkflowStep,
         dependencies: list[list[int]],
     ) -> None:
+        agent_error = self._agent_error_from_log(completed.result.log_tail)
+        message = f"{step.name}: {agent_error}" if agent_error else f"Krok selhal ({completed.result.status}): {step.name}"
+        data = {
+            "step": completed.step_name,
+            "step_index": completed.index,
+            "needs": self._dependency_names(completed.index, run.workflow.workflow.steps, dependencies),
+            "job": completed.job_name,
+            "result": completed.result.status,
+            "log_tail": completed.result.log_tail,
+            "attempts": completed.attempts,
+            "continueOnError": step.continueOnError,
+        }
+        if agent_error:
+            data["error"] = agent_error
         self._emit_adapter_event(
             run.context,
             kind="workflow_step",
             status="failed",
             event_id=f"workflow_step:{run.context.run_id}:{run.attempt_id}:{completed.index}",
-            message=f"Krok selhal ({completed.result.status}): {step.name}",
-            data={
-                "step": completed.step_name,
-                "step_index": completed.index,
-                "needs": self._dependency_names(completed.index, run.workflow.workflow.steps, dependencies),
-                "job": completed.job_name,
-                "result": completed.result.status,
-                "log_tail": completed.result.log_tail,
-                "attempts": completed.attempts,
-                "continueOnError": step.continueOnError,
-            },
+            message=message,
+            data=data,
         )
+
+    @staticmethod
+    def _agent_error_from_log(log_tail: str) -> str | None:
+        error: str | None = None
+        for line in log_tail.splitlines():
+            try:
+                event = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(event, dict) or event.get("type") != "error":
+                continue
+            message = event.get("message")
+            if not isinstance(message, str):
+                data = event.get("data")
+                message = data.get("message") if isinstance(data, dict) else None
+            if isinstance(message, str) and message.strip():
+                error = message.strip()
+        return error
 
     def _emit_step_skipped(
         self,
