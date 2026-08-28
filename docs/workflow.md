@@ -57,7 +57,7 @@ Každý krok je `batch/v1 Job` obsluhovaný přes `kubectl` (apply / wait / logs
 
 ### `local`
 
-Kroky běží jako lokální bash subprocessy na hostu nad worktree, pod uživatelem adapter procesu, bez izolace. Pole `context`, `image`, `steps[].image`, `mounts`, `imagePullSecrets` a `steps[].resources` se ignorují s varováním. `ttlSecondsAfterFinished` a `deleteNamespace` se ignorují bez varování. Logy kroků jdou do `<run_dir>/logs/<job>.log`. Z hostitelského prostředí se nepropíší `AGENTIS_TOKEN`, `AGENTIS_API_TOKEN` ani `AGENTIS_SERVICE_TOKEN`; runtime env nebo `envFiles` ale mohou potřebné proměnné explicitně dodat.
+Kroky běží jako lokální bash subprocessy na hostu nad worktree, pod uživatelem adapter procesu, bez izolace. Pole `context`, `image`, `steps[].image`, `mounts`, `imagePullSecrets` a `steps[].resources` se ignorují s varováním. `ttlSecondsAfterFinished` a `deleteNamespace` se ignorují bez varování. Logy kroků jdou do `<run_dir>/logs/<job>.log`. Z hostitelského prostředí se nepropíší `AGENTIS_TOKEN`, `AGENTIS_API_TOKEN` ani `AGENTIS_SERVICE_TOKEN`; runtime env nebo host-side `envFiles` ale mohou potřebné proměnné explicitně dodat.
 
 ### `docker`
 
@@ -65,7 +65,9 @@ Každý krok běží jako kontejner spuštěný přes `docker run --rm`; příka
 
 Existující absolutní cesty `WORKDIR`, `AGENTIS_RUN_DIR` a `MAIN_DIR` se automaticky bind-mountují na stejnou cestu v kontejneru. `workflow.mounts` se navíc převede na bind mounty, pokud položka používá `hostPath`; `readOnly`, relativní `subPath` a typy `DirectoryOrCreate`/`FileOrCreate` jsou podporované. Jiné Kubernetes volume sources, `subPathExpr` a `mountPropagation` skončí čitelnou chybou. `imagePullSecrets`, `context` a `steps[].resources` se ignorují s varováním; přihlášení k registry musí být připravené v Docker credential store uživatele adapteru. `ttlSecondsAfterFinished` a `deleteNamespace` se ignorují.
 
-Všechny executory spouští `run` skript kroku přes stejný bash wrapper: `set -euo pipefail`, sourcing `envFiles`, `cd` do `workingDir` kroku (jinak workflow `workingDir`, jinak `$WORKDIR`).
+Adapter načte `envFiles` jednou na hostu při startu workflow a zmrazí jejich dotenv hodnoty do prostředí kroků. Soubory se nemountují ani nekopírují do Docker kontejneru nebo Kubernetes Podu a bash krok k jejich cestě nepotřebuje přístup. Pozdější soubor přepisuje dřívější; hodnoty z `envFiles` přepisují také `workflow.env`, runtime env a `steps[].env`. Jde o dotenv data (`KEY=value`, uvozovky a `export`), ne o shell skript; shellové příkazy a expanze se nespouštějí. Chybějící soubor ukončí start workflow chybou.
+
+Všechny executory spouští `run` skript kroku přes stejný bash wrapper: `set -euo pipefail`, potom `cd` do `workingDir` kroku (jinak workflow `workingDir`, jinak `$WORKDIR`).
 
 ## Struktura YAML
 
@@ -83,7 +85,7 @@ workflow:
   maxParallel: 4                # maximum současně běžících kroků v jednom runu
   ttlSecondsAfterFinished: 3600 # schema default: TTL dokončených K8s Jobů
   deleteNamespace: false        # po úspěchu smazat celý namespace (jen kubernetes)
-  envFiles:                     # soubory sourcované na začátku každého kroku
+  envFiles:                     # host-side dotenv soubory injektované do env kroků
     - /root/.config/agentis/agentis.env
   env:                          # env společné všem krokům
     TASK_NUMBER: "[%TASK_NUMBER%]"

@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any, Optional
 from uuid import uuid4
 
+from dotenv import dotenv_values
+
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 from common.artifacts.screenshots import clear_screenshot_images, collect_screenshot_images
 from common.artifacts.source_snapshot import (
@@ -168,6 +170,27 @@ class WorkflowManager:
             return runtime
         return (workflow.workflow.executor or self.settings.workflow_executor).strip().lower()
 
+    @staticmethod
+    def _inject_env_files(workflow: WorkflowFile) -> WorkflowFile:
+        """Read dotenv files on the host and freeze their values into every resolved step."""
+
+        env: dict[str, str] = {}
+        for filename in workflow.workflow.envFiles:
+            path = Path(filename).expanduser()
+            if not path.is_file():
+                raise FileNotFoundError(f"Workflow env file does not exist or is not a file: {path}")
+            values = dotenv_values(path, interpolate=False)
+            env.update({key: value if value is not None else "" for key, value in values.items()})
+
+        if not env:
+            return workflow.model_copy(
+                update={"workflow": workflow.workflow.model_copy(update={"envFiles": []})}
+            )
+
+        steps = [step.model_copy(update={"env": {**step.env, **env}}) for step in workflow.workflow.steps]
+        spec = workflow.workflow.model_copy(update={"envFiles": [], "steps": steps})
+        return workflow.model_copy(update={"workflow": spec})
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -233,7 +256,7 @@ class WorkflowManager:
             run_dir = worktree_path / ".agentis" / "runs" / attempt_id
 
         values = self._interpolation_values(context, worktree_path, namespace, run_dir=run_dir)
-        workflow = load_workflow_file(workflow_path, values)
+        workflow = self._inject_env_files(load_workflow_file(workflow_path, values))
         executor = self._resolve_executor(context, workflow)
         runner = self._runner_for(executor, workflow.workflow.context)
         if executor in {"kubernetes", "docker"}:

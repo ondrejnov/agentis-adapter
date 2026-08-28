@@ -5,7 +5,7 @@ protějšek :class:`~common.workflow.runtime.KubectlJobRunner` bez Kubernetes.
 Kubernetes-specifická pole workflow YAML (`image`, `mounts`,
 `imagePullSecrets`, `resources`) se ignorují; kroky běží pod uživatelem
 adapter procesu bez izolace, se stejným bash wrapperem (`set -euo pipefail`,
-sourcing `envFiles`, `cd` do workingDir kroku, jinak `"$WORKDIR"`) jako v Kubernetes.
+`cd` do workingDir kroku, jinak `"$WORKDIR"`) jako v Kubernetes.
 
 Bash je potřeba i na Windows (wrapper je bash syntaxe) — hledá se v PATH
 (`shutil.which`), takže funguje přes Git Bash nebo WSL; spawn/kill se větví
@@ -107,7 +107,7 @@ class LocalProcessRunner:
                 "bash nenalezen v PATH (na Windows nainstaluj Git Bash nebo WSL a přidej ho do PATH)",
             )
 
-        wrapper = build_bash_wrapper(spec.envFiles, step.run, workdir=step.workingDir or spec.workingDir)
+        wrapper = build_bash_wrapper(step.run, workdir=step.workingDir or spec.workingDir)
         try:
             with log_path.open("wb") as log_file:
                 process = subprocess.Popen(

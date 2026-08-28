@@ -14,7 +14,7 @@ Konfigurace přes env (chybějící hodnoty = čistý tee, žádné volání Sla
 
 - ``TASK_HEADER_SLACK_CHANNEL`` / ``TASK_HEADER_SLACK_MESSAGE_TS`` — adresát,
   ts pending zprávy posílá bridge v task headers,
-- ``SLACK_BOT_TOKEN`` — ze sourcovaného ``slack.env``,
+- ``SLACK_BOT_TOKEN`` — z host-side ``slack.env`` načteného adapterem,
 - ``SLACK_STREAM_INTERVAL`` — minimální odstup editací v sekundách (default 3;
   chat.update je Slack rate-limit Tier 3, ~50/min, default drží ~20/min).
 

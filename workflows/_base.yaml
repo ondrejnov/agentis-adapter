@@ -89,11 +89,6 @@ workflow:
       hostPath:
         path: /root/.config/gh
         type: DirectoryOrCreate
-    - name: agentis-config
-      mountPath: /root/.config/agentis
-      readOnly: true
-      hostPath:
-        path: /root/.config/agentis/
     - name: opencode-config
       mountPath: /root/.config/opencode
       hostPath:

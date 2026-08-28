@@ -98,7 +98,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "description": "File sourced by Bash before the step. Avoid spaces and shell metacharacters."
+            "description": "Host-side dotenv file loaded once at workflow start and injected into step environment; it is not mounted into the executor."
           },
           "default": []
         },

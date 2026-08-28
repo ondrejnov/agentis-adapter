@@ -167,7 +167,7 @@ class DockerContainerRunner:
             (
                 image,
                 "-lc",
-                build_bash_wrapper(spec.envFiles, step.run, workdir=working_dir, workdir_env="WORKDIR"),
+                build_bash_wrapper(step.run, workdir=working_dir, workdir_env="WORKDIR"),
             )
         )
         return command

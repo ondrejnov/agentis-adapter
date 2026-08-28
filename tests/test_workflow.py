@@ -65,8 +65,6 @@ workflow:
   workingDir: "[%WORKDIR%]"
   timeoutSeconds: 120
   ttlSecondsAfterFinished: 60
-  envFiles:
-    - /root/.config/agentis/agentis.env
   env:
     HOME: /root
     IS_SANDBOX: 1
@@ -666,13 +664,77 @@ def test_interpolation_replaces_allowlisted_tokens_and_rejects_unknown() -> None
 # ---------------------------------------------------------------------------
 
 
-def test_bash_wrapper_sets_pipefail_and_sources_env_files() -> None:
-    wrapper = build_bash_wrapper(["/root/.config/agentis/agentis.env"], "echo ahoj")
+def test_bash_wrapper_sets_pipefail_without_reading_env_files() -> None:
+    wrapper = build_bash_wrapper("echo ahoj")
     lines = wrapper.splitlines()
     assert lines[0] == "set -euo pipefail"
-    assert ". /root/.config/agentis/agentis.env" in lines
-    assert lines.index(". /root/.config/agentis/agentis.env") < lines.index("echo ahoj")
+    assert not any(line.startswith(". ") for line in lines)
     assert 'cd "$WORKDIR"' in lines
+
+
+def test_env_files_are_loaded_on_host_and_frozen_into_step_env(tmp_path: Path) -> None:
+    env_file = tmp_path / "host-only.env"
+    env_file.write_text("SHARED=from-file\nSECRET='with spaces'\nEMPTY\n", encoding="utf-8")
+    workflow_path = tmp_path / "workflow.yaml"
+    workflow_path.write_text(
+        f"""
+version: 1
+workflow:
+  image: registry.example/agent:1.0
+  envFiles:
+    - {env_file}
+  env:
+    SHARED: workflow
+  steps:
+    - name: Run
+      env:
+        SHARED: step
+      run: env
+""",
+        encoding="utf-8",
+    )
+    workflow = load_workflow_file(workflow_path, _values(tmp_path))
+
+    frozen = WorkflowManager._inject_env_files(workflow)
+
+    assert frozen.workflow.envFiles == []
+    assert frozen.workflow.steps[0].env == {"SHARED": "from-file", "SECRET": "with spaces", "EMPTY": ""}
+    manifest = build_job_manifest(
+        frozen,
+        frozen.workflow.steps[0],
+        namespace="test",
+        name="test",
+        labels={},
+        env={"SHARED": "runtime"},
+    )
+    container = manifest["spec"]["template"]["spec"]["containers"][0]
+    assert str(env_file) not in "\n".join(container["command"])
+    assert {item["name"]: item["value"] for item in container["env"]}["SECRET"] == "with spaces"
+
+    docker_env = {**frozen.workflow.env, **frozen.workflow.steps[0].env}
+    docker_command = DockerContainerRunner(_settings(tmp_path))._container_command(
+        frozen,
+        frozen.workflow.steps[0],
+        name="test",
+        labels={},
+        env=docker_env,
+        image="registry.example/agent:1.0",
+    )
+    assert str(env_file) not in docker_command
+    assert "SECRET" in docker_command
+    assert "with spaces" not in docker_command
+
+
+def test_env_files_must_exist_when_workflow_starts(tmp_path: Path) -> None:
+    workflow_path = tmp_path / "workflow.yaml"
+    workflow_path.write_text(
+        "version: 1\nworkflow:\n  envFiles: [/missing/host.env]\n  steps:\n    - name: Run\n      run: env\n",
+        encoding="utf-8",
+    )
+    workflow = load_workflow_file(workflow_path, _values(tmp_path))
+
+    with pytest.raises(FileNotFoundError, match="/missing/host.env"):
+        WorkflowManager._inject_env_files(workflow)
 
 
 def test_job_manifest_generation(tmp_path: Path) -> None:

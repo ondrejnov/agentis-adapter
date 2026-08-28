@@ -112,9 +112,10 @@ bash -lc <wrapper>
 Wrapper je společný s Kubernetes executorem:
 
 1. zapne `set -euo pipefail`,
-2. se `set -a` načte všechny `workflow.envFiles`,
-3. přejde do `step.workingDir`, jinak `workflow.workingDir`, jinak `$WORKDIR`,
-4. spustí `step.run`.
+2. přejde do `step.workingDir`, jinak `workflow.workingDir`, jinak `$WORKDIR`,
+3. spustí `step.run`.
+
+`workflow.envFiles` načte adapter jako dotenv soubory na hostu už při startu workflow a výsledné hodnoty předá procesu přes jeho environment. Bash wrapper soubory nesourcuje.
 
 Stejný pracovní adresář runner používá také jako `cwd` procesu. Bez explicitního
 `workingDir` použije `WORKDIR`, případně jako poslední fallback `run_dir`.
@@ -126,7 +127,8 @@ Prostředí procesu se skládá v tomto pořadí, pozdější hodnota vyhrává:
 1. prostředí procesu adapteru,
 2. `workflow.env`,
 3. runtime env vytvořené `WorkflowManagerem`,
-4. `step.env`.
+4. `step.env`,
+5. hodnoty z host-side `envFiles`.
 
 Z hostitelského prostředí se před merge odstraní `AGENTIS_TOKEN`,
 `AGENTIS_API_TOKEN` a `AGENTIS_SERVICE_TOKEN`. Tím tokeny adapteru neprosáknou
@@ -189,8 +191,8 @@ namespace se nevytváří; `delete_namespace()` je no-op.
   nelze po startu znovu dohledat ani spravovat a podle způsobu ukončení a
   platformy mohou zůstat běžet. Kubernetes Joby naproti tomu existují nezávisle
   na procesu adapteru.
-- `envFiles` a workflow skripty jsou spouštěný kód. Lokální executor je vhodný
-  pouze pro důvěryhodné workflow.
+- `envFiles` mohou načíst citlivá data z hostu a workflow skripty jsou spouštěný
+  kód. Lokální executor je vhodný pouze pro důvěryhodné workflow.
 
 ## Ověření
 
