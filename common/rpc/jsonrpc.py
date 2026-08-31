@@ -16,7 +16,7 @@ from common.models import (
     StartParams,
     UndoParams,
 )
-from common.prompt_context import build_comments_block
+from common.prompt_context import build_comments_block, build_parent_task_block
 from common.adapter_base import BaseAdapterService
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 from common.attachments import build_attachments_block, materialize_attachments, next_attachment_index
@@ -99,6 +99,15 @@ class AgentJsonRpcService:
             return prompt
         return f"{prompt}\n\n{block}" if prompt.strip() else block
 
+    @staticmethod
+    def _prompt_with_parent_task(prompt: str, context: AgentExecutionContextPayload) -> str:
+        if context.context_mode != "full":
+            return prompt
+        block = build_parent_task_block(context.parent_task)
+        if not block:
+            return prompt
+        return f"{prompt}\n\n{block}" if prompt.strip() else block
+
     def _start_workflow_run(
         self,
         run: RunStatePayload,
@@ -124,6 +133,7 @@ class AgentJsonRpcService:
                     worktree = working_dir
             if worktree is None:
                 worktree = str(adapter._workspace_path())
+            prompt = self._prompt_with_parent_task(prompt, context)
             prompt = self._prompt_with_attachments(prompt, context, worktree, message_attachments)
             workflow_step = self._run_adapter_step(
                 adapter,

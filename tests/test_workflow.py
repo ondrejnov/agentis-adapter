@@ -1899,7 +1899,9 @@ def test_repo_action_workflows_parse(tmp_path: Path) -> None:
     assert all(mount.volume_source() for mount in merge.workflow.mounts), "každý mount má volume source"
 
 
-def test_repo_default_workflow_auto_merge_finishes_task_done(tmp_path: Path) -> None:
+def test_repo_default_workflow_auto_merge_finishes_task_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     worktree = tmp_path / "wt"
     outputs_dir = worktree / ".agentis" / "outputs"
@@ -1912,6 +1914,7 @@ def test_repo_default_workflow_auto_merge_finishes_task_done(tmp_path: Path) -> 
     runner = FakeRunner()
     settings = replace(_settings(tmp_path), bundled_workflow_dir=repo_root / ".agentis" / "workflows")
     manager = WorkflowManager(settings, runner=runner)
+    monkeypatch.setattr(WorkflowManager, "_inject_env_files", staticmethod(lambda workflow: workflow))
     calls: list[tuple[str, dict[str, Any]]] = []
     manager._agentis_call = lambda method, params: calls.append((method, params))  # type: ignore[method-assign]
     context = _context(
@@ -2707,7 +2710,7 @@ case "$command" in
     entrypoint=""
     while [[ "${1:-}" == --* ]]; do
       case "$1" in
-        --rm|--init) shift ;;
+        --rm|--init|--privileged) shift ;;
         --env)
           if [[ "$2" == *=* ]]; then export "$2"; fi
           shift 2
@@ -2760,6 +2763,7 @@ def test_runtime_docker_runs_step_in_container_and_applies_outputs(
     docker_args = args_file.read_text(encoding="utf-8").splitlines()
     assert "--rm" in docker_args
     assert "--init" in docker_args
+    assert "--privileged" in docker_args
     assert "--env" in docker_args
     assert "--entrypoint" in docker_args
     assert "/bin/bash" in docker_args
@@ -2796,9 +2800,7 @@ def test_abort_without_in_memory_run_uses_context_docker_runtime(tmp_path: Path)
     assert len(runner.deleted) == 1
 
 
-def test_docker_cli_timeout_is_reported_as_runtime_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_docker_cli_timeout_is_reported_as_runtime_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runner = DockerContainerRunner(_settings(tmp_path))
 
     def timeout(*args: Any, **kwargs: Any) -> None:
@@ -2989,6 +2991,84 @@ def test_jsonrpc_start_none_context_uses_only_direct_prompt(tmp_path: Path) -> N
 
     prompt = manager._runs[context.task_id].prompt_file.read_text(encoding="utf-8")
     assert prompt == "Jen novy komentar"
+
+
+def test_jsonrpc_limited_context_omits_parent_task_from_prompt(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+    runner = FakeRunner()
+    service, manager, _calls = _service(tmp_path, runner)
+    context = _context(
+        context_mode="comments",
+        description="Task description",
+        parent_task={
+            "id": "task-parent",
+            "title": "Private parent context",
+            "description": "Must not be included",
+        },
+    )
+
+    service.start(StartParams(context=context))
+    _wait_done(manager, context.task_id)
+
+    prompt = manager._runs[context.task_id].prompt_file.read_text(encoding="utf-8")
+    assert "parent_task_context" not in prompt
+    assert "Private parent context" not in prompt
+
+
+def test_jsonrpc_start_includes_parent_task_and_subtasks_in_prompt(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+    runner = FakeRunner()
+    service, manager, _calls = _service(tmp_path, runner)
+    context = _context(
+        user_prompt="Implement current task",
+        parent_task_id="task-parent",
+        parent_task={
+            "id": "task-parent",
+            "number": 10,
+            "title": "Parent feature",
+            "description": "Feature description",
+            "status": 3,
+            "comments": [
+                {
+                    "id": "comment-parent",
+                    "author_type": "user",
+                    "author_name": "Ada",
+                    "body": "Coordinate the subtasks.",
+                }
+            ],
+            "subtasks": [
+                {
+                    "id": "task-77",
+                    "number": 11,
+                    "title": "Current task",
+                    "description": "Current description",
+                    "status": 2,
+                    "comments": [],
+                },
+                {
+                    "id": "task-78",
+                    "number": 12,
+                    "title": "Sibling task",
+                    "description": "Sibling description",
+                    "status": 1,
+                    "comments": [],
+                },
+            ],
+        },
+    )
+
+    service.start(StartParams(context=context))
+    _wait_done(manager, context.task_id)
+
+    prompt = manager._runs[context.task_id].prompt_file.read_text(encoding="utf-8")
+    assert prompt.startswith("Implement current task\n\n<parent_task_context>\n{")
+    assert '"title": "Parent feature"' in prompt
+    assert '"body": "Coordinate the subtasks."' in prompt
+    assert '"id": "task-77"' in prompt
+    assert '"id": "task-78"' in prompt
+    assert prompt.endswith("\n</parent_task_context>")
 
 
 def test_jsonrpc_add_message_reruns_ci_workflow_with_resume_session(tmp_path: Path) -> None:

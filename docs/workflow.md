@@ -61,7 +61,7 @@ Kroky běží jako lokální bash subprocessy na hostu nad worktree, pod uživat
 
 ### `docker`
 
-Každý krok běží jako kontejner spuštěný přes `docker run --rm`; příkaz lze změnit přes `DOCKER_COMMAND`. Executor vyžaduje výslednou `image` stejně jako Kubernetes, ale nepoužívá kube context ani namespace. Kontejnery dostávají stejné labels jako Kubernetes Joby, takže busy-check a `abort` používají `docker ps` a `docker rm --force`. Timeout kontejner rovněž odstraní. Díky lokální image cache odpadá vytváření Kubernetes Jobu a Podu.
+Každý krok běží jako privilegovaný kontejner spuštěný přes `docker run --rm --privileged`; příkaz lze změnit přes `DOCKER_COMMAND`. Executor vyžaduje výslednou `image` stejně jako Kubernetes, ale nepoužívá kube context ani namespace. Kontejnery dostávají stejné labels jako Kubernetes Joby, takže busy-check a `abort` používají `docker ps` a `docker rm --force`. Timeout kontejner rovněž odstraní. Díky lokální image cache odpadá vytváření Kubernetes Jobu a Podu.
 
 Existující absolutní cesty `WORKDIR`, `AGENTIS_RUN_DIR` a `MAIN_DIR` se automaticky bind-mountují na stejnou cestu v kontejneru. `workflow.mounts` se navíc převede na bind mounty, pokud položka používá `hostPath`; `readOnly`, relativní `subPath` a typy `DirectoryOrCreate`/`FileOrCreate` jsou podporované. Jiné Kubernetes volume sources, `subPathExpr` a `mountPropagation` skončí čitelnou chybou. `imagePullSecrets`, `context` a `steps[].resources` se ignorují s varováním; přihlášení k registry musí být připravené v Docker credential store uživatele adapteru. `ttlSecondsAfterFinished` a `deleteNamespace` se ignorují.
 

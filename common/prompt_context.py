@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
@@ -39,3 +40,17 @@ def build_comments_block(comments: list[Any] | None) -> str | None:
     if not entries:
         return None
     return "<comments>\n" + "\n\n".join(entries) + "\n</comments>"
+
+
+def build_parent_task_block(parent_task: Any | None) -> str | None:
+    if parent_task is None:
+        return None
+
+    if hasattr(parent_task, "model_dump"):
+        payload = parent_task.model_dump(mode="json")
+    elif isinstance(parent_task, dict):
+        payload = parent_task
+    else:
+        return None
+
+    return "<parent_task_context>\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n</parent_task_context>"

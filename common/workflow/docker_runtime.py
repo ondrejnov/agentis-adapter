@@ -96,9 +96,7 @@ class DockerContainerRunner:
         merged_env = {**spec.env, **env, **step.env}
         command = self._container_command(workflow, step, name=name, labels=labels, env=merged_env, image=image)
         process_env = os.environ.copy()
-        process_env.update(
-            {key: value for key, value in merged_env.items() if not self._is_docker_client_env(key)}
-        )
+        process_env.update({key: value for key, value in merged_env.items() if not self._is_docker_client_env(key)})
         log_path = run_dir / "logs" / f"{name}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -147,7 +145,7 @@ class DockerContainerRunner:
         if step.run is None:
             raise ValueError(f"Docker workflow step {step.name!r} has no run script")
         working_dir = step.workingDir or spec.workingDir or env.get("WORKDIR")
-        command = [self.settings.docker_command, "run", "--rm", "--init", "--name", name]
+        command = [self.settings.docker_command, "run", "--rm", "--init", "--privileged", "--name", name]
         for key, value in labels.items():
             command.extend(("--label", f"{key}={value}"))
         for key, value in env.items():

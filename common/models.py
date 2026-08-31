@@ -138,6 +138,26 @@ class AgentCommentPayload(BaseModel):
     attachments: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class AgentProjectRolePayload(BaseModel):
+    id: str
+    name: str
+    prompt: str | None = None
+    allowed_mcp: list[str] | None = None
+
+
+class AgentTaskContextPayload(BaseModel):
+    id: str
+    number: int | None = None
+    title: str | None = None
+    description: str = ""
+    status: int | None = None
+    comments: list[AgentCommentPayload] = Field(default_factory=list)
+
+
+class AgentParentTaskPayload(AgentTaskContextPayload):
+    subtasks: list[AgentTaskContextPayload] = Field(default_factory=list)
+
+
 class AgentExecutionContextPayload(BaseModel):
     run_id: str
     task_id: str
@@ -149,13 +169,15 @@ class AgentExecutionContextPayload(BaseModel):
     task_status: int | None = None
     task_number: int | None = None
     task_priority: int | None = None
-    parent_task_id: int | None = None
+    parent_task_id: str | int | None = None
+    parent_task: AgentParentTaskPayload | None = None
     headers: dict[str, Any] | None = None
     project_id: str | int | None = None
     project_title: str | None = None
     project_slug: str = "agentis"
     project_github_repo: str | None = None
     project_documentation: str | None = None
+    project_role: AgentProjectRolePayload | None = None
     ide: str | None = None
     base_branch: str = "master"
     agent_id: str | None = None

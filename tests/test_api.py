@@ -105,6 +105,31 @@ def make_start_params(run_id: str = "run-1") -> dict[str, Any]:
     }
 
 
+def test_execution_context_preserves_project_role_payload():
+    context = AgentExecutionContextPayload.model_validate(
+        {
+            "run_id": "run-1",
+            "task_id": "task-1",
+            "title": "Role context",
+            "project_slug": "agentis",
+            "working_dir": "/var/www/repo",
+            "project_role": {
+                "id": "role-1",
+                "name": "Reviewer",
+                "prompt": "Review the task before making changes.",
+                "allowed_mcp": ["agdoc", "postgres"],
+            },
+        }
+    )
+
+    assert context.model_dump()["project_role"] == {
+        "id": "role-1",
+        "name": "Reviewer",
+        "prompt": "Review the task before making changes.",
+        "allowed_mcp": ["agdoc", "postgres"],
+    }
+
+
 def test_create_worktree_uses_adapter_branch_override(monkeypatch, tmp_path):
     repository_root = Path("/var/www/repo")
     git_calls: list[tuple[Path, tuple[str, ...]]] = []
@@ -354,10 +379,49 @@ def test_start_accepts_extended_agent_execution_context_schema(tmp_path: Path):
                     **make_start_params()["context"],
                     "project_id": "proj-1",
                     "project_documentation": "https://docs.example.test/project",
+                    "project_role": {
+                        "id": "role-1",
+                        "name": "Runtime Reviewer",
+                        "prompt": "Review the runtime verification task.",
+                        "allowed_mcp": ["filesystem", "postgres"],
+                    },
                     "task_status": 2,
                     "task_number": 17,
                     "task_priority": 3,
-                    "parent_task_id": 12,
+                    "parent_task_id": "task-parent",
+                    "parent_task": {
+                        "id": "task-parent",
+                        "number": 10,
+                        "title": "Parent feature",
+                        "description": "Feature description",
+                        "status": 3,
+                        "comments": [
+                            {
+                                "id": "comment-parent",
+                                "author_type": "user",
+                                "author_name": "Alice",
+                                "body": "Parent context",
+                            }
+                        ],
+                        "subtasks": [
+                            {
+                                "id": "task-1",
+                                "number": 17,
+                                "title": "Implementace nove funkce",
+                                "description": "Popis ukolu",
+                                "status": 2,
+                                "comments": [],
+                            },
+                            {
+                                "id": "task-sibling",
+                                "number": 18,
+                                "title": "Sibling task",
+                                "description": "Sibling description",
+                                "status": 1,
+                                "comments": [],
+                            },
+                        ],
+                    },
                     "context_mode": "comments",
                     "agent_id": "agent-1",
                     "agent_title": "Builder",
@@ -384,10 +448,18 @@ def test_start_accepts_extended_agent_execution_context_schema(tmp_path: Path):
     context = response.json()["result"]["run"]["context"]
     assert context["project_id"] == "proj-1"
     assert context["project_documentation"] == "https://docs.example.test/project"
+    assert context["project_role"] == {
+        "id": "role-1",
+        "name": "Runtime Reviewer",
+        "prompt": "Review the runtime verification task.",
+        "allowed_mcp": ["filesystem", "postgres"],
+    }
     assert context["task_status"] == 2
     assert context["task_number"] == 17
     assert context["task_priority"] == 3
-    assert context["parent_task_id"] == 12
+    assert context["parent_task_id"] == "task-parent"
+    assert context["parent_task"]["title"] == "Parent feature"
+    assert [subtask["id"] for subtask in context["parent_task"]["subtasks"]] == ["task-1", "task-sibling"]
     assert context["context_mode"] == "comments"
     assert context["agent_id"] == "agent-1"
     assert context["agent_title"] == "Builder"
