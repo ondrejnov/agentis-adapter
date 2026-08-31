@@ -98,7 +98,7 @@ Centrální vstup do metod je `AgentJsonRpcService` (`common/rpc/jsonrpc.py`). P
 Průběh `start` / `add_message`:
 
 1. **Workspace** — `GitAdapterService` pro task scope založí nebo znovu použije worktree `<ADAPTER_WORKTREE_ROOT>/<task-safe-id>` na task větvi. Project scope běží přímo v `context.working_dir`.
-2. **Prompt a přílohy** — adapter složí prompt z kontextu nebo follow-up zprávy. V režimu plného kontextu přidá pro podúkol strukturovaný blok `<parent_task_context>` s nadřazeným úkolem, jeho komentáři a všemi podúkoly; přílohy materializuje do workspace.
+2. **Prompt a přílohy** — adapter složí prompt z kontextu nebo follow-up zprávy. V režimu plného kontextu přidá pro podúkol strukturovaný blok `<parent_task_context>` s nadřazeným úkolem, jeho komentáři a všemi podúkoly, ale bez polí `attachments`; přílohy aktuálního úkolu materializuje do workspace.
 3. **Výběr a validace workflow** — pojmenovaná akce použije `<name>.yaml`, project scope `project.yaml`, ostatní runy `default.yaml`. Projektový soubor má přednost před bundled fallbackem z `ADAPTER_BUNDLED_WORKFLOW_DIR`. YAML se synchronně načte, vyřeší, interpoluje a zvaliduje; zároveň vzniknou `prompt.md` a `context.json`.
 4. **Spuštění** — manager zaregistruje run a spustí background thread. Ten pořídí source snapshot, připraví executor a vykoná DAG přes Kubernetes Joby nebo lokální bash procesy. `start` / `add_message` proto vrací rychle a bez `session_id`.
 5. **Reporting** — workflow posílá `run.adapter_event`; agentí krok s `agentiscode` může navíc průběžně posílat session ID a aktivitu. Po doběhnutí manager aplikuje deklarované outputs, například completion komentář, přílohy, artefakty a followup akce.

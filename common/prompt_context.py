@@ -10,6 +10,14 @@ def _field(value: Any, name: str) -> Any:
     return getattr(value, name, None)
 
 
+def _without_attachments(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _without_attachments(item) for key, item in value.items() if key != "attachments"}
+    if isinstance(value, list):
+        return [_without_attachments(item) for item in value]
+    return value
+
+
 def build_comments_block(comments: list[Any] | None) -> str | None:
     if not comments:
         return None
@@ -53,4 +61,5 @@ def build_parent_task_block(parent_task: Any | None) -> str | None:
     else:
         return None
 
+    payload = _without_attachments(payload)
     return "<parent_task_context>\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n</parent_task_context>"

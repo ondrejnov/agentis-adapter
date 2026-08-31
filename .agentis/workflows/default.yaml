@@ -106,7 +106,7 @@ workflow:
         - type: var
           name: PR_CREATED
           valueFrom: .agentis/outputs/pull-request-url
-    - name: Auto merge rebase task branch
+    - name: Auto merge task branch
       if: PR_CREATED && AGENTIS_AUTO_MERGE
       run: |
         mkdir -p .agentis/outputs
@@ -119,20 +119,12 @@ workflow:
             exit 1
           fi
         fi
-    - name: Auto merge fast-forward base branch
-      if: PR_CREATED && AGENTIS_AUTO_MERGE
-      workingDir: "[%MAIN_DIR%]"
-      run: |
-        if ! git rebase "$BRANCH"; then
-          git stash push
-          git rebase "$BRANCH"
-          git stash pop
+        if ! git -C "$MAIN_DIR" rebase "$BRANCH"; then
+          git -C "$MAIN_DIR" stash push
+          git -C "$MAIN_DIR" rebase "$BRANCH"
+          git -C "$MAIN_DIR" stash pop
         fi
-        git push origin "${BASE_BRANCH}:refs/heads/${BASE_BRANCH}"
-    - name: Auto merge final comment
-      if: PR_CREATED && AGENTIS_AUTO_MERGE
-      run: |
-        mkdir -p .agentis/outputs
+        git -C "$MAIN_DIR" push origin "${BASE_BRANCH}:refs/heads/${BASE_BRANCH}"
         {
           printf 'Zamergoval jsem task větev do hlavní větve.\n'
           if [ -s .agentis/outputs/auto-merge-conflict-resolution.txt ]; then

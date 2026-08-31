@@ -1876,7 +1876,7 @@ def test_delete_namespace_ignored_by_local_executor(tmp_path: Path) -> None:
 def test_repo_action_workflows_parse(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     default = load_workflow_file(repo_root / WORKFLOW_FILE_RELPATH, _values(tmp_path))
-    assert any(step.name == "Auto merge final comment" for step in default.workflow.steps)
+    assert any(step.name == "Auto merge task branch" for step in default.workflow.steps)
     merge_followup = next(followup for followup in default.workflow.followups if followup.workflow == "merge")
     assert merge_followup.if_ == "PR_CREATED && !AGENTIS_AUTO_MERGE"
 
@@ -1923,14 +1923,13 @@ def test_repo_default_workflow_auto_merge_finishes_task_done(
     )
 
     result = manager.start_workflow(context, str(worktree), "udelej X")
-    assert "Auto merge final comment" in result["steps"]
+    assert "Auto merge task branch" in result["steps"]
     _wait_done(manager, context.task_id)
 
     assert manager._runs[context.task_id].status == "success"
     assert any(record["env"]["AGENTIS_AUTO_MERGE"] == "true" for record in runner.steps)
     executed_steps = [record["step"] for record in runner.steps]
-    assert "Auto merge rebase task branch" in executed_steps
-    assert "Auto merge fast-forward base branch" in executed_steps
+    assert executed_steps.count("Auto merge task branch") == 1
 
     comment_calls = [params for method, params in calls if method == "task.add_agent_comment"]
     assert len(comment_calls) == 2
@@ -3036,6 +3035,13 @@ def test_jsonrpc_start_includes_parent_task_and_subtasks_in_prompt(tmp_path: Pat
                     "author_type": "user",
                     "author_name": "Ada",
                     "body": "Coordinate the subtasks.",
+                    "attachments": [
+                        {
+                            "type": "url",
+                            "label": "Pull Request",
+                            "value": "https://github.com/example/project/pull/9/changes",
+                        }
+                    ],
                 }
             ],
             "subtasks": [
@@ -3053,7 +3059,14 @@ def test_jsonrpc_start_includes_parent_task_and_subtasks_in_prompt(tmp_path: Pat
                     "title": "Sibling task",
                     "description": "Sibling description",
                     "status": 1,
-                    "comments": [],
+                    "comments": [
+                        {
+                            "id": "comment-sibling",
+                            "author_type": "agent",
+                            "body": "Sibling result",
+                            "attachments": [{"type": "url", "value": "https://example.test/result"}],
+                        }
+                    ],
                 },
             ],
         },
@@ -3068,6 +3081,10 @@ def test_jsonrpc_start_includes_parent_task_and_subtasks_in_prompt(tmp_path: Pat
     assert '"body": "Coordinate the subtasks."' in prompt
     assert '"id": "task-77"' in prompt
     assert '"id": "task-78"' in prompt
+    assert '"body": "Sibling result"' in prompt
+    assert '"attachments"' not in prompt
+    assert "https://github.com/example/project/pull/9/changes" not in prompt
+    assert "https://example.test/result" not in prompt
     assert prompt.endswith("\n</parent_task_context>")
 
 
