@@ -112,7 +112,7 @@ workflow:
         mkdir -p .agentis/outputs
         git fetch origin "$BASE_BRANCH"
         if ! git rebase "refs/remotes/origin/${BASE_BRANCH}"; then
-          opencode run --model openai/gpt-5.5 "fix git conflict" \
+          opencode run --model openai/gpt-5.6 "fix git conflict" \
             | tee .agentis/outputs/auto-merge-conflict-resolution.txt
           if ! GIT_EDITOR=true git rebase --continue; then
             git rebase --abort
