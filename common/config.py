@@ -35,6 +35,7 @@ class Settings:
     agentis_adapter_id: str | None = None
     websocket_heartbeat_interval: float = 30.0
     websocket_max_message_size: int = 64 * 1024 * 1024
+    websocket_max_in_flight: int = 64
     websocket_reconnect_initial_delay: float = 1.0
     websocket_reconnect_max_delay: float = 30.0
     websocket_reconnect_max_attempts: int = 0
@@ -99,6 +100,7 @@ def _build_settings() -> Settings:
         websocket_max_message_size=int(
             _get_env("AGENTIS_WS_MAX_MESSAGE_SIZE", str(64 * 1024 * 1024)) or str(64 * 1024 * 1024)
         ),
+        websocket_max_in_flight=int(_get_env("AGENTIS_WS_MAX_IN_FLIGHT", "64") or "64"),
         websocket_reconnect_initial_delay=float(_get_env("AGENTIS_WS_RECONNECT_INITIAL_DELAY", "1") or "1"),
         websocket_reconnect_max_delay=float(_get_env("AGENTIS_WS_RECONNECT_MAX_DELAY", "30") or "30"),
         websocket_reconnect_max_attempts=int(_get_env("AGENTIS_WS_RECONNECT_MAX_ATTEMPTS", "0") or "0"),

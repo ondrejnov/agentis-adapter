@@ -87,7 +87,9 @@ workflow:
           exit 0
         fi
         git push --set-upstream origin "${BRANCH}:refs/heads/${BRANCH}"
-        if gh pr view "$BRANCH" --json url --jq .url >.agentis/outputs/pull-request-url 2>/dev/null; then
+        if gh pr list --state open --head "$BRANCH" --base "$BASE_BRANCH" --limit 1 \
+          --json url --jq '.[0].url // empty' >.agentis/outputs/pull-request-url \
+          && [ -s .agentis/outputs/pull-request-url ]; then
           echo "Pull request už existuje: $(cat .agentis/outputs/pull-request-url)"
         else
           gh pr create --base "$BASE_BRANCH" --head "$BRANCH" \
@@ -106,6 +108,7 @@ workflow:
         - type: var
           name: PR_CREATED
           valueFrom: .agentis/outputs/pull-request-url
+
     - name: Auto merge task branch
       if: PR_CREATED && AGENTIS_AUTO_MERGE
       run: |
@@ -136,6 +139,7 @@ workflow:
           bodyFrom: .agentis/outputs/auto-merge-comment.md
           status: done
           name: Merge agent
+
     - name: Report auto merge failure
       always: true
       run: |

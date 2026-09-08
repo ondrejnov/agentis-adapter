@@ -2,7 +2,7 @@
 
 ## K čemu adapter slouží
 
-Adapter je most mezi ticket systémem **Agentis** a projektovými workflow. Přijímá od Agentisu JSON-RPC příkazy (`start`, `add_message`, `abort`, `undo`), pro task připraví git worktree a spustí deklarativní workflow. Příprava prostředí, testy, agenti, commit, pull request i úklid jsou volitelné kroky workflow; jejich průběh a výstupy adapter posílá zpět do Agentisu.
+Adapter je most mezi ticket systémem **Agentis** a projektovými workflow. Přijímá od Agentisu JSON-RPC příkazy (`start`, `add_message`, `approve`, `abort`, `undo`), pro task připraví git worktree a spustí deklarativní workflow. Příprava prostředí, testy, agenti, commit, pull request i úklid jsou volitelné kroky workflow; jejich průběh a výstupy adapter posílá zpět do Agentisu.
 
 Klíčové zdrojáky:
 
@@ -11,7 +11,7 @@ Klíčové zdrojáky:
 | `app/cli.py` | Entrypoint `agentis-adapter` — spuštění transportů |
 | `common/rpc/passive_websocket.py` | WebSocket transport k Agentisu pro příjem JSON-RPC |
 | `common/rpc/dispatcher.py` | JSON-RPC dispatch — validace, mapování metod, chybové kódy |
-| `common/rpc/jsonrpc.py` | `AgentJsonRpcService` — logika metod `start`/`add_message`/`abort`/`undo` |
+| `common/rpc/jsonrpc.py` | `AgentJsonRpcService` — logika metod `start`/`add_message`/`approve`/`abort`/`undo` |
 | `common/adapter_base.py` | `BaseAdapterService` — společné workspace a reporting operace |
 | `common/git_adapter.py` | `GitAdapterService` — worktree a branch per task |
 | `common/agentis.py` | `AgentisJsonRpcClient` — HTTP JSON-RPC klient na Agentis backend |
@@ -24,7 +24,7 @@ flowchart LR
     agentis["Agentis backend"]
     websocket["Outbound WebSocket<br/>common/rpc/passive_websocket.py"]
     dispatcher["JSON-RPC dispatcher<br/>common/rpc/dispatcher.py"]
-    service["AgentJsonRpcService<br/>start / add_message / abort / undo"]
+    service["AgentJsonRpcService<br/>start / add_message / approve / abort / undo"]
     git["GitAdapterService<br/>worktree, branch, snapshots"]
     workflow["Workflow runtime<br/>WorkflowManager + YAML kroky"]
     executor{"Executor kroků"}
@@ -76,7 +76,7 @@ Serving adapter nevybírá ani neimportuje konkrétní nástroj. Každý krok je
 `PassiveWebSocketClient` (`common/rpc/passive_websocket.py`):
 
 - připojuje se na `AGENTIS_WS_ENDPOINT` s hlavičkami `Authorization: Bearer <API token>` a `X-Agentis-Adapter-Id: <AGENTIS_ADAPTER_ID>`; API token se bere z `AGENTIS_API_TOKEN`, jinak `AGENTIS_TOKEN`, a pro ne-localhost se vyžaduje `wss://`,
-- každou přijatou zprávu parsne jako JSON-RPC 2.0, zvaliduje parametry přes Pydantic model z `_DISPATCH` a handler spustí v threadu (`asyncio.to_thread`); odpověď posílá zpět jen pokud request měl `id`,
+- každou přijatou zprávu parsne jako JSON-RPC 2.0, zvaliduje parametry přes Pydantic model z `_DISPATCH` a handler spustí v threadu (`asyncio.to_thread`); requesty dispatchuje souběžně, odesílání přes jeden WebSocket serializuje a odpověď posílá zpět jen pokud request měl `id`,
 - při výpadku reconnectuje s exponenciálním backoffem (konfigurovatelné `AGENTIS_WS_RECONNECT_*`),
 - **graceful shutdown**: první SIGTERM/SIGINT zavře WebSocket (žádné nové zprávy), rozpracovaný dispatch doběhne a pak se čeká na běžící agenty a workflow až `ADAPTER_SHUTDOWN_GRACE_PERIOD` sekund (0 = bez limitu). Druhý signál ukončí proces okamžitě.
 
@@ -86,19 +86,28 @@ Serving adapter nevybírá ani neimportuje konkrétní nástroj. Každý krok je
 | --- | --- | --- |
 | `start` | `context`, volitelně `fork_from_session_id` | Připraví workspace a spustí workflow; `fork_from_session_id` se přijme, ale aktuálně se nepoužívá |
 | `add_message` | `run_id`, `context`, `message`, `role`, `attachments` | Spustí workflow s follow-up promptem; `role` má default `user`, ale handler jej aktuálně nerozlišuje |
-| `abort` | `context` | Idempotentně označí známý run jako abortovaný a ukončí kroky odpovídající labelům; může uspět i bez známého aktivního runu |
+| `approve` | `context`, `approval_id`, `command`, volitelně `timeout_seconds` | Nad existujícím workspace synchronně spustí pojmenované approval workflow a vrátí integer `1` nebo `0` |
+| `abort` | `context` | Idempotentně označí známý run i jeho approval runy jako abortované a ukončí kroky odpovídající labelům; může uspět i bez známého aktivního runu |
 | `undo` | `context` | Vrátí workspace do source snapshotu evidovaného u posledního runu tasku |
 
 Chyby vrací `AgentJsonRpcException` s kódem, který dispatcher mapuje na HTTP-like status (`404` → not found, `>=500`/`-32603` → internal, jinak 400). Nevalidní parametry = standardní `-32602 Invalid params`.
 
-Centrální vstup do metod je `AgentJsonRpcService` (`common/rpc/jsonrpc.py`). Produkční `_DISPATCH` vystavuje pouze čtyři metody v tabulce; jiné názvy včetně `question` a `approve` vrátí `-32601 Method not found`. `start` i `add_message` připraví workspace a vždy předají řízení `WorkflowManager`u. `context.adapter.runtime` nerozhoduje o routingu: hodnoty `docker` a `local` vynutí odpovídající workflow executor. Jakákoli jiná hodnota ponechá výběr na `workflow.executor` a `WORKFLOW_EXECUTOR`; model runtime zatím neomezuje na pevný výčet.
+Centrální vstup do metod je `AgentJsonRpcService` (`common/rpc/jsonrpc.py`). Produkční `_DISPATCH` vystavuje pět metod v tabulce; například `question` vrátí `-32601 Method not found`. `start` i `add_message` připraví workspace a vždy předají řízení `WorkflowManager`u. `approve` workspace pouze dohledá a nikdy ho nevytváří ani neresetuje. `context.adapter.runtime` nerozhoduje o routingu: hodnoty `docker` a `local` vynutí odpovídající workflow executor. Jakákoli jiná hodnota ponechá výběr na `workflow.executor` a `WORKFLOW_EXECUTOR`; model runtime zatím neomezuje na pevný výčet.
+
+### `approve`
+
+`approve` vyžaduje neprázdné `context.adapter.workflow`, stabilní `approval_id` (max. 255 znaků) a `command` (max. 20 000 znaků). `timeout_seconds` je celkový deadline v rozsahu `(0, 3600]` sekund, default 300 sekund. Command se beze změny uloží do approval `prompt.md`; adapter jej nevkládá do shellu a rediguje jej z dispatcher logů i validačních error detailů.
+
+Approval workflow musí deklarovat právě jeden `var` output `APPROVED`. Jeho úspěšný, nepřeskočený krok musí zapsat přesně `1` nebo `0` (okolní whitespace se ignoruje). Jen tyto dvě hodnoty se vracejí jako JSON-RPC integer `result`. Chybějící/neplatný output, failed/aborted run, timeout nebo chyba executoru jsou JSON-RPC error, nikoli `result: 0`.
+
+Approval run je v manageru oddělený od hlavního workflow stejného tasku, používá vlastní namespace/task label a neposílá `run.adapter_event`, completion outputs ani změny lifecycle. Stejné `approval_id` se stejným contextem a commandem se v paměti připojí k běžícímu runu nebo vrátí jeho dokončený výsledek; jiné vstupy pod stejným ID jsou chyba. Deadline prvního requestu je autoritativní i pro retry a při překročení cíleně abortuje resources daného attemptu. Manager drží nejvýše 1000 dokončených approval záznamů; registry nepřežije restart adapteru.
 
 ## Workflow runtime
 
 Průběh `start` / `add_message`:
 
 1. **Workspace** — `GitAdapterService` pro task scope založí nebo znovu použije worktree `<ADAPTER_WORKTREE_ROOT>/<task-safe-id>` na task větvi. Project scope běží přímo v `context.working_dir`.
-2. **Prompt a přílohy** — adapter složí prompt z kontextu nebo follow-up zprávy. V režimu plného kontextu přidá pro podúkol strukturovaný blok `<parent_task_context>` s nadřazeným úkolem, jeho komentáři a všemi podúkoly, ale bez polí `attachments`; přílohy aktuálního úkolu materializuje do workspace.
+2. **Prompt, role a přílohy** — adapter složí prompt z kontextu nebo follow-up zprávy. Pokud kontext obsahuje `project_role`, před prompt vloží tělo Markdown role z `.agentis/role/*.md`, vyhledané podle `name` v YAML front matteru nebo podle názvu souboru. Projektová role má přednost před `project_role.prompt` z Agentisu; vybraný text role je obalen tagy `<role>...</role>`, aby byl oddělený od hlavního zadání. MCP metadata se zatím nepoužívají. V režimu plného kontextu přidá pro podúkol strukturovaný blok `<parent_task_context>` s nadřazeným úkolem, jeho komentáři a všemi podúkoly, ale bez polí `attachments`; přílohy aktuálního úkolu materializuje do workspace.
 3. **Výběr a validace workflow** — pojmenovaná akce použije `<name>.yaml`, project scope `project.yaml`, ostatní runy `default.yaml`. Projektový soubor má přednost před bundled fallbackem z `ADAPTER_BUNDLED_WORKFLOW_DIR`. YAML se synchronně načte, vyřeší, interpoluje a zvaliduje; zároveň vzniknou `prompt.md` a `context.json`.
 4. **Spuštění** — manager zaregistruje run a spustí background thread. Ten pořídí source snapshot, připraví executor a vykoná DAG přes Kubernetes Joby nebo lokální bash procesy. `start` / `add_message` proto vrací rychle a bez `session_id`.
 5. **Reporting** — workflow posílá `run.adapter_event`; agentí krok s `agentiscode` může navíc průběžně posílat session ID a aktivitu. Po doběhnutí manager aplikuje deklarované outputs, například completion komentář, přílohy, artefakty a followup akce.

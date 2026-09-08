@@ -189,8 +189,11 @@ workflow:
           exit 0
         fi
         git push --set-upstream origin "${BRANCH}:refs/heads/${BRANCH}"
-        if ! gh pr view "$BRANCH" --json url --jq .url \
-          > .agentis/outputs/pull-request-url 2>/dev/null; then
+        if gh pr list --state open --head "$BRANCH" --base "$BASE_BRANCH" --limit 1 \
+          --json url --jq '.[0].url // empty' > .agentis/outputs/pull-request-url \
+          && [ -s .agentis/outputs/pull-request-url ]; then
+          echo "Pull request already exists: $(cat .agentis/outputs/pull-request-url)"
+        else
           gh pr create --base "$BASE_BRANCH" --head "$BRANCH" \
             --title "${TASK_TITLE:-$BRANCH}" \
             --body "Automated changes for task #${TASK_NUMBER}." \
@@ -204,52 +207,55 @@ workflow:
           name: PR_CREATED
           valueFrom: .agentis/outputs/pull-request-url
 
-    - name: Rebase task branch for auto merge
+    - name: Auto merge task branch
       if: PR_CREATED && AGENTIS_AUTO_MERGE
       run: |
         mkdir -p .agentis/outputs
         git fetch origin "$BASE_BRANCH"
         if ! git rebase "refs/remotes/origin/${BASE_BRANCH}"; then
-          agentiscode --adapter opencode --model "$AGENTIS_MODEL" \
-            "Resolve the current git rebase conflict." \
-            | tee .agentis/outputs/conflict-resolution.txt
-          GIT_EDITOR=true git rebase --continue
+          opencode run --model openai/gpt-5.6 "fix git conflict" \
+            | tee .agentis/outputs/auto-merge-conflict-resolution.txt
+          if ! GIT_EDITOR=true git rebase --continue; then
+            git rebase --abort
+            exit 1
+          fi
         fi
-
-    - name: Fast-forward base branch
-      if: PR_CREATED && AGENTIS_AUTO_MERGE
-      workingDir: "[%MAIN_DIR%]"
-      run: |
-        git fetch origin "$BASE_BRANCH"
-        git merge --ff-only "$BRANCH"
-        git push origin "${BASE_BRANCH}:refs/heads/${BASE_BRANCH}"
-
-    - name: Report auto merge
-      if: PR_CREATED && AGENTIS_AUTO_MERGE
-      run: |
-        mkdir -p .agentis/outputs
-        printf 'Task branch was merged into the base branch.\n' \
-          > .agentis/outputs/merge-comment.md
+        if ! git -C "$MAIN_DIR" rebase "$BRANCH"; then
+          git -C "$MAIN_DIR" stash push
+          git -C "$MAIN_DIR" rebase "$BRANCH"
+          git -C "$MAIN_DIR" stash pop
+        fi
+        git -C "$MAIN_DIR" push origin "${BASE_BRANCH}:refs/heads/${BASE_BRANCH}"
+        {
+          printf 'Zamergoval jsem task větev do hlavní větve.\n'
+          if [ -s .agentis/outputs/auto-merge-conflict-resolution.txt ]; then
+            printf '\nMerge narazil na git conflict, který jsem řešil přes AI resolver.\n'
+          fi
+        } > .agentis/outputs/auto-merge-comment.md
       outputs:
         - type: agent_comment
-          bodyFrom: .agentis/outputs/merge-comment.md
+          bodyFrom: .agentis/outputs/auto-merge-comment.md
           status: done
-          name: Merge Agent
+          name: Merge agent
 
-    - name: Report workflow failure
+    - name: Report auto merge failure
       always: true
       run: |
         [ "${AGENTIS_WORKFLOW_STATUS:-success}" = "failed" ] || exit 0
         mkdir -p .agentis/outputs
-        printf 'Workflow failed in step "%s".\n' "$AGENTIS_FAILED_STEP" \
-          > .agentis/outputs/failure-comment.md
+        {
+          printf 'Auto merge task větve selhal v kroku "%s".\n' "$AGENTIS_FAILED_STEP"
+          if [ -s .agentis/outputs/auto-merge-conflict-resolution.txt ]; then
+            printf '\nRebase narazil na konflikt, který se nepodařilo vyřešit ani přes AI resolver; rebase byl zrušen (git rebase --abort) a task větev zůstává beze změny.\n'
+          fi
+        } > .agentis/outputs/auto-merge-failure-comment.md
       outputs:
         - type: agent_comment
-          bodyFrom: .agentis/outputs/failure-comment.md
-          name: Workflow Agent
-        - label: Conflict resolution log
+          bodyFrom: .agentis/outputs/auto-merge-failure-comment.md
+          name: Merge agent
+        - label: AI conflict resolver
           type: text
-          valueFrom: .agentis/outputs/conflict-resolution.txt
+          valueFrom: .agentis/outputs/auto-merge-conflict-resolution.txt
 
     - name: Deploy preview
       run: |
@@ -277,7 +283,7 @@ workflow:
 
   followups:
     - title: Merge changes
-      if: PR_CREATED
+      if: PR_CREATED && !AGENTIS_AUTO_MERGE
       prompt: Merge the task branch into the base branch.
       workflow: merge
     - title: Code review
@@ -295,6 +301,8 @@ Příklad je záměrně obecný. Cesty, příkazy, image, preview doménu a Kube
 | `.agentis/workflows/default.yaml` | Standardní task ve vlastním worktree |
 | `.agentis/workflows/project.yaml` | Běh přímo nad projektem |
 | `.agentis/workflows/<name>.yaml` | Vlastní navazující akce, například merge nebo release |
+
+Adapter navíc přijímá synchronní JSON-RPC `approve`. Agentis předá execution context, stabilní `approval_id`, Bash command a volitelný deadline; pojmenované workflow z `context.adapter.workflow` musí přes jediný `var` output `APPROVED` vrátit přesně `1` nebo `0`. Bundled `workflows/approval.yaml` poskytuje výchozí AI review a projekt jej může přepsat.
 
 Kompletní formát, executory a outputs popisuje [dokumentace workflow](docs/workflow.md).
 

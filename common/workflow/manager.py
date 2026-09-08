@@ -11,6 +11,7 @@ a po dokončení workflow aplikuje `outputs` úspěšně doběhlých kroků do A
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import sys
@@ -64,9 +65,18 @@ ARTIFACT_OUTPUT_MAX_FILES = 50
 ARTIFACT_OUTPUT_MAX_BYTES = 50 * 1024 * 1024
 ARTIFACT_OUTPUT_STAGING_DIR = "artifact-staging"
 ARTIFACT_NAME_MAX_LENGTH = 255
+APPROVAL_HISTORY_MAX_ENTRIES = 1000
 
 
 class WorkflowBusyError(RuntimeError):
+    pass
+
+
+class WorkflowApprovalError(RuntimeError):
+    pass
+
+
+class WorkflowApprovalTimeoutError(WorkflowApprovalError):
     pass
 
 
@@ -95,6 +105,7 @@ class _WorkflowRun:
     context_file: Path
     executor: str
     runner: WorkflowStepRunner
+    task_label: str = ""
     artifact_staging_dir: Path | None = None
     #: Klíč snapshotu zdrojáků pro "Changes diff" attachment; None pro pojmenovaná
     #: workflow (merge/close), která můžou worktree sama smazat.
@@ -113,6 +124,10 @@ class _WorkflowRun:
     staged_artifacts: list[_StagedArtifact] = field(default_factory=list)
     #: Diagnostika artifact outputů; workflow kvůli ní nepadá.
     output_warnings: list[dict[str, Any]] = field(default_factory=list)
+    #: Approval runy jsou vnořené do hlavního workflow a nesmí měnit jeho Agentis lifecycle.
+    report_to_agentis: bool = True
+    completion_event: threading.Event = field(default_factory=threading.Event)
+    error: Exception | None = None
 
     @property
     def active(self) -> bool:
@@ -128,6 +143,17 @@ class _StepExecutionResult:
     attempts: int
 
 
+@dataclass
+class _ApprovalEntry:
+    fingerprint: str
+    parent_run_id: str
+    deadline: float
+    completion_event: threading.Event = field(default_factory=threading.Event)
+    run: _WorkflowRun | None = None
+    error: Exception | None = None
+    cancelled: bool = False
+
+
 class WorkflowManager:
     """Owns background workflow runs keyed by task_id."""
 
@@ -137,6 +163,9 @@ class WorkflowManager:
         self._runner_override = runner
         self._runners: dict[tuple[str, str | None], WorkflowStepRunner] = {}
         self._runs: dict[str, _WorkflowRun] = {}
+        self._starting_tasks: set[str] = set()
+        self._approval_runs: dict[str, _ApprovalEntry] = {}
+        self._last_attempt_value = 0
         self._lock = threading.Lock()
 
     def _runner_for(self, executor: str, kube_context: str | None = None) -> WorkflowStepRunner:
@@ -211,16 +240,141 @@ class WorkflowManager:
         akce můžou worktree samy smazat.
         """
 
-        namespace = namespace_for_context(context, self.settings)
-        task_label = self._task_label(context)
         with self._lock:
             existing = self._runs.get(context.task_id)
-            if existing is not None and existing.active:
+            if context.task_id in self._starting_tasks or (existing is not None and existing.active):
                 raise WorkflowBusyError(f"Workflow for task {context.task_id} is already running")
+            self._starting_tasks.add(context.task_id)
+
+        try:
+            run, result = self._prepare_workflow(context, worktree, prompt)
+            with self._lock:
+                self._runs[context.task_id] = run
+                self._start_thread(run, name=f"workflow-{context.task_id}-{run.attempt_id}")
+            return result
+        finally:
+            with self._lock:
+                self._starting_tasks.discard(context.task_id)
+
+    def approve(
+        self,
+        context: AgentExecutionContextPayload,
+        worktree: str,
+        approval_id: str,
+        command: str,
+        *,
+        timeout: float = 300,
+    ) -> int:
+        """Spustí pojmenované approval workflow a synchronně vrátí jeho ``APPROVED`` var."""
+
+        workflow_name = self._workflow_name(context)
+        if workflow_name is None:
+            raise ValueError("context.adapter.workflow is required for approve")
+        fingerprint = self._approval_fingerprint(context, command)
+        with self._lock:
+            entry = self._approval_runs.get(approval_id)
+            owner = entry is None
+            if entry is None:
+                self._trim_approval_history_locked()
+                entry = _ApprovalEntry(
+                    fingerprint=fingerprint,
+                    parent_run_id=context.run_id,
+                    deadline=time.monotonic() + timeout,
+                )
+                self._approval_runs[approval_id] = entry
+            elif entry.fingerprint != fingerprint:
+                raise WorkflowApprovalError(f"Approval {approval_id!r} was already used with different input")
+
+        if owner:
+            try:
+                run, _result = self._prepare_workflow(
+                    context,
+                    worktree,
+                    command,
+                    report_to_agentis=False,
+                    completion_event=entry.completion_event,
+                    approval=True,
+                    approval_id=approval_id,
+                )
+                with self._lock:
+                    if time.monotonic() >= entry.deadline:
+                        entry.cancelled = True
+                        entry.error = WorkflowApprovalTimeoutError(f"Approval {approval_id!r} timed out")
+                        entry.completion_event.set()
+                    elif not entry.cancelled:
+                        entry.run = run
+                        self._start_thread(run, name=f"approval-{approval_id}-{run.attempt_id}")
+            except Exception as exc:  # noqa: BLE001
+                with self._lock:
+                    if not entry.cancelled:
+                        entry.error = exc
+                        entry.completion_event.set()
+
+        remaining = max(0.0, entry.deadline - time.monotonic())
+        if not entry.completion_event.wait(timeout=remaining):
+            run_to_abort: _WorkflowRun | None = None
+            with self._lock:
+                entry.cancelled = True
+                entry.error = WorkflowApprovalTimeoutError(f"Approval {approval_id!r} timed out")
+                run = entry.run
+                if run is not None:
+                    run.abort_event.set()
+                    run.status = "aborted"
+                    run_to_abort = run
+                entry.completion_event.set()
+            if run_to_abort is not None:
+                try:
+                    self._abort_run(run_to_abort)
+                except Exception as exc:  # noqa: BLE001
+                    sys.stderr.write(
+                        f"[workflow] approval timeout cleanup failed attempt={run_to_abort.attempt_id}: {exc!r}\n"
+                    )
+            raise entry.error
+
+        if isinstance(entry.error, WorkflowApprovalTimeoutError):
+            raise entry.error
+        if entry.error is not None:
+            raise WorkflowApprovalError(f"Approval {approval_id!r} could not start: {entry.error}") from entry.error
+        run = entry.run
+        if run is None:
+            raise WorkflowApprovalError(f"Approval {approval_id!r} has no workflow run")
+        if run.error is not None:
+            raise WorkflowApprovalError(f"Approval {approval_id!r} crashed: {run.error}") from run.error
+        if run.status != "success":
+            raise WorkflowApprovalError(f"Approval {approval_id!r} finished with status {run.status!r}")
+        value = run.vars.get("APPROVED")
+        if value not in {"0", "1"}:
+            raise WorkflowApprovalError(f"Approval {approval_id!r} returned invalid APPROVED value")
+        return int(value)
+
+    @staticmethod
+    def _approval_fingerprint(context: AgentExecutionContextPayload, command: str) -> str:
+        payload = json.dumps(context.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(f"{payload}\0{command}".encode()).hexdigest()
+
+    def _prepare_workflow(
+        self,
+        context: AgentExecutionContextPayload,
+        worktree: str,
+        prompt: str,
+        *,
+        report_to_agentis: bool = True,
+        completion_event: threading.Event | None = None,
+        approval: bool = False,
+        approval_id: str | None = None,
+    ) -> tuple[_WorkflowRun, dict[str, Any]]:
+        namespace = namespace_for_context(context, self.settings)
+        task_label = self._task_label(context)
+        if approval:
+            if approval_id is None:
+                raise ValueError("approval_id is required for approval workflow")
+            approval_key = hashlib.sha256(approval_id.encode()).hexdigest()[:10]
+            namespace = f"{namespace[:42].rstrip('-')}-approval-{approval_key}"
+            task_label = f"approval-{approval_key}"
 
         worktree_path = Path(worktree)
         # Hex timestamp s pevnou šířkou: lexikografické řazení názvů jobů odpovídá pořadí spuštění.
-        attempt_id = f"{time.time_ns() // 1_000_000:011x}"
+        attempt_id = self._next_attempt_id()
         is_project_scope = GitAdapterService.is_project_scope(context)
         workflow_name = self._workflow_name(context)
         if workflow_name:
@@ -257,11 +411,20 @@ class WorkflowManager:
 
         values = self._interpolation_values(context, worktree_path, namespace, run_dir=run_dir)
         workflow = self._inject_env_files(load_workflow_file(workflow_path, values))
+        if approval:
+            approved_outputs = [
+                output
+                for step in workflow.workflow.steps
+                for output in step.outputs
+                if output.type == "var" and output.name == "APPROVED"
+            ]
+            if len(approved_outputs) != 1:
+                raise ValueError("Approval workflow must declare exactly one var output named APPROVED")
         executor = self._resolve_executor(context, workflow)
         runner = self._runner_for(executor, workflow.workflow.context)
         if executor in {"kubernetes", "docker"}:
             self._require_images(workflow, workflow_relpath, executor)
-        if runner.has_active_run(namespace, task_label):
+        if not approval and runner.has_active_run(namespace, task_label):
             raise WorkflowBusyError(f"Workflow jobs for task {context.task_id} are still active in {namespace}")
 
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -284,30 +447,25 @@ class WorkflowManager:
             context_file=context_file,
             executor=executor,
             runner=runner,
+            task_label=task_label,
+            report_to_agentis=report_to_agentis,
+            completion_event=completion_event or threading.Event(),
             snapshot_key=(
-                None if workflow_name else build_snapshot_key("workflow", context.run_id, context.task_id, attempt_id)
+                None
+                if approval or workflow_name
+                else build_snapshot_key("workflow", context.run_id, context.task_id, attempt_id)
             ),
         )
-        with self._lock:
-            self._runs[context.task_id] = run
 
-        get_status_registry().run_update(
-            context.run_id,
-            kind="workflow",
-            worktree=str(worktree_path),
-            workflow=workflow_name,
-        )
+        if report_to_agentis:
+            get_status_registry().run_update(
+                context.run_id,
+                kind="workflow",
+                worktree=str(worktree_path),
+                workflow=workflow_name,
+            )
 
-        thread = threading.Thread(
-            target=self._thread_main,
-            args=(run,),
-            name=f"workflow-{context.task_id}-{attempt_id}",
-            daemon=True,
-        )
-        run.thread = thread
-        thread.start()
-
-        return {
+        return run, {
             "action": "workflow_start",
             "task_id": context.task_id,
             "attempt": attempt_id,
@@ -317,6 +475,27 @@ class WorkflowManager:
             "workflow_file": workflow_relpath,
             "steps": [step.name for step in workflow.workflow.steps],
         }
+
+    def _start_thread(self, run: _WorkflowRun, *, name: str) -> None:
+        thread = threading.Thread(target=self._thread_main, args=(run,), name=name, daemon=True)
+        run.thread = thread
+        thread.start()
+
+    def _next_attempt_id(self) -> str:
+        with self._lock:
+            value = max(time.time_ns() // 1_000_000, self._last_attempt_value + 1)
+            self._last_attempt_value = value
+        return f"{value:011x}"
+
+    def _trim_approval_history_locked(self) -> None:
+        if len(self._approval_runs) < APPROVAL_HISTORY_MAX_ENTRIES:
+            return
+        for key, entry in list(self._approval_runs.items()):
+            thread = entry.run.thread if entry.run is not None else None
+            if entry.completion_event.is_set() and (thread is None or not thread.is_alive()):
+                del self._approval_runs[key]
+                if len(self._approval_runs) < APPROVAL_HISTORY_MAX_ENTRIES:
+                    return
 
     def snapshot_key_for_task(self, task_id: str) -> str | None:
         """Klíč source snapshotu posledního runu tasku (pro `undo`); None pro pojmenovaná workflow."""
@@ -331,6 +510,19 @@ class WorkflowManager:
         namespace = namespace_for_context(context, self.settings)
         with self._lock:
             run = self._runs.get(context.task_id)
+            approval_entries = [
+                entry
+                for entry in self._approval_runs.values()
+                if entry.parent_run_id == context.run_id and not entry.completion_event.is_set()
+            ]
+            for entry in approval_entries:
+                entry.cancelled = True
+                entry.error = WorkflowApprovalError(f"Approval for run {context.run_id!r} was aborted")
+                if entry.run is not None:
+                    entry.run.abort_event.set()
+                    entry.run.status = "aborted"
+                entry.completion_event.set()
+            approval_runs = [entry.run for entry in approval_entries if entry.run is not None]
         if run is not None:
             run.abort_event.set()
             run.status = "aborted"
@@ -339,12 +531,14 @@ class WorkflowManager:
             "agentis.task_id": self._task_label(context),
             "agentis.run_id": self._run_label(context),
         }
-        if run is not None:
-            runner = run.runner
+        runs_to_abort = [item for item in [run, *approval_runs] if item is not None]
+        if runs_to_abort:
+            deleted_results = [self._abort_run(item) for item in runs_to_abort]
         else:
             runtime = (context.adapter.runtime if context.adapter and context.adapter.runtime else "").strip().lower()
-            runner = self._runner_for(runtime if runtime in {"local", "docker"} else self.settings.workflow_executor)
-        deleted = runner.abort(namespace, labels)
+            fallback = self._runner_for(runtime if runtime in {"local", "docker"} else self.settings.workflow_executor)
+            deleted_results = [fallback.abort(namespace, labels)]
+        deleted = "; ".join(deleted_results)
         self._emit_adapter_event(
             context,
             kind="workflow_abort",
@@ -359,6 +553,16 @@ class WorkflowManager:
             "namespace": namespace,
             "deleted": deleted,
         }
+
+    def _abort_run(self, run: _WorkflowRun) -> str:
+        return run.runner.abort(
+            run.namespace,
+            {
+                "agentis.task_id": run.task_label,
+                "agentis.run_id": self._run_label(run.context),
+                "agentis.attempt": run.attempt_id,
+            },
+        )
 
     def active_count(self) -> int:
         """Počet workflow runů, jejichž thready stále běží (pro graceful shutdown)."""
@@ -386,6 +590,11 @@ class WorkflowManager:
     def _active_threads(self) -> list[threading.Thread]:
         with self._lock:
             threads = [run.thread for run in self._runs.values() if run.thread is not None]
+            threads.extend(
+                entry.run.thread
+                for entry in self._approval_runs.values()
+                if entry.run is not None and entry.run.thread is not None
+            )
         return [thread for thread in threads if thread.is_alive()]
 
     # ------------------------------------------------------------------
@@ -495,9 +704,13 @@ class WorkflowManager:
     def _thread_main(self, run: _WorkflowRun) -> None:
         try:
             self._run_workflow(run)
-            get_status_registry().run_finished(run.context.run_id, run.status)
+            if run.report_to_agentis:
+                get_status_registry().run_finished(run.context.run_id, run.status)
         except Exception as exc:  # noqa: BLE001
             run.status = "failed"
+            run.error = exc
+            if not run.report_to_agentis:
+                return
             get_status_registry().run_finished(run.context.run_id, "failed")
             sys.stderr.write(f"[workflow] run {run.context.run_id} crashed: {exc!r}\n")
             self._emit_adapter_event(
@@ -508,6 +721,8 @@ class WorkflowManager:
                 message="Workflow běh selhal.",
                 data={"error": str(exc)},
             )
+        finally:
+            run.completion_event.set()
 
     def _run_workflow(self, run: _WorkflowRun) -> None:
         if run.snapshot_key:
@@ -515,14 +730,15 @@ class WorkflowManager:
         env = self._runtime_env(run)
         run.runner.prepare(run.workflow, namespace=run.namespace, run_dir=run.run_dir)
         workflow_event_id = f"workflow:{run.context.run_id}:{run.attempt_id}"
-        self._emit_adapter_event(
-            run.context,
-            kind="workflow",
-            status="success",
-            event_id=workflow_event_id,
-            message="Workflow bylo spuštěno.",
-            data={"attempt": run.attempt_id, "namespace": run.namespace, "executor": run.executor},
-        )
+        if run.report_to_agentis:
+            self._emit_adapter_event(
+                run.context,
+                kind="workflow",
+                status="success",
+                event_id=workflow_event_id,
+                message="Workflow bylo spuštěno.",
+                data={"attempt": run.attempt_id, "namespace": run.namespace, "executor": run.executor},
+            )
 
         steps = run.workflow.workflow.steps
         dependencies = self._step_dependencies(steps)
@@ -642,28 +858,31 @@ class WorkflowManager:
         # `always` krok tak může doručit failure komentář do ticketu.
         if failed_step is not None:
             run.status = "failed"
+            if run.report_to_agentis:
+                self._apply_outputs(run)
+                self._emit_adapter_event(
+                    run.context,
+                    kind="idle",
+                    status="failed",
+                    event_id=workflow_event_id,
+                    message="Workflow selhalo.",
+                    data={"failed_step": failed_step, "attempt": run.attempt_id},
+                )
+            return
+
+        if run.report_to_agentis:
             self._apply_outputs(run)
+            self._cleanup_namespace(run)
+        run.status = "success"
+        if run.report_to_agentis:
             self._emit_adapter_event(
                 run.context,
                 kind="idle",
-                status="failed",
+                status="success",
                 event_id=workflow_event_id,
-                message="Workflow selhalo.",
-                data={"failed_step": failed_step, "attempt": run.attempt_id},
+                message="Workflow doběhlo.",
+                data={"attempt": run.attempt_id},
             )
-            return
-
-        self._apply_outputs(run)
-        self._cleanup_namespace(run)
-        run.status = "success"
-        self._emit_adapter_event(
-            run.context,
-            kind="idle",
-            status="success",
-            event_id=workflow_event_id,
-            message="Workflow doběhlo.",
-            data={"attempt": run.attempt_id},
-        )
 
     @staticmethod
     def _step_dependencies(steps: list[WorkflowStep]) -> list[list[int]]:
@@ -710,7 +929,7 @@ class WorkflowManager:
         step_env: dict[str, str],
     ) -> _StepExecutionResult:
         labels = job_labels(
-            task_id=run.context.task_id,
+            task_id=run.task_label,
             run_id=run.context.run_id,
             attempt_id=run.attempt_id,
             step_index=index,
@@ -757,6 +976,8 @@ class WorkflowManager:
         step: WorkflowStep,
         dependencies: list[list[int]],
     ) -> None:
+        if not run.report_to_agentis:
+            return
         name = job_name(run.context.run_id, run.attempt_id, index, step.name)
         self._emit_adapter_event(
             run.context,
@@ -779,6 +1000,8 @@ class WorkflowManager:
         step: WorkflowStep,
         dependencies: list[list[int]],
     ) -> None:
+        if not run.report_to_agentis:
+            return
         self._emit_adapter_event(
             run.context,
             kind="workflow_step",
@@ -800,6 +1023,8 @@ class WorkflowManager:
         step: WorkflowStep,
         dependencies: list[list[int]],
     ) -> None:
+        if not run.report_to_agentis:
+            return
         agent_error = self._agent_error_from_log(completed.result.log_tail)
         message = f"{step.name}: {agent_error}" if agent_error else f"Krok selhal ({completed.result.status}): {step.name}"
         data = {
@@ -852,6 +1077,8 @@ class WorkflowManager:
         visible_vars: dict[str, str] | None = None,
         failed_step: str | None = None,
     ) -> None:
+        if not run.report_to_agentis:
+            return
         data: dict[str, Any] = {
             "step": step.name,
             "step_index": index,
@@ -1153,4 +1380,4 @@ class WorkflowManager:
         )
 
 
-__all__ = ["WorkflowBusyError", "WorkflowManager"]
+__all__ = ["WorkflowApprovalError", "WorkflowApprovalTimeoutError", "WorkflowBusyError", "WorkflowManager"]

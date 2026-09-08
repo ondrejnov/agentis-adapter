@@ -252,9 +252,20 @@ class QuestionParams(BaseModel):
 
 
 class ApproveParams(BaseModel):
-    run_id: str
-    approved: bool
-    comment: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    context: AgentExecutionContextPayload
+    approval_id: str = Field(min_length=1, max_length=255)
+    command: str = Field(min_length=1, max_length=20_000)
+    timeout_seconds: float = Field(default=300, gt=0, le=3600, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def require_workflow(self) -> ApproveParams:
+        if self.context.adapter is None or self.context.adapter.workflow is None:
+            raise ValueError("context.adapter.workflow is required for approve")
+        if not self.command.strip():
+            raise ValueError("command must not be blank")
+        return self
 
 
 class AbortParams(BaseModel):

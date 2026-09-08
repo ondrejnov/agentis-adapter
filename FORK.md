@@ -53,6 +53,7 @@ Produkční dispatch dnes vystavuje tyto metody:
 | --- | --- |
 | `start` | Založí běh, připraví workspace a spustí workflow. |
 | `add_message` | Spustí další workflow nad existujícím během nebo session. |
+| `approve` | Synchronně spustí pojmenované approval workflow nad existujícím workspace a vrátí `1` nebo `0`. |
 | `abort` | Zastaví běžící workflow a jeho executory. |
 | `undo` | Obnoví workspace z posledního in-memory source snapshotu. |
 

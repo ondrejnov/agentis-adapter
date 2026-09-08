@@ -7,6 +7,7 @@ import json
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,12 @@ from common.models import (
 from common.rpc.jsonrpc import AgentJsonRpcException, AgentJsonRpcService
 from common.workflow.docker_runtime import DockerContainerRunner
 from common.workflow.local_runtime import LocalProcessRunner
-from common.workflow.manager import WorkflowBusyError, WorkflowManager
+from common.workflow.manager import (
+    WorkflowApprovalError,
+    WorkflowApprovalTimeoutError,
+    WorkflowBusyError,
+    WorkflowManager,
+)
 from common.workflow.runtime import (
     KubectlJobRunner,
     StepResult,
@@ -184,6 +190,25 @@ def _write_workflow(worktree: Path) -> Path:
     path = worktree / WORKFLOW_FILE_RELPATH
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(WORKFLOW_YAML, encoding="utf-8")
+    return path
+
+
+def _write_approval_workflow(worktree: Path, *, outputs: str | None = None) -> Path:
+    path = worktree / ".agentis" / "workflows" / "approval.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    output_block = (
+        outputs
+        or """        - type: var
+          name: APPROVED
+          valueFrom: outputs/approved
+"""
+    )
+    path.write_text(
+        "version: 1\nworkflow:\n  image: registry.example/agent:1.0\n  steps:\n"
+        "    - name: Review command\n      run: review-command\n      outputs:\n"
+        f"{output_block}",
+        encoding="utf-8",
+    )
     return path
 
 
@@ -839,6 +864,32 @@ class FakeRunner:
         self.deleted_namespaces.append(namespace)
 
 
+class ApprovalRunner(FakeRunner):
+    def __init__(self, approved: str = "1") -> None:
+        super().__init__()
+        self.approved = approved
+
+    def run_step(self, workflow, step, **kwargs: Any) -> StepResult:
+        run_dir = kwargs["run_dir"]
+        output_dir = run_dir / "outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "approved").write_text(self.approved, encoding="utf-8")
+        return super().run_step(workflow, step, **kwargs)
+
+
+class AbortAwareApprovalRunner(ApprovalRunner):
+    def run_step(self, workflow, step, **kwargs: Any) -> StepResult:
+        run_dir = kwargs["run_dir"]
+        output_dir = run_dir / "outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "approved").write_text(self.approved, encoding="utf-8")
+        abort_event = kwargs["abort_event"]
+        with self._lock:
+            self.steps.append({"step": step.name, "labels": dict(kwargs["labels"])})
+        assert abort_event.wait(timeout=2)
+        return StepResult(status="aborted")
+
+
 def _manager(tmp_path: Path, runner: FakeRunner) -> tuple[WorkflowManager, list[tuple[str, dict[str, Any]]]]:
     manager = WorkflowManager(_settings(tmp_path), runner=runner)
     calls: list[tuple[str, dict[str, Any]]] = []
@@ -865,6 +916,144 @@ def _wait_steps(runner: FakeRunner, count: int, timeout: float = 5.0) -> list[di
             return steps
         time.sleep(0.01)
     raise AssertionError(f"runner did not start {count} step(s) in time")
+
+
+@pytest.mark.parametrize(("approved", "expected"), [("1\n", 1), ("0", 0)])
+def test_approve_returns_scalar_result_without_reporting(tmp_path: Path, approved: str, expected: int) -> None:
+    worktree = tmp_path / "wt"
+    _write_approval_workflow(worktree)
+    runner = ApprovalRunner(approved)
+    manager, calls = _manager(tmp_path, runner)
+    context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
+
+    result = manager.approve(context, str(worktree), "approval-1", "rm -rf build", timeout=1)
+
+    assert result == expected
+    assert calls == []
+    entry = manager._approval_runs["approval-1"]
+    assert entry.run is not None
+    assert entry.run.prompt_file.read_text(encoding="utf-8") == "rm -rf build"
+    assert entry.run.report_to_agentis is False
+    assert "approval-" in entry.run.namespace
+    assert entry.run.task_label.startswith("approval-")
+    assert entry.run.task_label != manager._task_label(context)
+
+
+def test_approve_is_idempotent_for_concurrent_retries(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_approval_workflow(worktree)
+    runner = ApprovalRunner()
+    runner.release.clear()
+    manager, _calls = _manager(tmp_path, runner)
+    context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(manager.approve, context, str(worktree), "approval-1", "pytest", timeout=2)
+        _wait_steps(runner, 1)
+        second = executor.submit(manager.approve, context, str(worktree), "approval-1", "pytest", timeout=2)
+        runner.release.set()
+        assert first.result(timeout=2) == 1
+        assert second.result(timeout=2) == 1
+
+    assert len(runner.steps) == 1
+
+
+def test_approve_rejects_reused_id_with_different_command(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_approval_workflow(worktree)
+    manager, _calls = _manager(tmp_path, ApprovalRunner())
+    context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
+
+    assert manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1) == 1
+    with pytest.raises(WorkflowApprovalError, match="different input"):
+        manager.approve(context, str(worktree), "approval-1", "ruff", timeout=1)
+
+
+def test_approve_requires_exactly_one_approved_output(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_approval_workflow(worktree, outputs="        - type: var\n          name: OTHER\n          valueFrom: out\n")
+    manager, _calls = _manager(tmp_path, ApprovalRunner())
+    context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
+
+    with pytest.raises(WorkflowApprovalError, match="exactly one"):
+        manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1)
+
+
+def test_approve_rejects_invalid_approved_value(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_approval_workflow(worktree)
+    manager, _calls = _manager(tmp_path, ApprovalRunner("true"))
+    context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
+
+    with pytest.raises(WorkflowApprovalError, match="invalid APPROVED"):
+        manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1)
+
+
+def test_approve_timeout_aborts_only_approval_run(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_approval_workflow(worktree)
+    runner = ApprovalRunner()
+    runner.release.clear()
+    manager, _calls = _manager(tmp_path, runner)
+    context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
+
+    with pytest.raises(WorkflowApprovalTimeoutError, match="timed out"):
+        manager.approve(context, str(worktree), "approval-1", "pytest", timeout=0.01)
+
+    entry = manager._approval_runs["approval-1"]
+    assert entry.run is not None
+    assert entry.run.abort_event.is_set()
+    assert entry.run.status == "aborted"
+    assert runner.deleted
+    assert runner.deleted[0][1]["agentis.attempt"] == entry.run.attempt_id
+    runner.release.set()
+    assert manager.wait_idle(timeout=2)
+
+
+def test_parent_abort_stops_running_approval(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_approval_workflow(worktree)
+    runner = AbortAwareApprovalRunner()
+    manager, _calls = _manager(tmp_path, runner)
+    context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(manager.approve, context, str(worktree), "approval-1", "pytest", timeout=2)
+        _wait_steps(runner, 1)
+        result = manager.abort(context)
+        with pytest.raises(WorkflowApprovalError, match="aborted"):
+            future.result(timeout=2)
+
+    assert result["action"] == "abort"
+    assert runner.deleted
+    assert manager.wait_idle(timeout=2)
+
+
+def test_parent_abort_during_approval_preparation_prevents_start(tmp_path: Path, monkeypatch) -> None:
+    worktree = tmp_path / "wt"
+    _write_approval_workflow(worktree)
+    runner = ApprovalRunner()
+    manager, _calls = _manager(tmp_path, runner)
+    context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
+    prepare_started = threading.Event()
+    release_prepare = threading.Event()
+    original_prepare = manager._prepare_workflow
+
+    def blocked_prepare(*args: Any, **kwargs: Any):
+        prepare_started.set()
+        assert release_prepare.wait(timeout=2)
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_prepare_workflow", blocked_prepare)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(manager.approve, context, str(worktree), "approval-1", "pytest", timeout=2)
+        assert prepare_started.wait(timeout=2)
+        manager.abort(context)
+        release_prepare.set()
+        with pytest.raises(WorkflowApprovalError, match="aborted"):
+            future.result(timeout=2)
+
+    assert runner.steps == []
 
 
 def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -> None:
@@ -1875,6 +2064,23 @@ def test_delete_namespace_ignored_by_local_executor(tmp_path: Path) -> None:
 
 def test_repo_action_workflows_parse(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
+    approval = load_workflow_file(repo_root / "workflows" / "approval.yaml", _values(tmp_path))
+    approval_outputs = [
+        output
+        for step in approval.workflow.steps
+        for output in step.outputs
+        if output.type == "var" and output.name == "APPROVED"
+    ]
+    assert len(approval_outputs) == 1
+    assert approval.extends is None
+    assert [mount.name for mount in approval.workflow.mounts] == ["approval-run"]
+    approval_script = approval.workflow.steps[0].run or ""
+    assert "agentiscode" not in approval_script
+    assert '--tools ""' in approval_script
+    assert 'OPENCODE_CONFIG_CONTENT=\'{"permission":"deny"}\'' in approval_script
+    assert "-u AGENTIS_SERVICE_TOKEN" in approval_script
+    subprocess.run(["bash", "-n"], input=approval_script, text=True, check=True)
+
     default = load_workflow_file(repo_root / WORKFLOW_FILE_RELPATH, _values(tmp_path))
     assert any(step.name == "Auto merge task branch" for step in default.workflow.steps)
     merge_followup = next(followup for followup in default.workflow.followups if followup.workflow == "merge")
@@ -1899,9 +2105,7 @@ def test_repo_action_workflows_parse(tmp_path: Path) -> None:
     assert all(mount.volume_source() for mount in merge.workflow.mounts), "každý mount má volume source"
 
 
-def test_repo_default_workflow_auto_merge_finishes_task_done(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_repo_default_workflow_auto_merge_finishes_task_done(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     worktree = tmp_path / "wt"
     outputs_dir = worktree / ".agentis" / "outputs"
@@ -2990,6 +3194,59 @@ def test_jsonrpc_start_none_context_uses_only_direct_prompt(tmp_path: Path) -> N
 
     prompt = manager._runs[context.task_id].prompt_file.read_text(encoding="utf-8")
     assert prompt == "Jen novy komentar"
+
+
+def test_jsonrpc_start_prepends_repository_role_instead_of_agentis_prompt(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+    role_dir = worktree / ".agentis" / "role"
+    role_dir.mkdir(parents=True)
+    (role_dir / "misspelled-filename.md").write_text(
+        "---\n"
+        "name: production\n"
+        "description: Metadata is not part of the prompt.\n"
+        "mcp: ask-question, agentis\n"
+        "---\n\n"
+        "# Opravneni\n\nPracuj podle pravidel repozitare.\n",
+        encoding="utf-8",
+    )
+    runner = FakeRunner()
+    service, manager, _calls = _service(tmp_path, runner)
+    context = _context(
+        user_prompt="Implement current task",
+        project_role={
+            "id": "role-1",
+            "name": "production",
+            "prompt": "This Agentis role prompt must be overridden.",
+            "allowed_mcp": ["postgres"],
+        },
+    )
+
+    service.start(StartParams(context=context))
+    _wait_done(manager, context.task_id)
+
+    prompt = manager._runs[context.task_id].prompt_file.read_text(encoding="utf-8")
+    assert prompt == "<role>\n# Opravneni\n\nPracuj podle pravidel repozitare.\n</role>\n\nImplement current task"
+    assert "Metadata is not part" not in prompt
+    assert "Agentis role prompt" not in prompt
+    assert "postgres" not in prompt
+
+
+def test_jsonrpc_start_uses_agentis_role_prompt_when_repository_role_is_missing(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    _write_workflow(worktree)
+    runner = FakeRunner()
+    service, manager, _calls = _service(tmp_path, runner)
+    context = _context(
+        user_prompt="Implement current task",
+        project_role={"id": "role-1", "name": "reviewer", "prompt": "Review changes carefully."},
+    )
+
+    service.start(StartParams(context=context))
+    _wait_done(manager, context.task_id)
+
+    prompt = manager._runs[context.task_id].prompt_file.read_text(encoding="utf-8")
+    assert prompt == "<role>\nReview changes carefully.\n</role>\n\nImplement current task"
 
 
 def test_jsonrpc_limited_context_omits_parent_task_from_prompt(tmp_path: Path) -> None:

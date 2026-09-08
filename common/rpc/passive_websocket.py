@@ -32,7 +32,7 @@ class PassiveWebSocketClient:
         }
 
     @staticmethod
-    def _error_summary(exc: Exception) -> str:
+    def _error_summary(exc: BaseException) -> str:
         parts = [exc.__class__.__name__]
         response = getattr(exc, "response", None)
         status_code = getattr(response, "status_code", None)
@@ -118,12 +118,33 @@ class PassiveWebSocketClient:
             logger.info("Passive WebSocket connected adapter_id=%s", self.settings.agentis_adapter_id)
             get_status_registry().ws_connected(self.settings.agentis_ws_endpoint)
             shutdown_task = asyncio.ensure_future(self._shutdown_event.wait())
+            dispatch_tasks: set[asyncio.Task[None]] = set()
+            send_lock = asyncio.Lock()
+
+            async def dispatch_and_send(raw_message: str | bytes) -> None:
+                response = await self.dispatch_message(raw_message)
+                if response is not None:
+                    async with send_lock:
+                        await websocket.send(json.dumps(response))
+
+            def dispatch_done(task: asyncio.Task[None]) -> None:
+                dispatch_tasks.discard(task)
+                if not task.cancelled() and (exc := task.exception()) is not None:
+                    logger.warning("Passive WebSocket request task failed error=%s", self._error_summary(exc))
+
             try:
                 while True:
+                    if len(dispatch_tasks) >= max(1, self.settings.websocket_max_in_flight):
+                        done, _ = await asyncio.wait(
+                            {*dispatch_tasks, shutdown_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if shutdown_task in done:
+                            break
+                        continue
                     recv_task = asyncio.ensure_future(websocket.recv())
                     done, _ = await asyncio.wait({recv_task, shutdown_task}, return_when=asyncio.FIRST_COMPLETED)
                     if recv_task not in done:
-                        # Shutdown během čekání na další zprávu — nic rozpracovaného není.
                         recv_task.cancel()
                         await asyncio.gather(recv_task, return_exceptions=True)
                         break
@@ -132,12 +153,18 @@ class PassiveWebSocketClient:
                     except ConnectionClosedOK:
                         return
                     # Už přijatou zprávu zpracujeme i během shutdownu, aby se neztratila.
-                    response = await self.dispatch_message(raw_message)
-                    if response is not None:
-                        await websocket.send(json.dumps(response))
+                    dispatch_task = asyncio.create_task(dispatch_and_send(raw_message))
+                    dispatch_tasks.add(dispatch_task)
+                    dispatch_task.add_done_callback(dispatch_done)
                     if self._shutdown_event.is_set():
                         break
             finally:
+                if self._shutdown_event.is_set():
+                    await asyncio.gather(*dispatch_tasks, return_exceptions=True)
+                else:
+                    for dispatch_task in dispatch_tasks:
+                        dispatch_task.cancel()
+                    await asyncio.gather(*dispatch_tasks, return_exceptions=True)
                 shutdown_task.cancel()
                 await asyncio.gather(shutdown_task, return_exceptions=True)
             logger.info(

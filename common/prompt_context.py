@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
+
+import yaml
+
+
+ROLE_DIR_RELPATH = Path(".agentis/role")
+_MAX_ROLE_FILE_SIZE = 256 * 1024
 
 
 def _field(value: Any, name: str) -> Any:
@@ -16,6 +23,68 @@ def _without_attachments(value: Any) -> Any:
     if isinstance(value, list):
         return [_without_attachments(item) for item in value]
     return value
+
+
+def _role_file(path: Path) -> tuple[str | None, str] | None:
+    try:
+        if path.stat().st_size > _MAX_ROLE_FILE_SIZE:
+            return None
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+
+    if not content.startswith("---"):
+        return None, content.strip()
+
+    lines = content.splitlines()
+    try:
+        closing_index = lines.index("---", 1)
+        metadata = yaml.safe_load("\n".join(lines[1:closing_index])) or {}
+    except (ValueError, yaml.YAMLError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+
+    name = metadata.get("name")
+    return (name.strip() if isinstance(name, str) and name.strip() else None), "\n".join(
+        lines[closing_index + 1 :]
+    ).strip()
+
+
+def load_repository_role(worktree: str | Path, role_name: str) -> str | None:
+    """Načte tělo projektové role, přičemž nedovolí následovat symlink mimo adresář rolí."""
+    if not role_name.strip():
+        return None
+
+    role_dir = Path(worktree) / ROLE_DIR_RELPATH
+    try:
+        resolved_worktree = Path(worktree).resolve(strict=True)
+        resolved_dir = role_dir.resolve(strict=True)
+        if not resolved_dir.is_relative_to(resolved_worktree):
+            return None
+        candidates = sorted(role_dir.glob("*.md"))
+    except OSError:
+        return None
+
+    exact_filename = f"{role_name.strip()}.md"
+    fallback: str | None = None
+    for candidate in candidates:
+        try:
+            resolved_candidate = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if not resolved_candidate.is_relative_to(resolved_dir) or not resolved_candidate.is_file():
+            continue
+
+        parsed = _role_file(resolved_candidate)
+        if parsed is None:
+            continue
+        declared_name, body = parsed
+        if candidate.name == exact_filename:
+            fallback = body or None
+        if declared_name == role_name.strip() and body:
+            return body
+    return fallback
 
 
 def build_comments_block(comments: list[Any] | None) -> str | None:

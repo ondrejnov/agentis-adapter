@@ -12,6 +12,7 @@ from common.models import (
 from common.git_adapter import GitAdapterService
 from common.namespaces import dev_server_url_for_context, namespace_for_context
 from common.rpc.jsonrpc import AgentJsonRpcService
+from common.workflow.manager import WorkflowApprovalError
 from tests.support import RpcTestClient
 
 
@@ -78,6 +79,17 @@ class _StubWorkflowManager:
     def start_workflow(self, context: Any, worktree: str, prompt: str) -> dict[str, str]:
         return {"action": "workflow_start", "status": "applied"}
 
+    def approve(
+        self,
+        context: Any,
+        worktree: str,
+        approval_id: str,
+        command: str,
+        *,
+        timeout: float,
+    ) -> int:
+        return 1
+
 
 def _workflow_service(worktree: Path) -> AgentJsonRpcService:
     class FakeAdapter:
@@ -103,6 +115,122 @@ def make_start_params(run_id: str = "run-1") -> dict[str, Any]:
             "adapter": {"agent": "build", "model": "gpt-5.4"},
         }
     }
+
+
+def make_approve_params() -> dict[str, Any]:
+    context = make_start_params()["context"]
+    context["adapter"]["workflow"] = "approval"
+    return {
+        "context": context,
+        "approval_id": "approval-1",
+        "command": "poetry run pytest -q",
+        "timeout_seconds": 120,
+    }
+
+
+def test_approve_returns_jsonrpc_integer_and_uses_existing_workspace(tmp_path: Path):
+    captured: dict[str, Any] = {}
+
+    class FakeAdapter:
+        def _workspace_path(self) -> Path:
+            return tmp_path
+
+    class FakeWorkflowManager(_StubWorkflowManager):
+        def approve(
+            self,
+            context: Any,
+            worktree: str,
+            approval_id: str,
+            command: str,
+            *,
+            timeout: float,
+        ) -> int:
+            captured.update(
+                context=context,
+                worktree=worktree,
+                approval_id=approval_id,
+                command=command,
+                timeout=timeout,
+            )
+            return 0
+
+    service = AgentJsonRpcService(
+        settings=make_settings(),
+        adapter_factory=cast(Any, lambda context: FakeAdapter()),
+        workflow_manager=cast(Any, FakeWorkflowManager()),
+    )
+    response = make_client(service).post(
+        "/api",
+        json={"jsonrpc": "2.0", "id": "approve-1", "method": "approve", "params": make_approve_params()},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"jsonrpc": "2.0", "id": "approve-1", "result": 0}
+    assert captured["worktree"] == str(tmp_path)
+    assert captured["approval_id"] == "approval-1"
+    assert captured["command"] == "poetry run pytest -q"
+    assert captured["timeout"] == 120
+
+
+def test_approve_requires_named_workflow():
+    params = make_approve_params()
+    params["context"]["adapter"].pop("workflow")
+
+    response = make_client().post(
+        "/api",
+        json={"jsonrpc": "2.0", "id": "approve-1", "method": "approve", "params": params},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32602
+
+
+def test_approve_invalid_command_is_redacted_from_error_detail():
+    command = "secret-token-" * 2000
+    params = make_approve_params()
+    params["command"] = command
+
+    response = make_client().post(
+        "/api",
+        json={"jsonrpc": "2.0", "id": "approve-1", "method": "approve", "params": params},
+    )
+
+    assert response.status_code == 400
+    serialized = response.text
+    assert response.json()["error"]["code"] == -32602
+    assert "[redacted]" in serialized
+    assert "secret-token" not in serialized
+
+
+def test_approve_internal_error_redacts_command(capsys, tmp_path: Path):
+    secret_command = "curl -H 'Authorization: Bearer secret-token' example.test"
+
+    class FakeAdapter:
+        def _workspace_path(self) -> Path:
+            return tmp_path
+
+    class FakeWorkflowManager(_StubWorkflowManager):
+        def approve(self, *args: Any, **kwargs: Any) -> int:
+            raise WorkflowApprovalError("approval failed")
+
+    service = AgentJsonRpcService(
+        settings=make_settings(),
+        adapter_factory=cast(Any, lambda context: FakeAdapter()),
+        workflow_manager=cast(Any, FakeWorkflowManager()),
+    )
+    params = make_approve_params()
+    params["command"] = secret_command
+
+    response = make_client(service).post(
+        "/api",
+        json={"jsonrpc": "2.0", "id": "approve-1", "method": "approve", "params": params},
+    )
+
+    assert response.status_code == 500
+    stderr = capsys.readouterr().err
+    assert "[redacted]" in stderr
+    assert secret_command not in stderr
+    assert "secret-token" not in stderr
 
 
 def test_execution_context_preserves_project_role_payload():

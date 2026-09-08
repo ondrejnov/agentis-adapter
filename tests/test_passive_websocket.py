@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 from websockets.exceptions import ConnectionClosedOK
 
 from common.config import Settings
-from common.models import ApproveParams
 from common.rpc.dispatcher import JsonRpcRoute
 from common.rpc.passive_websocket import PassiveWebSocketClient
+
+
+class ApproveParams(BaseModel):
+    run_id: str
+    approved: bool
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -60,6 +67,26 @@ def test_passive_websocket_invalid_json_returns_parse_error():
     assert response["error"]["code"] == -32700
 
 
+def test_passive_websocket_notification_does_not_return_response():
+    class FakeService:
+        def approve(self, params: ApproveParams) -> dict[str, Any]:
+            return {"approved": params.approved}
+
+    client = PassiveWebSocketClient(
+        settings=make_settings(),
+        dispatch={"approve": JsonRpcRoute(ApproveParams, "approve")},
+        service_container=SimpleNamespace(agent_jsonrpc_service=FakeService()),
+    )
+
+    response = asyncio.run(
+        client.dispatch_message(
+            '{"jsonrpc":"2.0","method":"approve","params":{"run_id":"run-1","approved":true}}'
+        )
+    )
+
+    assert response is None
+
+
 def test_passive_websocket_connect_uses_configured_max_message_size(monkeypatch):
     captured: dict[str, Any] = {}
 
@@ -87,9 +114,121 @@ def test_passive_websocket_connect_uses_configured_max_message_size(monkeypatch)
     assert captured["kwargs"]["max_size"] == 123456
 
 
-def test_passive_websocket_shutdown_closes_connection_without_reconnect(monkeypatch):
+def test_passive_websocket_dispatches_requests_concurrently(monkeypatch):
+    blocked_started = threading.Event()
+    release_blocked = threading.Event()
+    sent: list[dict[str, Any]] = []
+    fast_response_sent = threading.Event()
+
     class FakeService:
         def approve(self, params: ApproveParams) -> dict[str, Any]:
+            if not params.approved:
+                blocked_started.set()
+                assert release_blocked.wait(timeout=2)
+            return {"approved": params.approved}
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self._messages = [
+                '{"jsonrpc":"2.0","id":"slow","method":"approve","params":{"run_id":"run-1","approved":false}}',
+                '{"jsonrpc":"2.0","id":"fast","method":"approve","params":{"run_id":"run-1","approved":true}}',
+            ]
+
+        async def __aenter__(self) -> FakeConnection:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def recv(self) -> str:
+            if self._messages:
+                return self._messages.pop(0)
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def send(self, data: str) -> None:
+            response = json.loads(data)
+            sent.append(response)
+            if response["id"] == "fast":
+                fast_response_sent.set()
+
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=lambda *_args, **_kwargs: FakeConnection()))
+    client = PassiveWebSocketClient(
+        settings=make_settings(),
+        dispatch={"approve": JsonRpcRoute(ApproveParams, "approve")},
+        service_container=SimpleNamespace(agent_jsonrpc_service=FakeService()),
+    )
+
+    async def scenario() -> None:
+        runner = asyncio.create_task(client._run_once())
+        assert await asyncio.wait_for(asyncio.to_thread(blocked_started.wait, 2), timeout=2)
+        assert await asyncio.wait_for(asyncio.to_thread(fast_response_sent.wait, 2), timeout=2)
+        assert [response["id"] for response in sent] == ["fast"]
+        client.request_shutdown("SIGTERM")
+        release_blocked.set()
+        await asyncio.wait_for(runner, timeout=2)
+
+    asyncio.run(scenario())
+
+    assert [response["id"] for response in sent] == ["fast", "slow"]
+
+
+def test_passive_websocket_disconnect_does_not_wait_for_running_dispatch(monkeypatch):
+    dispatch_started = threading.Event()
+    release_dispatch = threading.Event()
+    sent: list[str] = []
+
+    class FakeService:
+        def approve(self, params: ApproveParams) -> dict[str, Any]:
+            dispatch_started.set()
+            assert release_dispatch.wait(timeout=2)
+            return {"approved": params.approved}
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self._message_sent = False
+
+        async def __aenter__(self) -> FakeConnection:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def recv(self) -> str:
+            if not self._message_sent:
+                self._message_sent = True
+                return '{"jsonrpc":"2.0","id":"slow","method":"approve","params":{"run_id":"r","approved":true}}'
+            assert await asyncio.to_thread(dispatch_started.wait, 2)
+            raise ConnectionClosedOK(None, None)
+
+        async def send(self, data: str) -> None:
+            sent.append(data)
+
+    monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=lambda *_args, **_kwargs: FakeConnection()))
+    client = PassiveWebSocketClient(
+        settings=make_settings(),
+        dispatch={"approve": JsonRpcRoute(ApproveParams, "approve")},
+        service_container=SimpleNamespace(agent_jsonrpc_service=FakeService()),
+    )
+
+    async def scenario() -> None:
+        runner = asyncio.create_task(client._run_once())
+        assert await asyncio.wait_for(asyncio.to_thread(dispatch_started.wait, 2), timeout=2)
+        await asyncio.wait_for(runner, timeout=0.5)
+        assert sent == []
+        release_dispatch.set()
+
+    asyncio.run(scenario())
+
+
+def test_passive_websocket_shutdown_closes_connection_without_reconnect(monkeypatch):
+    dispatch_started = threading.Event()
+    release_dispatch = threading.Event()
+
+    class FakeService:
+        def approve(self, params: ApproveParams) -> dict[str, Any]:
+            dispatch_started.set()
+            assert release_dispatch.wait(timeout=2)
             return {"approved": params.approved}
 
     sent: list[str] = []
@@ -130,9 +269,12 @@ def test_passive_websocket_shutdown_closes_connection_without_reconnect(monkeypa
 
     async def scenario() -> None:
         runner = asyncio.create_task(client.run_forever())
-        while not sent:
-            await asyncio.sleep(0.01)
+        assert await asyncio.wait_for(asyncio.to_thread(dispatch_started.wait, 2), timeout=2)
         client.request_shutdown("SIGTERM")
+        await asyncio.sleep(0)
+        assert not runner.done()
+        assert sent == []
+        release_dispatch.set()
         await asyncio.wait_for(runner, timeout=2)
 
     asyncio.run(scenario())

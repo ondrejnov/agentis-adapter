@@ -93,7 +93,9 @@ workflow:
           exit 0
         fi
         git push --set-upstream origin "${BRANCH}:refs/heads/${BRANCH}"
-        if gh pr view "$BRANCH" --json url --jq .url >.agentis/outputs/pull-request-url 2>/dev/null; then
+        if gh pr list --state open --head "$BRANCH" --base "$BASE_BRANCH" --limit 1 \
+          --json url --jq '.[0].url // empty' >.agentis/outputs/pull-request-url \
+          && [ -s .agentis/outputs/pull-request-url ]; then
           echo "Pull request už existuje: $(cat .agentis/outputs/pull-request-url)"
         else
           gh pr create --base "$BASE_BRANCH" --head "$BRANCH" \

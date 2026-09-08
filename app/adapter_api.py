@@ -16,6 +16,7 @@ from common.git_adapter import GitAdapterService
 from common.models import (
     AbortParams,
     AddMessageParams,
+    ApproveParams,
     StartParams,
     UndoParams,
 )
@@ -25,6 +26,7 @@ from common.rpc.jsonrpc import AgentJsonRpcService
 _DISPATCH: dict[str, JsonRpcRoute] = {
     "start": JsonRpcRoute(StartParams, "start"),
     "add_message": JsonRpcRoute(AddMessageParams, "add_message"),
+    "approve": JsonRpcRoute(ApproveParams, "approve"),
     "abort": JsonRpcRoute(AbortParams, "abort"),
     "undo": JsonRpcRoute(UndoParams, "undo"),
 }

@@ -10,18 +10,24 @@ from common.models import (
     AddMessageParams,
     AgentExecutionContextPayload,
     AbortParams,
+    ApproveParams,
     QuestionParams,
     RunEventPayload,
     RunStatePayload,
     StartParams,
     UndoParams,
 )
-from common.prompt_context import build_comments_block, build_parent_task_block
+from common.prompt_context import build_comments_block, build_parent_task_block, load_repository_role
 from common.adapter_base import BaseAdapterService
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 from common.attachments import build_attachments_block, materialize_attachments, next_attachment_index
 from common.status import get_status_registry
-from common.workflow.manager import WorkflowBusyError, WorkflowManager
+from common.workflow.manager import (
+    WorkflowApprovalError,
+    WorkflowApprovalTimeoutError,
+    WorkflowBusyError,
+    WorkflowManager,
+)
 
 
 class AgentJsonRpcException(Exception):
@@ -108,6 +114,20 @@ class AgentJsonRpcService:
             return prompt
         return f"{prompt}\n\n{block}" if prompt.strip() else block
 
+    @staticmethod
+    def _prompt_with_project_role(prompt: str, context: AgentExecutionContextPayload, worktree: str) -> str:
+        role = context.project_role
+        if role is None:
+            return prompt
+
+        role_prompt = load_repository_role(worktree, role.name)
+        if role_prompt is None and isinstance(role.prompt, str) and role.prompt.strip():
+            role_prompt = role.prompt.strip()
+        if not role_prompt:
+            return prompt
+        block = f"<role>\n{role_prompt}\n</role>"
+        return f"{block}\n\n{prompt}" if prompt.strip() else block
+
     def _start_workflow_run(
         self,
         run: RunStatePayload,
@@ -133,6 +153,7 @@ class AgentJsonRpcService:
                     worktree = working_dir
             if worktree is None:
                 worktree = str(adapter._workspace_path())
+            prompt = self._prompt_with_project_role(prompt, context, worktree)
             prompt = self._prompt_with_parent_task(prompt, context)
             prompt = self._prompt_with_attachments(prompt, context, worktree, message_attachments)
             workflow_step = self._run_adapter_step(
@@ -264,6 +285,29 @@ class AgentJsonRpcService:
         )
         return self._start_workflow_run(run, context, params.message, message_attachments=params.attachments)
 
+    def approve(self, params: ApproveParams) -> int:
+        context = params.context
+        try:
+            adapter = self._adapter_factory(context)
+            worktree = adapter._workspace_path()
+            if not worktree.is_dir():
+                raise FileNotFoundError(f"Approval workspace does not exist or is not a directory: {worktree}")
+            return self.workflow_manager.approve(
+                context,
+                str(worktree),
+                params.approval_id,
+                params.command,
+                timeout=params.timeout_seconds,
+            )
+        except WorkflowApprovalTimeoutError as exc:
+            raise AgentJsonRpcException(504, str(exc)) from exc
+        except (FileNotFoundError, ValueError) as exc:
+            raise AgentJsonRpcException(400, str(exc)) from exc
+        except WorkflowApprovalError as exc:
+            raise AgentJsonRpcException(500, str(exc)) from exc
+        except Exception as exc:
+            raise AgentJsonRpcException(500, f"Adapter error: {exc}") from exc
+
     def question(self, params: QuestionParams) -> dict[str, Any]:
         return {}
 
@@ -339,7 +383,16 @@ class AgentJsonRpcService:
     @classmethod
     def _sanitize_for_log(cls, value: Any) -> Any:
         if isinstance(value, dict):
-            return {key: cls._sanitize_for_log(item) for key, item in value.items()}
+            location = value.get("loc")
+            redact_input = isinstance(location, (list, tuple)) and any(
+                isinstance(item, str) and item.lower() == "command" for item in location
+            )
+            return {
+                key: "[redacted]"
+                if key.lower() == "command" or (redact_input and key == "input")
+                else cls._sanitize_for_log(item)
+                for key, item in value.items()
+            }
         if isinstance(value, list):
             return [cls._sanitize_for_log(item) for item in value]
         if isinstance(value, tuple):
