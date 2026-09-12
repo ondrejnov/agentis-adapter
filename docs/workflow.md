@@ -223,6 +223,8 @@ Ve string hodnotách YAML lze použít tokeny `[%NAME%]`; nahradí se při načt
 
 ### Prostředí kroků
 
+`AGENTIS_EFFORT` nemusí být nastavená. Šablona `run-agent` předává `--effort` pouze pro neprázdnou hodnotu; jinak volbu vynechá a ponechá výchozí chování modelu. Vlastní skripty mohou použít `${AGENTIS_EFFORT:+--effort "$AGENTIS_EFFORT"}`, aby fungovaly i pod `set -u`.
+
 Kromě `workflow.env` / `step.env` dostane každý krok od adapteru:
 
 - všechny interpolační tokeny jako env proměnné (`WORKDIR`, `BRANCH`, …),

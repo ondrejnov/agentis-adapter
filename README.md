@@ -148,7 +148,7 @@ workflow:
         agentiscode ${RUN_AGENT_FLAGS:-} --adapter "$ADAPTER" \
           ${AGENTIS_SESSION_ID:+--resume "$AGENTIS_SESSION_ID"} \
           --model "$MODEL" \
-          --effort "$AGENTIS_EFFORT" \
+          ${AGENTIS_EFFORT:+--effort "$AGENTIS_EFFORT"} \
           --run-id "$AGENTIS_RUN_ID" \
           --task-id "$AGENTIS_TASK_ID" \
           --final-output "$OUTPUT_DIR/final-comment.md" \
