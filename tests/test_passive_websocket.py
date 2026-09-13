@@ -37,7 +37,7 @@ def make_settings(**overrides: Any) -> Settings:
     return Settings(**values)
 
 
-def test_passive_websocket_dispatch_preserves_response_id():
+def test_passive_websocket_dispatch_preserves_response_id(capsys):
     class FakeService:
         def approve(self, params: ApproveParams) -> dict[str, Any]:
             return {"approved": params.approved}
@@ -55,6 +55,28 @@ def test_passive_websocket_dispatch_preserves_response_id():
     )
 
     assert response == {"jsonrpc": "2.0", "id": "run-123:start", "result": {"approved": True}}
+    [line] = capsys.readouterr().out.splitlines()
+    entry = json.loads(line)
+    assert entry["transport"] == "websocket"
+    assert entry["method"] == "approve"
+    assert "run-1" not in line
+
+
+@pytest.mark.parametrize(
+    ("raw", "method"),
+    [
+        ('{"method":"secret\\nvalue","params":{"token":"secret"}}', "unknown"),
+        ('{"method": {"token": "secret"}}', "unknown"),
+        ('["secret"]', "unknown"),
+        ("secret\n{", "invalid_json"),
+    ],
+)
+def test_passive_websocket_logs_invalid_requests_without_content(raw, method, capsys):
+    client = PassiveWebSocketClient(settings=make_settings(), dispatch={}, service_container=SimpleNamespace())
+    asyncio.run(client.dispatch_message(raw))
+    [line] = capsys.readouterr().out.splitlines()
+    assert "secret" not in line
+    assert json.loads(line)["method"] == method
 
 
 def test_passive_websocket_invalid_json_returns_parse_error():
@@ -79,9 +101,7 @@ def test_passive_websocket_notification_does_not_return_response():
     )
 
     response = asyncio.run(
-        client.dispatch_message(
-            '{"jsonrpc":"2.0","method":"approve","params":{"run_id":"run-1","approved":true}}'
-        )
+        client.dispatch_message('{"jsonrpc":"2.0","method":"approve","params":{"run_id":"run-1","approved":true}}')
     )
 
     assert response is None

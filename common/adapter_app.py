@@ -3,8 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from starlette.middleware.base import RequestResponseEndpoint
+from starlette.responses import Response
 
+from common.adapter_base import log_json
 from common.config import Settings
 from common.rpc.dispatcher import JsonRpcRoute
 from common.status import get_status_registry
@@ -31,6 +34,20 @@ def create_adapter_app(
     """
     app = FastAPI(title=title, version=version)
     configure_services(app, settings)
+
+    @app.middleware("http")
+    async def log_request(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        try:
+            return await call_next(request)
+        finally:
+            method = request.method
+            log_json(
+                "info",
+                "Incoming request",
+                transport="http",
+                method=method if method in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} else "unknown",
+                route=getattr(request.scope.get("route"), "path", "unknown"),
+            )
 
     @app.get("/health")
     async def health() -> dict[str, str]:

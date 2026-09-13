@@ -1,5 +1,6 @@
 """Testy StatusRegistry a read-only status endpointů."""
 
+import json
 from typing import Any
 
 import pytest
@@ -25,6 +26,22 @@ def make_context(**overrides: Any) -> AgentExecutionContextPayload:
     }
     values.update(overrides)
     return AgentExecutionContextPayload(**values)
+
+
+@pytest.mark.parametrize(
+    ("path", "route"),
+    [("/health", "/health"), ("/runs/secret/log", "/runs/{run_id}/log"), ("/secret", "unknown")],
+)
+def test_http_requests_are_logged_without_sensitive_values(path, route, capsys):
+    client = TestClient(create_app())
+    capsys.readouterr()
+    client.get(path, params={"token": "secret"}, headers={"Authorization": "Bearer secret"})
+    [line] = capsys.readouterr().out.splitlines()
+    entry = json.loads(line)
+    assert entry["transport"] == "http"
+    assert entry["method"] == "GET"
+    assert entry["route"] == route
+    assert "secret" not in line
 
 
 def test_run_lifecycle_in_snapshot():
@@ -134,7 +151,8 @@ def test_status_endpoints():
     assert status["runs"]["running"][0]["run_id"] == "run-1"
 
     log = client.get("/log").json()
-    assert [entry["message"] for entry in log["entries"]] == ["hello"]
+    assert [entry["message"] for entry in log["entries"]] == ["hello", "Incoming request"]
+    assert log["entries"][1]["fields"] == {"transport": "http", "method": "GET", "route": "/status"}
 
     run_log = client.get("/runs/run-1/log").json()
     assert [entry["text"] for entry in run_log["entries"]] == ["Edit app/main.py"]

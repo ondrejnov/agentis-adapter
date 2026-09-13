@@ -212,9 +212,7 @@ class WorkflowManager:
             env.update({key: value if value is not None else "" for key, value in values.items()})
 
         if not env:
-            return workflow.model_copy(
-                update={"workflow": workflow.workflow.model_copy(update={"envFiles": []})}
-            )
+            return workflow.model_copy(update={"workflow": workflow.workflow.model_copy(update={"envFiles": []})})
 
         steps = [step.model_copy(update={"env": {**step.env, **env}}) for step in workflow.workflow.steps]
         spec = workflow.workflow.model_copy(update={"envFiles": [], "steps": steps})
@@ -1026,7 +1024,9 @@ class WorkflowManager:
         if not run.report_to_agentis:
             return
         agent_error = self._agent_error_from_log(completed.result.log_tail)
-        message = f"{step.name}: {agent_error}" if agent_error else f"Krok selhal ({completed.result.status}): {step.name}"
+        message = (
+            f"{step.name}: {agent_error}" if agent_error else f"Krok selhal ({completed.result.status}): {step.name}"
+        )
         data = {
             "step": completed.step_name,
             "step_index": completed.index,

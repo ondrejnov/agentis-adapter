@@ -154,6 +154,7 @@ Selhání průběžné telemetrie je best-effort a loguje se na stderr; selhán�
 
 ## Observabilita
 
+- Každá přijatá WebSocket zpráva a každý HTTP požadavek má stručný jednořádkový JSON záznam na stdout (`Incoming request`). WebSocket uvádí známou RPC metodu a velikost zprávy (počet znaků pro text, bajtů pro binární zprávy); neznámé metody a neplatný JSON mají označení `unknown` a `invalid_json`. HTTP se loguje po dispatchi a uvádí metodu a šablonu route, případně `unknown`. Těla, ID, hlavičky, query parametry ani konkrétní hodnoty v URL se nelogují.
 - `GET /health` — liveness.
 - `GET /status` — snapshot status registru: stav WebSocket spojení, běžící/dokončené runy, statistiky od startu.
 - `GET /log?after=&limit=` — in-memory ring buffer strukturovaných záznamů poslaných přes `log_json`; nezahrnuje automaticky Python logging, stderr ani log soubory kroků.

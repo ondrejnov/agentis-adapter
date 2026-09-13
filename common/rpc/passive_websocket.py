@@ -8,6 +8,7 @@ import signal
 from collections.abc import Mapping
 from typing import Any
 
+from common.adapter_base import log_json
 from common.config import Settings
 from common.rpc.dispatcher import JsonRpcRoute, dispatch_jsonrpc_payload, error_response
 from common.shutdown import drain_running_work
@@ -68,7 +69,10 @@ class PassiveWebSocketClient:
     async def run_forever(self) -> None:
         attempts = 0
         delay = self.settings.websocket_reconnect_initial_delay
-        while self.settings.websocket_reconnect_max_attempts == 0 or attempts < self.settings.websocket_reconnect_max_attempts:
+        while (
+            self.settings.websocket_reconnect_max_attempts == 0
+            or attempts < self.settings.websocket_reconnect_max_attempts
+        ):
             if self._shutdown_event.is_set():
                 return
             attempts += 1
@@ -177,8 +181,17 @@ class PassiveWebSocketClient:
         try:
             payload = json.loads(raw_message)
         except Exception as exc:
+            log_json("info", "Incoming request", transport="websocket", method="invalid_json", size=len(raw_message))
             return error_response(None, -32700, f"Parse error: {exc}")
 
+        method = payload.get("method") if isinstance(payload, dict) else None
+        log_json(
+            "info",
+            "Incoming request",
+            transport="websocket",
+            method=method if isinstance(method, str) and method in self.dispatch else "unknown",
+            size=len(raw_message),
+        )
         if isinstance(payload, dict):
             request_id = payload.get("id")
         result = await dispatch_jsonrpc_payload(payload, self.dispatch, self.service_container)

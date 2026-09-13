@@ -3111,16 +3111,25 @@ def test_jsonrpc_undo_without_run_returns_error(tmp_path: Path) -> None:
     assert excinfo.value.code == 400
 
 
-def test_jsonrpc_start_without_workflow_file_returns_error(tmp_path: Path) -> None:
+@pytest.mark.parametrize("workflow", [None, "approval"])
+def test_jsonrpc_start_without_workflow_file_returns_error(tmp_path: Path, capsys, workflow: str | None) -> None:
     # Vše běží přes workflow runtime — bez workflow souboru se vrací chyba do Agentisu.
     runner = FakeRunner()
     service, _manager, _calls = _service(tmp_path, runner)
 
+    context = _context(user_prompt="udelej X")
+    assert context.adapter is not None
+    context.adapter.workflow = workflow
     with pytest.raises(AgentJsonRpcException) as excinfo:
-        service.start(StartParams(context=_context(user_prompt="udelej X")))
+        service.start(StartParams(context=context))
 
     assert excinfo.value.code == 400
     assert "workflow" in str(excinfo.value).lower()
+    stderr = capsys.readouterr().err
+    assert f"[workflow-start] failed run_id={context.run_id}" in stderr
+    assert str(excinfo.value) in stderr
+    if workflow:
+        assert "approval.yaml" in stderr
 
 
 def test_jsonrpc_start_with_workflow_runtime_is_nonblocking(tmp_path: Path) -> None:

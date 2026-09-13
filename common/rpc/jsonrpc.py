@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -171,6 +172,8 @@ class AgentJsonRpcService:
         except FileNotFoundError as exc:
             run.status = "failed"
             get_status_registry().run_finished(run.run_id, "failed")
+            sys.stderr.write(f"[workflow-start] failed run_id={run.run_id} error={exc}\n")
+            sys.stderr.flush()
             raise AgentJsonRpcException(400, str(exc)) from exc
         except Exception as exc:
             run.status = "failed"
