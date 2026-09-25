@@ -256,16 +256,29 @@ class ApproveParams(BaseModel):
 
     context: AgentExecutionContextPayload
     approval_id: str = Field(min_length=1, max_length=255)
-    command: str = Field(min_length=1, max_length=20_000)
+    command: str | None = Field(min_length=1, max_length=20_000)
     timeout_seconds: float = Field(default=300, gt=0, le=3600, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def require_workflow(self) -> ApproveParams:
         if self.context.adapter is None or self.context.adapter.workflow is None:
             raise ValueError("context.adapter.workflow is required for approve")
-        if not self.command.strip():
-            raise ValueError("command must not be blank")
         return self
+
+
+class ApproveResult(BaseModel):
+    """Extended approval response when the workflow declares APPROVED_METADATA."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    approved: int = Field(strict=True, ge=0, le=1)
+    resolved_metadata: dict[str, Any]
+
+    @field_validator("resolved_metadata")
+    @classmethod
+    def validate_json_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        json.dumps(value, allow_nan=False)
+        return value
 
 
 class AbortParams(BaseModel):

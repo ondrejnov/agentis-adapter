@@ -89,7 +89,9 @@ async def dispatch_jsonrpc_payload(
 
     request_id = payload.get("id")
     if payload.get("jsonrpc") != "2.0":
-        return JsonRpcDispatchResult(error_response(request_id, INVALID_REQUEST, "Server supports only JSON-RPC 2.0"), 400)
+        return JsonRpcDispatchResult(
+            error_response(request_id, INVALID_REQUEST, "Server supports only JSON-RPC 2.0"), 400
+        )
 
     method = payload.get("method")
     params = payload.get("params")
@@ -107,7 +109,7 @@ async def dispatch_jsonrpc_payload(
         result = await asyncio.to_thread(getattr(service, entry.handler_name), validated_params)
     except AgentJsonRpcException as exc:
         http_status = http_status_for_agent_error(exc.code)
-        if http_status == 500:
+        if exc.code:
             log_internal_error("JSON-RPC method failed", exc, request_id, method, params)
         return JsonRpcDispatchResult(error_response(request_id, exc.code, exc.message, exc.data), http_status)
     except NotImplementedError as exc:

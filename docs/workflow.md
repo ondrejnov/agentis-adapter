@@ -21,7 +21,7 @@ Klíčové zdrojáky:
 
 JSON-RPC metody `start`, `add_message` a `approve` používají workflow runtime. `context.adapter.runtime` už nerozhoduje o routingu; hodnota `docker` nebo `local` pouze vynutí odpovídající executor. Pojmenované workflow vybírá `context.adapter.workflow = "<name>"` (typicky followup akce jako merge/close nebo approval), jinak se podle scope použije `default.yaml` nebo `project.yaml`.
 
-`start` / `add_message` vrací rychle — workflow běží na pozadí v daemon threadu, průběh se hlásí do Agentisu přes `run.adapter_event` (`workflow`, `workflow_step`, na konci `idle`). `approve` naopak synchronně čeká na své pojmenované workflow a vrací integer `1` nebo `0`; jeho vnořený run neposílá lifecycle eventy ani běžné outputs. Produkční dispatch vystavuje `start`, `add_message`, `approve`, `abort` a `undo`; `question` vrátí JSON-RPC `Method not found`. `abort` nastaví hlavní run i jeho approvals jako abortované a smaže nebo zastaví aktivní kroky podle labels; funguje idempotentně i bez aktivního runu známého procesu.
+`start` / `add_message` vrací rychle — workflow běží na pozadí v daemon threadu, průběh se hlásí do Agentisu přes `run.adapter_event` (`workflow`, `workflow_step`, na konci `idle`). `approve` naopak synchronně čeká na své pojmenované workflow a vrací integer `1` nebo `0`, případně objekt s rozhodnutím a volitelnými metadaty (viz Outputs); jeho vnořený run neposílá lifecycle eventy ani běžné outputs. Produkční dispatch vystavuje `start`, `add_message`, `approve`, `abort` a `undo`; `question` vrátí JSON-RPC `Method not found`. `abort` nastaví hlavní run i jeho approvals jako abortované a smaže nebo zastaví aktivní kroky podle labels; funguje idempotentně i bez aktivního runu známého procesu.
 
 U paralelního workflow přichází `workflow_step` eventy v reálném pořadí běhu, ne nutně v pořadí YAML. Data eventu obsahují `step_index`, `step`, `needs` a u spuštěných kroků `job`, takže UI může řadit buď časově, nebo podle definice workflow.
 
@@ -279,9 +279,26 @@ Kroky komunikují s adapterem přes soubory; cesty jsou relativní k output root
 
 Pole v tabulce jsou funkčně potřebná pro uvedené chování, ale současné schema je s výjimkou `var.name` / `var.valueFrom` nevynucuje podle typu; neúplný output proto runtime typicky ignoruje. Schema navíc přijímá pole `filename`, které manager aktuálně nepoužívá.
 
-Approval workflow má přísnější kontrakt: v celé resolved definici musí být právě jeden `var` output s názvem `APPROVED`. Produkující krok musí uspět a nesmí být skipped; hodnota musí být po oříznutí whitespace přesně `1` nebo `0`. Approval nepoužije žádné ostatní outputs ani callbacks. Fatální selhání, abort, deadline nebo neplatný výsledek vrací technický JSON-RPC error. `continueOnError` zachovává běžnou sémantiku: pokud workflow jako celek skončí `success` a platný producent doběhne, jeho výsledek je použit.
+Approval workflow má přísnější kontrakt: v celé resolved definici musí být právě jeden `var` output s názvem `APPROVED`. Produkující krok musí uspět a nesmí být skipped; hodnota musí být po oříznutí whitespace přesně `1` nebo `0`. Volitelný `var` output `APPROVED_METADATA` (nejvýše jeden v celém workflow) načte JSON objekt ze souboru určeného `valueFrom`. Bez této deklarace zůstává RPC result integer `1`/`0`; s ní se vrací `{"approved": 1, "resolved_metadata": {"score": 0.95}}`, případně stejný objekt s `approved: 0`. Prázdný objekt `{}` se zachová. Deklarovaný metadata output musí vzniknout v úspěšném, nepřeskočeném kroku; chybějící/prázdný soubor, neplatný JSON, pole, skalár, `null`, `NaN` či nekonečno jsou chyba. Cesta nesmí opustit output root, ani přes symlink.
 
-Každý approval dostane namespace a task label odvozené z `approval_id`, takže nekoliduje s Joby, kontejnery ani procesy hlavního workflow. Deadline nastaví abort event a zároveň cíleně ukončí executor resources konkrétního attemptu. Bundled `approval.yaml` nedědí infrastrukturní mounty z `_base.yaml`: připojuje jen vlastní run adresář a spouští Claude/OpenCode v text-only režimu bez nástrojů a bez Agentis credentials. Projektové přepsání `approval.yaml` je bezpečnostní policy projektu; zejména local executor není sandbox a autor workflow nesmí command přímo vykonat ani interpolovat do shellu.
+```yaml
+- name: Review command
+  run: |
+    # Příklad výstupů; skutečné rozhodnutí a skóre určuje vaše review policy.
+    printf '1\n' > "$AGENTIS_RUN_DIR/approved.data"
+    printf '%s\n' '{"score": 0.95}' > "$AGENTIS_RUN_DIR/approved-metadata.json"
+  outputs:
+    - type: var
+      name: APPROVED
+      valueFrom: approved.data
+    - type: var
+      name: APPROVED_METADATA
+      valueFrom: approved-metadata.json
+```
+
+Approval nepoužije žádné ostatní completion outputs ani callbacks. Fatální selhání, abort, deadline nebo neplatný výsledek vrací technický JSON-RPC error. `continueOnError` zachovává běžnou sémantiku: pokud workflow jako celek skončí `success` a platní producenti doběhnou, jejich výsledek je použit. Hodnoty se zachytí po dokončení produkujícího kroku, takže opakovaný request se stejným approval ID nečte pozdější změny souborů.
+
+Každý approval dostane namespace a task label odvozené z `approval_id`, takže nekoliduje s Joby, kontejnery ani procesy hlavního workflow. Deadline nastaví abort event a zároveň cíleně ukončí executor resources konkrétního attemptu. Bundled `approval.yaml` nedědí infrastrukturní mounty z `_base.yaml`: připojuje jen vlastní run adresář. Aktuálně jde o ukázkové workflow s pevným `APPROVED=1` a `APPROVED_METADATA={"score": 1.0}`. Projektové přepsání `approval.yaml` určuje skutečnou review policy; zejména local executor není sandbox a autor workflow nesmí command přímo vykonat ani interpolovat do shellu.
 
 Artifact `path` může obsahovat `*`, `?`, `[]` a rekurzivní `**`. Jeden output tak může přiložit více souborů; runtime pro jejich počet ani celkovou velikost aktuálně nevynucuje limit, takže glob musí být dostatečně úzký.
 
@@ -318,7 +335,7 @@ Workflow bez sekce (`project.yaml`, `merge.yaml`, `close.yaml`) žádné akce ne
 
 ## Workflow v tomto repozitáři
 
-Repozitář obsahuje dvě odlišné sady. Bundled fallback v `workflows/` se distribuuje s adapterem a obsahuje `_base.yaml`, `default.yaml`, `project.yaml` a `approval.yaml`; běžná spustitelná workflow mají pouze standardní agentí krok a žádné followups, approval vrací pouze `APPROVED`. Projektová sada v `.agentis/workflows/` konfiguruje samotný vývoj tohoto repozitáře a navíc obsahuje `slack.yaml`, `merge.yaml` a `close.yaml`.
+Repozitář obsahuje dvě odlišné sady. Bundled fallback v `workflows/` se distribuuje s adapterem a obsahuje `_base.yaml`, `default.yaml`, `project.yaml` a `approval.yaml`; běžná spustitelná workflow mají pouze standardní agentí krok a žádné followups, approval vrací `APPROVED` a volitelně `APPROVED_METADATA`. Projektová sada v `.agentis/workflows/` konfiguruje samotný vývoj tohoto repozitáře a navíc obsahuje `slack.yaml`, `merge.yaml` a `close.yaml`.
 
 Projektová workflow dědí přes `.agentis/workflows/_base.yaml` sdílenou infrastrukturu (image, `imagePullSecrets`, `envFiles`, společné env a mounty) a šablonu `run-agent`:
 
@@ -333,7 +350,7 @@ Projektová workflow dědí přes `.agentis/workflows/_base.yaml` sdílenou infr
 | `workflows/_base.yaml` | Minimální bundled šablona `run-agent` |
 | `workflows/default.yaml` | Bundled fallback běžného tasku: jediný krok `Run agent` |
 | `workflows/project.yaml` | Bundled fallback project scope: jediný krok `Run agent` |
-| `workflows/approval.yaml` | Bundled approval: text-only agent bez nástrojů posoudí command jako nedůvěryhodná data a zapíše `APPROVED=1|0` |
+| `workflows/approval.yaml` | Ukázkové approval workflow: zapíše `APPROVED=1` a JSON metadata `{"score": 1.0}` |
 
 ## Časté chyby
 

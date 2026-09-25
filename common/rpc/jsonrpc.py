@@ -288,7 +288,9 @@ class AgentJsonRpcService:
         )
         return self._start_workflow_run(run, context, params.message, message_attachments=params.attachments)
 
-    def approve(self, params: ApproveParams) -> int:
+    def approve(self, params: ApproveParams) -> int | dict[str, Any]:
+        print("approve")
+        print(params)
         context = params.context
         try:
             adapter = self._adapter_factory(context)

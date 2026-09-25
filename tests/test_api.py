@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import cast
 from typing import Any
 
+import pytest
 
 from common.config import Settings
 from app.adapter_api import create_app, _DISPATCH
@@ -87,7 +88,7 @@ class _StubWorkflowManager:
         command: str,
         *,
         timeout: float,
-    ) -> int:
+    ) -> int | dict[str, Any]:
         return 1
 
 
@@ -128,7 +129,10 @@ def make_approve_params() -> dict[str, Any]:
     }
 
 
-def test_approve_returns_jsonrpc_integer_and_uses_existing_workspace(tmp_path: Path):
+@pytest.mark.parametrize(
+    "result", [0, 1, {"approved": 1, "resolved_metadata": {"score": 0.95}}, {"approved": 0, "resolved_metadata": {}}]
+)
+def test_approve_returns_jsonrpc_result_and_uses_existing_workspace(tmp_path: Path, result):
     captured: dict[str, Any] = {}
 
     class FakeAdapter:
@@ -144,7 +148,7 @@ def test_approve_returns_jsonrpc_integer_and_uses_existing_workspace(tmp_path: P
             command: str,
             *,
             timeout: float,
-        ) -> int:
+        ) -> int | dict[str, Any]:
             captured.update(
                 context=context,
                 worktree=worktree,
@@ -152,7 +156,7 @@ def test_approve_returns_jsonrpc_integer_and_uses_existing_workspace(tmp_path: P
                 command=command,
                 timeout=timeout,
             )
-            return 0
+            return result
 
     service = AgentJsonRpcService(
         settings=make_settings(),
@@ -165,7 +169,7 @@ def test_approve_returns_jsonrpc_integer_and_uses_existing_workspace(tmp_path: P
     )
 
     assert response.status_code == 200
-    assert response.json() == {"jsonrpc": "2.0", "id": "approve-1", "result": 0}
+    assert response.json() == {"jsonrpc": "2.0", "id": "approve-1", "result": result}
     assert captured["worktree"] == str(tmp_path)
     assert captured["approval_id"] == "approval-1"
     assert captured["command"] == "poetry run pytest -q"

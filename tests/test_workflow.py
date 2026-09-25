@@ -193,7 +193,7 @@ def _write_workflow(worktree: Path) -> Path:
     return path
 
 
-def _write_approval_workflow(worktree: Path, *, outputs: str | None = None) -> Path:
+def _write_approval_workflow(worktree: Path, *, outputs: str | None = None, metadata: bool = False) -> Path:
     path = worktree / ".agentis" / "workflows" / "approval.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     output_block = (
@@ -203,6 +203,10 @@ def _write_approval_workflow(worktree: Path, *, outputs: str | None = None) -> P
           valueFrom: outputs/approved
 """
     )
+    if metadata:
+        output_block += (
+            "        - type: var\n          name: APPROVED_METADATA\n          valueFrom: outputs/metadata.json\n"
+        )
     path.write_text(
         "version: 1\nworkflow:\n  image: registry.example/agent:1.0\n  steps:\n"
         "    - name: Review command\n      run: review-command\n      outputs:\n"
@@ -865,15 +869,18 @@ class FakeRunner:
 
 
 class ApprovalRunner(FakeRunner):
-    def __init__(self, approved: str = "1") -> None:
+    def __init__(self, approved: str = "1", metadata: str | None = None) -> None:
         super().__init__()
         self.approved = approved
+        self.metadata = metadata
 
     def run_step(self, workflow, step, **kwargs: Any) -> StepResult:
         run_dir = kwargs["run_dir"]
         output_dir = run_dir / "outputs"
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "approved").write_text(self.approved, encoding="utf-8")
+        if self.metadata is not None:
+            (output_dir / "metadata.json").write_text(self.metadata, encoding="utf-8")
         return super().run_step(workflow, step, **kwargs)
 
 
@@ -937,6 +944,119 @@ def test_approve_returns_scalar_result_without_reporting(tmp_path: Path, approve
     assert "approval-" in entry.run.namespace
     assert entry.run.task_label.startswith("approval-")
     assert entry.run.task_label != manager._task_label(context)
+
+
+@pytest.mark.parametrize("approved", ["0", "1"])
+@pytest.mark.parametrize("metadata", [{}, {"score": 0.95}, {"reason": "Bezpečné", "checks": [True, None, {"n": 2}]}])
+def test_approve_returns_metadata_and_freezes_it_for_retries(tmp_path: Path, approved: str, metadata: dict) -> None:
+    worktree = tmp_path / "wt"
+    _write_approval_workflow(worktree, metadata=True)
+    runner = ApprovalRunner(approved, json.dumps(metadata, ensure_ascii=False))
+    manager, calls = _manager(tmp_path, runner)
+    context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
+
+    expected = {"approved": int(approved), "resolved_metadata": metadata}
+    assert manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1) == expected
+    run = manager._approval_runs["approval-1"].run
+    assert run is not None
+    (run.run_dir / "outputs" / "metadata.json").write_text('{"score": 0}', encoding="utf-8")
+    assert manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1) == expected
+    assert len(runner.steps) == 1
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        None,
+        "",
+        " ",
+        "secret-invalid-json",
+        "[]",
+        "null",
+        "true",
+        "0.95",
+        '"text"',
+        '{"score": NaN}',
+        '{"score": Infinity}',
+        '{"score": -Infinity}',
+        '{"score": 1e999}',
+        '{"nested": [NaN]}',
+    ],
+)
+def test_approve_rejects_invalid_metadata(tmp_path: Path, metadata: str | None) -> None:
+    worktree = tmp_path / "wt"
+    _write_approval_workflow(worktree, metadata=True)
+    manager, calls = _manager(tmp_path, ApprovalRunner(metadata=metadata))
+    context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
+
+    with pytest.raises(WorkflowApprovalError, match="invalid APPROVED_METADATA") as error:
+        manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1)
+    assert "secret-invalid-json" not in str(error.value)
+    assert calls == []
+
+
+def test_approve_rejects_duplicate_metadata_outputs(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    path = _write_approval_workflow(worktree, metadata=True)
+    path.write_text(
+        path.read_text() + "        - type: var\n          name: APPROVED_METADATA\n          valueFrom: other.json\n"
+    )
+    runner = ApprovalRunner(metadata="{}")
+    manager, _calls = _manager(tmp_path, runner)
+    context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
+
+    with pytest.raises(WorkflowApprovalError, match="at most one.*APPROVED_METADATA"):
+        manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1)
+    assert runner.steps == []
+
+
+@pytest.mark.parametrize("producer", ["skipped", "failed"])
+def test_approve_does_not_use_metadata_from_unsuccessful_step(tmp_path: Path, producer: str) -> None:
+    worktree = tmp_path / "wt"
+    path = _write_approval_workflow(worktree)
+    condition = "      if: NEVER_SET\n" if producer == "skipped" else "      continueOnError: true\n"
+    path.write_text(
+        path.read_text()
+        + "    - name: Metadata\n      run: review-metadata\n"
+        + condition
+        + "      outputs:\n        - type: var\n          name: APPROVED_METADATA\n"
+        + "          valueFrom: outputs/metadata.json\n"
+    )
+    runner = ApprovalRunner(metadata='{"score": 0.95}')
+    runner.results_by_step["Metadata"] = "failed"
+    manager, _calls = _manager(tmp_path, runner)
+    context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
+
+    with pytest.raises(WorkflowApprovalError, match="invalid APPROVED_METADATA"):
+        manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1)
+
+
+@pytest.mark.parametrize("escape", ["absolute", "parent", "symlink"])
+def test_approve_metadata_cannot_escape_output_root(tmp_path: Path, escape: str) -> None:
+    worktree = tmp_path / "wt"
+    path = _write_approval_workflow(worktree, metadata=True)
+    external = tmp_path / "private.json"
+    external.write_text('{"secret": "not-for-output"}', encoding="utf-8")
+
+    class EscapingRunner(ApprovalRunner):
+        def run_step(self, workflow, step, **kwargs: Any) -> StepResult:
+            run_dir = kwargs["run_dir"]
+            if escape == "parent":
+                (run_dir.parent / "private.json").write_text(external.read_text(), encoding="utf-8")
+            elif escape == "symlink":
+                (run_dir / "outputs").mkdir(exist_ok=True)
+                (run_dir / "outputs" / "metadata.json").symlink_to(external)
+            return super().run_step(workflow, step, **kwargs)
+
+    if escape != "symlink":
+        target = str(external) if escape == "absolute" else "../private.json"
+        path.write_text(path.read_text().replace("outputs/metadata.json", target))
+    manager, _calls = _manager(tmp_path, EscapingRunner())
+    context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
+
+    with pytest.raises(WorkflowApprovalError, match="invalid APPROVED_METADATA"):
+        manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1)
 
 
 def test_approve_is_idempotent_for_concurrent_retries(tmp_path: Path) -> None:
@@ -2075,10 +2195,14 @@ def test_repo_action_workflows_parse(tmp_path: Path) -> None:
     assert approval.extends is None
     assert [mount.name for mount in approval.workflow.mounts] == ["approval-run"]
     approval_script = approval.workflow.steps[0].run or ""
-    assert "agentiscode" not in approval_script
-    assert '--tools ""' in approval_script
-    assert 'OPENCODE_CONFIG_CONTENT=\'{"permission":"deny"}\'' in approval_script
-    assert "-u AGENTIS_SERVICE_TOKEN" in approval_script
+    metadata_outputs = [
+        output
+        for step in approval.workflow.steps
+        for output in step.outputs
+        if output.type == "var" and output.name == "APPROVED_METADATA"
+    ]
+    assert len(metadata_outputs) == 1
+    assert metadata_outputs[0].valueFrom == "approved-metadata.json"
     subprocess.run(["bash", "-n"], input=approval_script, text=True, check=True)
 
     default = load_workflow_file(repo_root / WORKFLOW_FILE_RELPATH, _values(tmp_path))

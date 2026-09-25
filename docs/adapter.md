@@ -86,7 +86,7 @@ Serving adapter nevybírá ani neimportuje konkrétní nástroj. Každý krok je
 | --- | --- | --- |
 | `start` | `context`, volitelně `fork_from_session_id` | Připraví workspace a spustí workflow; `fork_from_session_id` se přijme, ale aktuálně se nepoužívá |
 | `add_message` | `run_id`, `context`, `message`, `role`, `attachments` | Spustí workflow s follow-up promptem; `role` má default `user`, ale handler jej aktuálně nerozlišuje |
-| `approve` | `context`, `approval_id`, `command`, volitelně `timeout_seconds` | Nad existujícím workspace synchronně spustí pojmenované approval workflow a vrátí integer `1` nebo `0` |
+| `approve` | `context`, `approval_id`, `command`, volitelně `timeout_seconds` | Nad existujícím workspace synchronně spustí pojmenované approval workflow a vrátí `1`/`0`, případně objekt s rozhodnutím a metadaty |
 | `abort` | `context` | Idempotentně označí známý run i jeho approval runy jako abortované a ukončí kroky odpovídající labelům; může uspět i bez známého aktivního runu |
 | `undo` | `context` | Vrátí workspace do source snapshotu evidovaného u posledního runu tasku |
 
@@ -98,7 +98,11 @@ Centrální vstup do metod je `AgentJsonRpcService` (`common/rpc/jsonrpc.py`). P
 
 `approve` vyžaduje neprázdné `context.adapter.workflow`, stabilní `approval_id` (max. 255 znaků) a `command` (max. 20 000 znaků). `timeout_seconds` je celkový deadline v rozsahu `(0, 3600]` sekund, default 300 sekund. Command se beze změny uloží do approval `prompt.md`; adapter jej nevkládá do shellu a rediguje jej z dispatcher logů i validačních error detailů.
 
-Approval workflow musí deklarovat právě jeden `var` output `APPROVED`. Jeho úspěšný, nepřeskočený krok musí zapsat přesně `1` nebo `0` (okolní whitespace se ignoruje). Jen tyto dvě hodnoty se vracejí jako JSON-RPC integer `result`. Chybějící/neplatný output, failed/aborted run, timeout nebo chyba executoru jsou JSON-RPC error, nikoli `result: 0`.
+Approval workflow musí deklarovat právě jeden `var` output `APPROVED`. Jeho úspěšný, nepřeskočený krok musí zapsat přesně `1` nebo `0` (okolní whitespace se ignoruje). Bez metadat se vrací JSON-RPC integer `result` jako dosud.
+
+Volitelně lze deklarovat právě jeden další `var` output `APPROVED_METADATA` s `valueFrom` odkazujícím na UTF-8 JSON soubor relativně k run adresáři. Obsah musí být JSON objekt, například `{"score": 0.95}`; `{}` je platná hodnota. S tímto outputem má JSON-RPC `result` tvar `{"approved": 1, "resolved_metadata": {"score": 0.95}}` (také pro `approved: 0`). Metadata se vracejí jako objekt, nikoli JSON string. Deklarovaný output musí pocházet z úspěšného, nepřeskočeného kroku a jeho soubor musí existovat a obsahovat platný JSON objekt; pole, skaláry, `null` a nefinite čísla nejsou povolené. Agentis backend přijímá oba tvary odpovědi a metadata ukládá do `approves.resolved_metadata`.
+
+Chybějící/neplatný deklarovaný output, failed/aborted run, timeout nebo chyba executoru jsou JSON-RPC error, nikoli `result: 0`. Obsah neplatných metadat se do chyby nevypisuje.
 
 Approval run je v manageru oddělený od hlavního workflow stejného tasku, používá vlastní namespace/task label a neposílá `run.adapter_event`, completion outputs ani změny lifecycle. Stejné `approval_id` se stejným contextem a commandem se v paměti připojí k běžícímu runu nebo vrátí jeho dokončený výsledek; jiné vstupy pod stejným ID jsou chyba. Deadline prvního requestu je autoritativní i pro retry a při překročení cíleně abortuje resources daného attemptu. Manager drží nejvýše 1000 dokončených approval záznamů; registry nepřežije restart adapteru.
 

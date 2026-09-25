@@ -190,7 +190,7 @@ class PassiveWebSocketClient:
             "Incoming request",
             transport="websocket",
             method=method if isinstance(method, str) and method in self.dispatch else "unknown",
-            size=len(raw_message),
+            raw_message=raw_message,
         )
         if isinstance(payload, dict):
             request_id = payload.get("id")

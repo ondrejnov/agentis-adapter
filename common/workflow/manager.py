@@ -37,7 +37,7 @@ from common.config import Settings
 from common.workflow.docker_runtime import DockerContainerRunner
 from common.git_adapter import GitAdapterService
 from common.namespaces import namespace_for_context
-from common.models import AgentExecutionContextPayload, task_header_env
+from common.models import AgentExecutionContextPayload, ApproveResult, task_header_env
 from common.status import get_status_registry
 from common.workflow.local_runtime import LocalProcessRunner
 from common.workflow.runtime import (
@@ -259,11 +259,11 @@ class WorkflowManager:
         context: AgentExecutionContextPayload,
         worktree: str,
         approval_id: str,
-        command: str,
+        command: str | None,
         *,
         timeout: float = 300,
-    ) -> int:
-        """Spustí pojmenované approval workflow a synchronně vrátí jeho ``APPROVED`` var."""
+    ) -> int | dict[str, Any]:
+        """Vrátí ``APPROVED`` a případná JSON metadata z ``APPROVED_METADATA``."""
 
         workflow_name = self._workflow_name(context)
         if workflow_name is None:
@@ -343,10 +343,23 @@ class WorkflowManager:
         value = run.vars.get("APPROVED")
         if value not in {"0", "1"}:
             raise WorkflowApprovalError(f"Approval {approval_id!r} returned invalid APPROVED value")
+        if any(
+            output.type == "var" and output.name == "APPROVED_METADATA"
+            for step in run.workflow.workflow.steps
+            for output in step.outputs
+        ):
+            try:
+                metadata = json.loads(run.vars.get("APPROVED_METADATA", ""))
+                result = ApproveResult(approved=int(value), resolved_metadata=metadata)
+            except (ValueError, RecursionError):
+                raise WorkflowApprovalError(
+                    f"Approval {approval_id!r} returned invalid APPROVED_METADATA; expected a JSON object"
+                ) from None
+            return result.model_dump(mode="json")
         return int(value)
 
     @staticmethod
-    def _approval_fingerprint(context: AgentExecutionContextPayload, command: str) -> str:
+    def _approval_fingerprint(context: AgentExecutionContextPayload, command: str | None) -> str:
         payload = json.dumps(context.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         return hashlib.sha256(f"{payload}\0{command}".encode()).hexdigest()
 
@@ -354,7 +367,7 @@ class WorkflowManager:
         self,
         context: AgentExecutionContextPayload,
         worktree: str,
-        prompt: str,
+        prompt: str | None,
         *,
         report_to_agentis: bool = True,
         completion_event: threading.Event | None = None,
@@ -418,6 +431,14 @@ class WorkflowManager:
             ]
             if len(approved_outputs) != 1:
                 raise ValueError("Approval workflow must declare exactly one var output named APPROVED")
+            metadata_outputs = [
+                output
+                for step in workflow.workflow.steps
+                for output in step.outputs
+                if output.type == "var" and output.name == "APPROVED_METADATA"
+            ]
+            if len(metadata_outputs) > 1:
+                raise ValueError("Approval workflow may declare at most one var output named APPROVED_METADATA")
         executor = self._resolve_executor(context, workflow)
         runner = self._runner_for(executor, workflow.workflow.context)
         if executor in {"kubernetes", "docker"}:
@@ -427,7 +448,8 @@ class WorkflowManager:
 
         run_dir.mkdir(parents=True, exist_ok=True)
         prompt_file = run_dir / "prompt.md"
-        prompt_file.write_text(prompt, encoding="utf-8")
+        prompt_file.write_text(prompt if prompt else "", encoding="utf-8")
+
         context_file = run_dir / "context.json"
         context_dump = context.model_dump(mode="json")
         context_file.write_text(json.dumps(context_dump, ensure_ascii=False, indent=2), encoding="utf-8")
