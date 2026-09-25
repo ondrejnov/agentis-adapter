@@ -229,6 +229,7 @@ Kromě `workflow.env` / `step.env` dostane každý krok od adapteru:
 
 - všechny interpolační tokeny jako env proměnné (`WORKDIR`, `BRANCH`, …),
 - `AGENTIS_RUN_ID`, `AGENTIS_TASK_ID`, `AGENTIS_PROJECT_ID`, `AGENTIS_RUN_DIR`, `AGENTIS_PROMPT_FILE` (soubor s promptem), `AGENTIS_CONTEXT_FILE` (context JSON),
+- pouze při RPC `approve`: `AGENTIS_APPROVE_METADATA` — celý vstupní metadata objekt jako JSON řetězec, případně `null`; nejde o cestu k souboru ani o YAML interpolační token,
 - volitelně `AGENTIS_ENDPOINT` a `AGENTIS_SERVICE_TOKEN` z konfigurace adapteru; service token je záměrně předán agentím krokům pro callbacky do Agentisu,
 - volitelně `AGENTIS_SESSION_ID` (resume předchozí session), `AGENTIS_MODEL`, `AGENTIS_AGENT`, `AGENTIS_EFFORT` z `context.adapter`,
 - `AGENTIS_AUTO_MERGE` (`"true"` / `"false"`) a hlavičky tasku jako sanitizované `TASK_HEADER_*`,
@@ -279,6 +280,17 @@ Kroky komunikují s adapterem přes soubory; cesty jsou relativní k output root
 
 Pole v tabulce jsou funkčně potřebná pro uvedené chování, ale současné schema je s výjimkou `var.name` / `var.valueFrom` nevynucuje podle typu; neúplný output proto runtime typicky ignoruje. Schema navíc přijímá pole `filename`, které manager aktuálně nepoužívá.
 
+Approval workflow dostane celý vstupní objekt v `AGENTIS_APPROVE_METADATA` a samo z něj vybírá potřebná pole. Například Python může načíst příkaz jako data (nikoli jej vykonat):
+
+```yaml
+- name: Review command
+  run: |
+    command="$(python3 -c 'import json, os; print((json.loads(os.environ["AGENTIS_APPROVE_METADATA"]) or {}).get("command") or "")')"
+    # Zde vlastní review policy zpracuje "$command" a zapíše výstupy.
+```
+
+Příklad vyžaduje Python 3 v prostředí kroku. Pro chybějící nebo `null` command získá prázdný řetězec; další validaci určuje workflow. `AGENTIS_PROMPT_FILE` je při approval prázdný. Vstupní `AGENTIS_APPROVE_METADATA` je nezávislé na výstupním `APPROVED_METADATA` popsaném níže.
+
 Approval workflow má přísnější kontrakt: v celé resolved definici musí být právě jeden `var` output s názvem `APPROVED`. Produkující krok musí uspět a nesmí být skipped; hodnota musí být po oříznutí whitespace přesně `1` nebo `0`. Volitelný `var` output `APPROVED_METADATA` (nejvýše jeden v celém workflow) načte JSON objekt ze souboru určeného `valueFrom`. Bez této deklarace zůstává RPC result integer `1`/`0`; s ní se vrací `{"approved": 1, "resolved_metadata": {"score": 0.95}}`, případně stejný objekt s `approved: 0`. Prázdný objekt `{}` se zachová. Deklarovaný metadata output musí vzniknout v úspěšném, nepřeskočeném kroku; chybějící/prázdný soubor, neplatný JSON, pole, skalár, `null`, `NaN` či nekonečno jsou chyba. Cesta nesmí opustit output root, ani přes symlink.
 
 ```yaml
@@ -298,7 +310,7 @@ Approval workflow má přísnější kontrakt: v celé resolved definici musí b
 
 Approval nepoužije žádné ostatní completion outputs ani callbacks. Fatální selhání, abort, deadline nebo neplatný výsledek vrací technický JSON-RPC error. `continueOnError` zachovává běžnou sémantiku: pokud workflow jako celek skončí `success` a platní producenti doběhnou, jejich výsledek je použit. Hodnoty se zachytí po dokončení produkujícího kroku, takže opakovaný request se stejným approval ID nečte pozdější změny souborů.
 
-Každý approval dostane namespace a task label odvozené z `approval_id`, takže nekoliduje s Joby, kontejnery ani procesy hlavního workflow. Deadline nastaví abort event a zároveň cíleně ukončí executor resources konkrétního attemptu. Bundled `approval.yaml` nedědí infrastrukturní mounty z `_base.yaml`: připojuje jen vlastní run adresář. Aktuálně jde o ukázkové workflow s pevným `APPROVED=1` a `APPROVED_METADATA={"score": 1.0}`. Projektové přepsání `approval.yaml` určuje skutečnou review policy; zejména local executor není sandbox a autor workflow nesmí command přímo vykonat ani interpolovat do shellu.
+Každý approval dostane namespace a task label odvozené z `approval_id`, takže nekoliduje s Joby, kontejnery ani procesy hlavního workflow. Deadline nastaví abort event a zároveň cíleně ukončí executor resources konkrétního attemptu. Bundled `approval.yaml` nedědí infrastrukturní mounty z `_base.yaml`: připojuje jen vlastní run adresář. Příkaz předá na stdin skriptu `/var/www/infrabot/scripts/check-command-dangerous.sh` a číselný výsledek uloží do `approved-score.json` v run adresáři. Zpracování JSON a porovnání skóre používá Bash a `jq`. `APPROVED=1` vrátí pouze pro skóre `<= 0.3`, jinak `0`; `APPROVED_METADATA` obsahuje `{"score": <skutečné skóre>}`. Selhání kontroly nebo neplatné skóre ukončí krok chybou. Projektové přepsání `approval.yaml` určuje vlastní review policy; zejména local executor není sandbox a autor workflow nesmí command přímo vykonat ani interpolovat do shellu.
 
 Artifact `path` může obsahovat `*`, `?`, `[]` a rekurzivní `**`. Jeden output tak může přiložit více souborů; runtime pro jejich počet ani celkovou velikost aktuálně nevynucuje limit, takže glob musí být dostatečně úzký.
 
@@ -350,7 +362,7 @@ Projektová workflow dědí přes `.agentis/workflows/_base.yaml` sdílenou infr
 | `workflows/_base.yaml` | Minimální bundled šablona `run-agent` |
 | `workflows/default.yaml` | Bundled fallback běžného tasku: jediný krok `Run agent` |
 | `workflows/project.yaml` | Bundled fallback project scope: jediný krok `Run agent` |
-| `workflows/approval.yaml` | Ukázkové approval workflow: zapíše `APPROVED=1` a JSON metadata `{"score": 1.0}` |
+| `workflows/approval.yaml` | Approval workflow: schválí pouze skóre `<= 0.3` a vrátí skutečné skóre v JSON metadatech |
 
 ## Časté chyby
 

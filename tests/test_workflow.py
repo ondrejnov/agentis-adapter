@@ -926,24 +926,53 @@ def _wait_steps(runner: FakeRunner, count: int, timeout: float = 5.0) -> list[di
 
 
 @pytest.mark.parametrize(("approved", "expected"), [("1\n", 1), ("0", 0)])
-def test_approve_returns_scalar_result_without_reporting(tmp_path: Path, approved: str, expected: int) -> None:
+@pytest.mark.parametrize(
+    "metadata",
+    [None, {}, {"action": "deploy"}, {"command": "printf 'úklid'\n$(exit 1)", "context": {"tags": [None, False, 2]}}],
+)
+def test_approve_returns_scalar_result_without_reporting(
+    tmp_path: Path, approved: str, expected: int, metadata: dict | None
+) -> None:
     worktree = tmp_path / "wt"
     _write_approval_workflow(worktree)
     runner = ApprovalRunner(approved)
     manager, calls = _manager(tmp_path, runner)
     context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
 
-    result = manager.approve(context, str(worktree), "approval-1", "rm -rf build", timeout=1)
+    result = manager.approve(context, str(worktree), "approval-1", metadata, timeout=1)
 
     assert result == expected
     assert calls == []
     entry = manager._approval_runs["approval-1"]
     assert entry.run is not None
-    assert entry.run.prompt_file.read_text(encoding="utf-8") == "rm -rf build"
+    assert entry.run.prompt_file.read_text(encoding="utf-8") == ""
+    assert json.loads(runner.steps[0]["env"]["AGENTIS_APPROVE_METADATA"]) == metadata
     assert entry.run.report_to_agentis is False
     assert "approval-" in entry.run.namespace
     assert entry.run.task_label.startswith("approval-")
     assert entry.run.task_label != manager._task_label(context)
+
+
+def test_approve_freezes_input_metadata_for_all_steps(tmp_path: Path) -> None:
+    worktree = tmp_path / "wt"
+    path = _write_approval_workflow(worktree)
+    path.write_text(path.read_text() + "    - name: Second review\n      run: review-again\n")
+    metadata = {"command": "pytest", "context": {"scope": "test"}}
+    original = json.dumps(metadata)
+
+    class MutatingRunner(ApprovalRunner):
+        def run_step(self, workflow, step, **kwargs: Any) -> StepResult:
+            metadata["context"]["scope"] = "changed"
+            return super().run_step(workflow, step, **kwargs)
+
+    runner = MutatingRunner()
+    manager, _calls = _manager(tmp_path, runner)
+    context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
+
+    assert manager.approve(context, str(worktree), "approval-1", metadata, timeout=1) == 1
+    assert len(runner.steps) == 2
+    for step in runner.steps:
+        assert json.loads(step["env"]["AGENTIS_APPROVE_METADATA"]) == json.loads(original)
 
 
 @pytest.mark.parametrize("approved", ["0", "1"])
@@ -956,11 +985,11 @@ def test_approve_returns_metadata_and_freezes_it_for_retries(tmp_path: Path, app
     context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
 
     expected = {"approved": int(approved), "resolved_metadata": metadata}
-    assert manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1) == expected
+    assert manager.approve(context, str(worktree), "approval-1", {"command": "pytest"}, timeout=1) == expected
     run = manager._approval_runs["approval-1"].run
     assert run is not None
     (run.run_dir / "outputs" / "metadata.json").write_text('{"score": 0}', encoding="utf-8")
-    assert manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1) == expected
+    assert manager.approve(context, str(worktree), "approval-1", {"command": "pytest"}, timeout=1) == expected
     assert len(runner.steps) == 1
     assert calls == []
 
@@ -991,7 +1020,7 @@ def test_approve_rejects_invalid_metadata(tmp_path: Path, metadata: str | None) 
     context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
 
     with pytest.raises(WorkflowApprovalError, match="invalid APPROVED_METADATA") as error:
-        manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1)
+        manager.approve(context, str(worktree), "approval-1", {"command": "pytest"}, timeout=1)
     assert "secret-invalid-json" not in str(error.value)
     assert calls == []
 
@@ -1007,7 +1036,7 @@ def test_approve_rejects_duplicate_metadata_outputs(tmp_path: Path) -> None:
     context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
 
     with pytest.raises(WorkflowApprovalError, match="at most one.*APPROVED_METADATA"):
-        manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1)
+        manager.approve(context, str(worktree), "approval-1", {"command": "pytest"}, timeout=1)
     assert runner.steps == []
 
 
@@ -1029,7 +1058,7 @@ def test_approve_does_not_use_metadata_from_unsuccessful_step(tmp_path: Path, pr
     context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
 
     with pytest.raises(WorkflowApprovalError, match="invalid APPROVED_METADATA"):
-        manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1)
+        manager.approve(context, str(worktree), "approval-1", {"command": "pytest"}, timeout=1)
 
 
 @pytest.mark.parametrize("escape", ["absolute", "parent", "symlink"])
@@ -1056,7 +1085,7 @@ def test_approve_metadata_cannot_escape_output_root(tmp_path: Path, escape: str)
     context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
 
     with pytest.raises(WorkflowApprovalError, match="invalid APPROVED_METADATA"):
-        manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1)
+        manager.approve(context, str(worktree), "approval-1", {"command": "pytest"}, timeout=1)
 
 
 def test_approve_is_idempotent_for_concurrent_retries(tmp_path: Path) -> None:
@@ -1068,9 +1097,11 @@ def test_approve_is_idempotent_for_concurrent_retries(tmp_path: Path) -> None:
     context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(manager.approve, context, str(worktree), "approval-1", "pytest", timeout=2)
+        first = executor.submit(manager.approve, context, str(worktree), "approval-1", {"command": "pytest"}, timeout=2)
         _wait_steps(runner, 1)
-        second = executor.submit(manager.approve, context, str(worktree), "approval-1", "pytest", timeout=2)
+        second = executor.submit(
+            manager.approve, context, str(worktree), "approval-1", {"command": "pytest"}, timeout=2
+        )
         runner.release.set()
         assert first.result(timeout=2) == 1
         assert second.result(timeout=2) == 1
@@ -1078,15 +1109,18 @@ def test_approve_is_idempotent_for_concurrent_retries(tmp_path: Path) -> None:
     assert len(runner.steps) == 1
 
 
-def test_approve_rejects_reused_id_with_different_command(tmp_path: Path) -> None:
+@pytest.mark.parametrize("changed", [{"command": "ruff", "scope": "test"}, {"command": "pytest", "scope": "prod"}])
+def test_approve_rejects_reused_id_with_different_metadata(tmp_path: Path, changed: dict) -> None:
     worktree = tmp_path / "wt"
     _write_approval_workflow(worktree)
     manager, _calls = _manager(tmp_path, ApprovalRunner())
     context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
 
-    assert manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1) == 1
+    metadata = {"command": "pytest", "scope": "test"}
+    assert manager.approve(context, str(worktree), "approval-1", metadata, timeout=1) == 1
+    assert manager.approve(context, str(worktree), "approval-1", dict(reversed(list(metadata.items()))), timeout=1) == 1
     with pytest.raises(WorkflowApprovalError, match="different input"):
-        manager.approve(context, str(worktree), "approval-1", "ruff", timeout=1)
+        manager.approve(context, str(worktree), "approval-1", changed, timeout=1)
 
 
 def test_approve_requires_exactly_one_approved_output(tmp_path: Path) -> None:
@@ -1096,7 +1130,7 @@ def test_approve_requires_exactly_one_approved_output(tmp_path: Path) -> None:
     context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
 
     with pytest.raises(WorkflowApprovalError, match="exactly one"):
-        manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1)
+        manager.approve(context, str(worktree), "approval-1", {"command": "pytest"}, timeout=1)
 
 
 def test_approve_rejects_invalid_approved_value(tmp_path: Path) -> None:
@@ -1106,7 +1140,7 @@ def test_approve_rejects_invalid_approved_value(tmp_path: Path) -> None:
     context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
 
     with pytest.raises(WorkflowApprovalError, match="invalid APPROVED"):
-        manager.approve(context, str(worktree), "approval-1", "pytest", timeout=1)
+        manager.approve(context, str(worktree), "approval-1", {"command": "pytest"}, timeout=1)
 
 
 def test_approve_timeout_aborts_only_approval_run(tmp_path: Path) -> None:
@@ -1118,7 +1152,7 @@ def test_approve_timeout_aborts_only_approval_run(tmp_path: Path) -> None:
     context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
 
     with pytest.raises(WorkflowApprovalTimeoutError, match="timed out"):
-        manager.approve(context, str(worktree), "approval-1", "pytest", timeout=0.01)
+        manager.approve(context, str(worktree), "approval-1", {"command": "pytest"}, timeout=0.01)
 
     entry = manager._approval_runs["approval-1"]
     assert entry.run is not None
@@ -1138,7 +1172,9 @@ def test_parent_abort_stops_running_approval(tmp_path: Path) -> None:
     context = _context(adapter={"runtime": "workflow", "workflow": "approval"})
 
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(manager.approve, context, str(worktree), "approval-1", "pytest", timeout=2)
+        future = executor.submit(
+            manager.approve, context, str(worktree), "approval-1", {"command": "pytest"}, timeout=2
+        )
         _wait_steps(runner, 1)
         result = manager.abort(context)
         with pytest.raises(WorkflowApprovalError, match="aborted"):
@@ -1166,7 +1202,9 @@ def test_parent_abort_during_approval_preparation_prevents_start(tmp_path: Path,
 
     monkeypatch.setattr(manager, "_prepare_workflow", blocked_prepare)
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(manager.approve, context, str(worktree), "approval-1", "pytest", timeout=2)
+        future = executor.submit(
+            manager.approve, context, str(worktree), "approval-1", {"command": "pytest"}, timeout=2
+        )
         assert prepare_started.wait(timeout=2)
         manager.abort(context)
         release_prepare.set()
@@ -1197,6 +1235,7 @@ def test_start_workflow_runs_in_background_and_applies_outputs(tmp_path: Path) -
     result = manager.start_workflow(context, str(worktree), "udelej X")
     assert result["action"] == "workflow_start"
     assert result["steps"] == ["Run agent", "Create pull request"]
+    assert "AGENTIS_APPROVE_METADATA" not in manager._runtime_env(manager._runs[context.task_id])
 
     # start je neblokující — Joby ještě neskončily, ale odpověď už máme
     prompt_file = worktree / ".agentis" / "runs" / result["attempt"] / "prompt.md"
@@ -2180,6 +2219,53 @@ def test_delete_namespace_ignored_by_local_executor(tmp_path: Path) -> None:
 
     assert manager._runs[context.task_id].status == "success"
     assert runner.deleted_namespaces == []
+
+
+@pytest.mark.parametrize(
+    ("score", "checker_exit", "approved"),
+    [
+        ("0", 0, "1"),
+        ("0.29", 0, "1"),
+        ("0.3", 0, "1"),
+        ("0.30001", 0, "0"),
+        ("1", 0, "0"),
+        ("", 0, None),
+        ("0.2 0.5", 0, None),
+        ("NaN", 0, None),
+        ("true", 0, None),
+        ("invalid", 0, None),
+        ("1", 1, None),
+    ],
+)
+def test_bundled_approval_score(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, score: str, checker_exit: int, approved: str | None
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    workflow = load_workflow_file(repo_root / "workflows" / "approval.yaml", _values(tmp_path))
+    checker = tmp_path / "checker.py"
+    checker.write_text(
+        "import pathlib, sys\n"
+        "pathlib.Path('command.txt').write_text(sys.stdin.read())\n"
+        f"print({score!r})\n"
+        f"sys.exit({checker_exit})\n"
+    )
+    script = (workflow.workflow.steps[0].run or "").replace(
+        "/var/www/infrabot/scripts/check-command-dangerous.sh", f'python3 "{checker}"'
+    )
+    command = 'printf "a  b"; $(touch should-not-exist) *'
+    monkeypatch.setenv("AGENTIS_RUN_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENTIS_APPROVE_METADATA", json.dumps({"command": command}))
+    result = subprocess.run(["bash", "-c", script], cwd=tmp_path, capture_output=True, text=True)
+    assert (tmp_path / "command.txt").read_text() == command + "\n"
+    assert not (tmp_path / "should-not-exist").exists()
+    if approved is None:
+        assert result.returncode != 0
+        assert not (tmp_path / "approved.data").exists()
+        assert not (tmp_path / "approved-metadata.json").exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "approved.data").read_text().strip() == approved
+        assert json.loads((tmp_path / "approved-metadata.json").read_text()) == {"score": json.loads(score)}
 
 
 def test_repo_action_workflows_parse(tmp_path: Path) -> None:

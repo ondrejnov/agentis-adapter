@@ -85,7 +85,7 @@ class _StubWorkflowManager:
         context: Any,
         worktree: str,
         approval_id: str,
-        command: str,
+        metadata: dict[str, Any] | None,
         *,
         timeout: float,
     ) -> int | dict[str, Any]:
@@ -124,7 +124,7 @@ def make_approve_params() -> dict[str, Any]:
     return {
         "context": context,
         "approval_id": "approval-1",
-        "command": "poetry run pytest -q",
+        "metadata": {"command": "poetry run pytest -q", "context": {"tags": ["test"], "dry_run": False}},
         "timeout_seconds": 120,
     }
 
@@ -132,7 +132,8 @@ def make_approve_params() -> dict[str, Any]:
 @pytest.mark.parametrize(
     "result", [0, 1, {"approved": 1, "resolved_metadata": {"score": 0.95}}, {"approved": 0, "resolved_metadata": {}}]
 )
-def test_approve_returns_jsonrpc_result_and_uses_existing_workspace(tmp_path: Path, result):
+@pytest.mark.parametrize("metadata", [None, {}, {"action": "deploy"}, make_approve_params()["metadata"]])
+def test_approve_returns_jsonrpc_result_and_uses_existing_workspace(tmp_path: Path, result, metadata):
     captured: dict[str, Any] = {}
 
     class FakeAdapter:
@@ -145,7 +146,7 @@ def test_approve_returns_jsonrpc_result_and_uses_existing_workspace(tmp_path: Pa
             context: Any,
             worktree: str,
             approval_id: str,
-            command: str,
+            metadata: dict[str, Any] | None,
             *,
             timeout: float,
         ) -> int | dict[str, Any]:
@@ -153,7 +154,7 @@ def test_approve_returns_jsonrpc_result_and_uses_existing_workspace(tmp_path: Pa
                 context=context,
                 worktree=worktree,
                 approval_id=approval_id,
-                command=command,
+                metadata=metadata,
                 timeout=timeout,
             )
             return result
@@ -163,16 +164,18 @@ def test_approve_returns_jsonrpc_result_and_uses_existing_workspace(tmp_path: Pa
         adapter_factory=cast(Any, lambda context: FakeAdapter()),
         workflow_manager=cast(Any, FakeWorkflowManager()),
     )
+    params = make_approve_params()
+    params["metadata"] = metadata
     response = make_client(service).post(
         "/api",
-        json={"jsonrpc": "2.0", "id": "approve-1", "method": "approve", "params": make_approve_params()},
+        json={"jsonrpc": "2.0", "id": "approve-1", "method": "approve", "params": params},
     )
 
     assert response.status_code == 200
     assert response.json() == {"jsonrpc": "2.0", "id": "approve-1", "result": result}
     assert captured["worktree"] == str(tmp_path)
     assert captured["approval_id"] == "approval-1"
-    assert captured["command"] == "poetry run pytest -q"
+    assert captured["metadata"] == metadata
     assert captured["timeout"] == 120
 
 
@@ -189,10 +192,13 @@ def test_approve_requires_named_workflow():
     assert response.json()["error"]["code"] == -32602
 
 
-def test_approve_invalid_command_is_redacted_from_error_detail():
-    command = "secret-token-" * 2000
+@pytest.mark.parametrize(
+    "metadata",
+    ["secret-token", ["secret-token"], True, 42, {"secret-token": float("nan")}, {"nested": [float("inf")]}],
+)
+def test_approve_invalid_metadata_is_redacted_from_error_detail(metadata, capsys):
     params = make_approve_params()
-    params["command"] = command
+    params["metadata"] = metadata
 
     response = make_client().post(
         "/api",
@@ -204,9 +210,11 @@ def test_approve_invalid_command_is_redacted_from_error_detail():
     assert response.json()["error"]["code"] == -32602
     assert "[redacted]" in serialized
     assert "secret-token" not in serialized
+    captured = capsys.readouterr()
+    assert "secret-token" not in captured.out + captured.err
 
 
-def test_approve_internal_error_redacts_command(capsys, tmp_path: Path):
+def test_approve_internal_error_redacts_metadata(capsys, tmp_path: Path):
     secret_command = "curl -H 'Authorization: Bearer secret-token' example.test"
 
     class FakeAdapter:
@@ -223,7 +231,7 @@ def test_approve_internal_error_redacts_command(capsys, tmp_path: Path):
         workflow_manager=cast(Any, FakeWorkflowManager()),
     )
     params = make_approve_params()
-    params["command"] = secret_command
+    params["metadata"] = {"command": secret_command, "other": "private-metadata-value"}
 
     response = make_client(service).post(
         "/api",
@@ -231,10 +239,12 @@ def test_approve_internal_error_redacts_command(capsys, tmp_path: Path):
     )
 
     assert response.status_code == 500
-    stderr = capsys.readouterr().err
-    assert "[redacted]" in stderr
-    assert secret_command not in stderr
-    assert "secret-token" not in stderr
+    captured = capsys.readouterr()
+    assert "[redacted]" in captured.err
+    for output in (captured.out, captured.err, response.text):
+        assert secret_command not in output
+        assert "secret-token" not in output
+        assert "private-metadata-value" not in output
 
 
 def test_execution_context_preserves_project_role_payload():

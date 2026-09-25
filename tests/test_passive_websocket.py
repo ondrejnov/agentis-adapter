@@ -89,6 +89,48 @@ def test_passive_websocket_invalid_json_returns_parse_error():
     assert response["error"]["code"] == -32700
 
 
+def test_passive_websocket_approval_metadata_is_forwarded_without_logging(capsys):
+    from common.models import ApproveParams as WorkflowApproveParams
+
+    metadata = {"command": "pytest", "details": {"note": "private-approval-metadata", "flags": [True, None]}}
+
+    class FakeService:
+        def approve(self, params: WorkflowApproveParams) -> int:
+            assert params.metadata == metadata
+            return 1
+
+    client = PassiveWebSocketClient(
+        settings=make_settings(),
+        dispatch={"approve": JsonRpcRoute(WorkflowApproveParams, "approve")},
+        service_container=SimpleNamespace(agent_jsonrpc_service=FakeService()),
+    )
+    response = asyncio.run(
+        client.dispatch_message(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "approval-1",
+                    "method": "approve",
+                    "params": {
+                        "context": {
+                            "run_id": "run-1",
+                            "task_id": "task-1",
+                            "title": "Review",
+                            "adapter": {"workflow": "approval"},
+                        },
+                        "approval_id": "approval-1",
+                        "metadata": metadata,
+                    },
+                }
+            )
+        )
+    )
+
+    assert response == {"jsonrpc": "2.0", "id": "approval-1", "result": 1}
+    captured = capsys.readouterr()
+    assert "private-approval-metadata" not in captured.out + captured.err
+
+
 def test_passive_websocket_notification_does_not_return_response():
     class FakeService:
         def approve(self, params: ApproveParams) -> dict[str, Any]:

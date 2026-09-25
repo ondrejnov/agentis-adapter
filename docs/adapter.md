@@ -86,7 +86,7 @@ Serving adapter nevybírá ani neimportuje konkrétní nástroj. Každý krok je
 | --- | --- | --- |
 | `start` | `context`, volitelně `fork_from_session_id` | Připraví workspace a spustí workflow; `fork_from_session_id` se přijme, ale aktuálně se nepoužívá |
 | `add_message` | `run_id`, `context`, `message`, `role`, `attachments` | Spustí workflow s follow-up promptem; `role` má default `user`, ale handler jej aktuálně nerozlišuje |
-| `approve` | `context`, `approval_id`, `command`, volitelně `timeout_seconds` | Nad existujícím workspace synchronně spustí pojmenované approval workflow a vrátí `1`/`0`, případně objekt s rozhodnutím a metadaty |
+| `approve` | `context`, `approval_id`, `metadata`, volitelně `timeout_seconds` | Nad existujícím workspace synchronně spustí pojmenované approval workflow a vrátí `1`/`0`, případně objekt s rozhodnutím a metadaty |
 | `abort` | `context` | Idempotentně označí známý run i jeho approval runy jako abortované a ukončí kroky odpovídající labelům; může uspět i bez známého aktivního runu |
 | `undo` | `context` | Vrátí workspace do source snapshotu evidovaného u posledního runu tasku |
 
@@ -96,7 +96,7 @@ Centrální vstup do metod je `AgentJsonRpcService` (`common/rpc/jsonrpc.py`). P
 
 ### `approve`
 
-`approve` vyžaduje neprázdné `context.adapter.workflow`, stabilní `approval_id` (max. 255 znaků) a `command` (max. 20 000 znaků). `timeout_seconds` je celkový deadline v rozsahu `(0, 3600]` sekund, default 300 sekund. Command se beze změny uloží do approval `prompt.md`; adapter jej nevkládá do shellu a rediguje jej z dispatcher logů i validačních error detailů.
+`approve` vyžaduje neprázdné `context.adapter.workflow`, stabilní `approval_id` (max. 255 znaků) a `metadata` (celý JSON objekt požadavku, případně `null`). Metadata musí obsahovat platné JSON hodnoty s konečnými čísly. `timeout_seconds` je celkový deadline v rozsahu `(0, 3600]` sekund, default 300 sekund. Adapter zpřístupní metadata všem krokům approval workflow jako JSON řetězec v env `AGENTIS_APPROVE_METADATA`; `{}` i `null` se zachovají. Workflow si samo vybírá a validuje potřebná pole, například `command`. Samostatný RPC parametr `command` již není podporován a approval `prompt.md` je prázdný. Metadata se nevkládají do shellového skriptu a redigují se z dispatcher logů i validačních error detailů. Změna kontraktu vyžaduje odpovídající verzi Agentis backendu i adapteru.
 
 Approval workflow musí deklarovat právě jeden `var` output `APPROVED`. Jeho úspěšný, nepřeskočený krok musí zapsat přesně `1` nebo `0` (okolní whitespace se ignoruje). Bez metadat se vrací JSON-RPC integer `result` jako dosud.
 
@@ -104,7 +104,7 @@ Volitelně lze deklarovat právě jeden další `var` output `APPROVED_METADATA`
 
 Chybějící/neplatný deklarovaný output, failed/aborted run, timeout nebo chyba executoru jsou JSON-RPC error, nikoli `result: 0`. Obsah neplatných metadat se do chyby nevypisuje.
 
-Approval run je v manageru oddělený od hlavního workflow stejného tasku, používá vlastní namespace/task label a neposílá `run.adapter_event`, completion outputs ani změny lifecycle. Stejné `approval_id` se stejným contextem a commandem se v paměti připojí k běžícímu runu nebo vrátí jeho dokončený výsledek; jiné vstupy pod stejným ID jsou chyba. Deadline prvního requestu je autoritativní i pro retry a při překročení cíleně abortuje resources daného attemptu. Manager drží nejvýše 1000 dokončených approval záznamů; registry nepřežije restart adapteru.
+Approval run je v manageru oddělený od hlavního workflow stejného tasku, používá vlastní namespace/task label a neposílá `run.adapter_event`, completion outputs ani změny lifecycle. Stejné `approval_id` se stejným contextem a celými vstupními metadaty se v paměti připojí k běžícímu runu nebo vrátí jeho dokončený výsledek; jiné vstupy pod stejným ID jsou chyba. Pořadí klíčů JSON objektů nerozhoduje. Metadata se při zahájení zmrazí pro všechny kroky. Deadline prvního requestu je autoritativní i pro retry a při překročení cíleně abortuje resources daného attemptu. Manager drží nejvýše 1000 dokončených approval záznamů; registry nepřežije restart adapteru.
 
 ## Workflow runtime
 

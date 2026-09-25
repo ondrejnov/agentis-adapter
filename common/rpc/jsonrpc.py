@@ -289,8 +289,6 @@ class AgentJsonRpcService:
         return self._start_workflow_run(run, context, params.message, message_attachments=params.attachments)
 
     def approve(self, params: ApproveParams) -> int | dict[str, Any]:
-        print("approve")
-        print(params)
         context = params.context
         try:
             adapter = self._adapter_factory(context)
@@ -301,7 +299,7 @@ class AgentJsonRpcService:
                 context,
                 str(worktree),
                 params.approval_id,
-                params.command,
+                params.metadata,
                 timeout=params.timeout_seconds,
             )
         except WorkflowApprovalTimeoutError as exc:
@@ -390,11 +388,11 @@ class AgentJsonRpcService:
         if isinstance(value, dict):
             location = value.get("loc")
             redact_input = isinstance(location, (list, tuple)) and any(
-                isinstance(item, str) and item.lower() == "command" for item in location
+                isinstance(item, str) and item.lower() in {"command", "metadata"} for item in location
             )
             return {
                 key: "[redacted]"
-                if key.lower() == "command" or (redact_input and key == "input")
+                if key.lower() in {"command", "metadata"} or (redact_input and key == "input")
                 else cls._sanitize_for_log(item)
                 for key, item in value.items()
             }
@@ -415,4 +413,4 @@ def validate_params(model: type[BaseModel], params: Any) -> BaseModel:
             -32602,
             "Invalid params",
             AgentJsonRpcService._sanitize_for_log(exc.errors()),
-        ) from exc
+        ) from None

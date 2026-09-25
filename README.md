@@ -302,7 +302,7 @@ Příklad je záměrně obecný. Cesty, příkazy, image, preview doménu a Kube
 | `.agentis/workflows/project.yaml` | Běh přímo nad projektem |
 | `.agentis/workflows/<name>.yaml` | Vlastní navazující akce, například merge nebo release |
 
-Adapter navíc přijímá synchronní JSON-RPC `approve`. Agentis předá execution context, stabilní `approval_id`, Bash command a volitelný deadline; pojmenované workflow z `context.adapter.workflow` musí přes jediný `var` output `APPROVED` vrátit přesně `1` nebo `0`. Bundled `workflows/approval.yaml` poskytuje výchozí AI review a projekt jej může přepsat.
+Adapter navíc přijímá synchronní JSON-RPC `approve`. Agentis předá execution context, stabilní `approval_id`, celý objekt `metadata` (případně `null`) a volitelný deadline. Workflow dostane metadata jako JSON v env `AGENTIS_APPROVE_METADATA` a samo z nich vybere například `command`. Pojmenované workflow z `context.adapter.workflow` musí přes jediný `var` output `APPROVED` vrátit přesně `1` nebo `0`; volitelný `APPROVED_METADATA` přidá k výsledku `resolved_metadata`. Bundled `workflows/approval.yaml` schválí příkaz pouze při skóre z `check-command-dangerous.sh` menším nebo rovném `0.3` a vrací skutečné skóre v metadatech; projekt jej může přepsat vlastní review policy.
 
 Kompletní formát, executory a outputs popisuje [dokumentace workflow](docs/workflow.md).
 

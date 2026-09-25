@@ -105,6 +105,7 @@ class _WorkflowRun:
     context_file: Path
     executor: str
     runner: WorkflowStepRunner
+    approve_metadata: str | None = None
     task_label: str = ""
     artifact_staging_dir: Path | None = None
     #: Klíč snapshotu zdrojáků pro "Changes diff" attachment; None pro pojmenovaná
@@ -259,7 +260,7 @@ class WorkflowManager:
         context: AgentExecutionContextPayload,
         worktree: str,
         approval_id: str,
-        command: str | None,
+        metadata: dict[str, Any] | None,
         *,
         timeout: float = 300,
     ) -> int | dict[str, Any]:
@@ -268,7 +269,8 @@ class WorkflowManager:
         workflow_name = self._workflow_name(context)
         if workflow_name is None:
             raise ValueError("context.adapter.workflow is required for approve")
-        fingerprint = self._approval_fingerprint(context, command)
+        metadata_json = json.dumps(metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        fingerprint = self._approval_fingerprint(context, metadata_json)
         with self._lock:
             entry = self._approval_runs.get(approval_id)
             owner = entry is None
@@ -288,11 +290,12 @@ class WorkflowManager:
                 run, _result = self._prepare_workflow(
                     context,
                     worktree,
-                    command,
+                    None,
                     report_to_agentis=False,
                     completion_event=entry.completion_event,
                     approval=True,
                     approval_id=approval_id,
+                    approve_metadata=metadata_json,
                 )
                 with self._lock:
                     if time.monotonic() >= entry.deadline:
@@ -349,8 +352,8 @@ class WorkflowManager:
             for output in step.outputs
         ):
             try:
-                metadata = json.loads(run.vars.get("APPROVED_METADATA", ""))
-                result = ApproveResult(approved=int(value), resolved_metadata=metadata)
+                resolved_metadata = json.loads(run.vars.get("APPROVED_METADATA", ""))
+                result = ApproveResult(approved=int(value), resolved_metadata=resolved_metadata)
             except (ValueError, RecursionError):
                 raise WorkflowApprovalError(
                     f"Approval {approval_id!r} returned invalid APPROVED_METADATA; expected a JSON object"
@@ -359,9 +362,9 @@ class WorkflowManager:
         return int(value)
 
     @staticmethod
-    def _approval_fingerprint(context: AgentExecutionContextPayload, command: str | None) -> str:
+    def _approval_fingerprint(context: AgentExecutionContextPayload, metadata_json: str) -> str:
         payload = json.dumps(context.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        return hashlib.sha256(f"{payload}\0{command}".encode()).hexdigest()
+        return hashlib.sha256(f"{payload}\0{metadata_json}".encode()).hexdigest()
 
     def _prepare_workflow(
         self,
@@ -373,6 +376,7 @@ class WorkflowManager:
         completion_event: threading.Event | None = None,
         approval: bool = False,
         approval_id: str | None = None,
+        approve_metadata: str | None = None,
     ) -> tuple[_WorkflowRun, dict[str, Any]]:
         namespace = namespace_for_context(context, self.settings)
         task_label = self._task_label(context)
@@ -467,6 +471,7 @@ class WorkflowManager:
             context_file=context_file,
             executor=executor,
             runner=runner,
+            approve_metadata=approve_metadata,
             task_label=task_label,
             report_to_agentis=report_to_agentis,
             completion_event=completion_event or threading.Event(),
@@ -686,6 +691,8 @@ class WorkflowManager:
                 "AGENTIS_CONTEXT_FILE": str(run.context_file),
             }
         )
+        if run.approve_metadata is not None:
+            env["AGENTIS_APPROVE_METADATA"] = run.approve_metadata
         if self.settings.agentis_endpoint:
             env["AGENTIS_ENDPOINT"] = self.settings.agentis_endpoint
         if self.settings.agentis_service_token:

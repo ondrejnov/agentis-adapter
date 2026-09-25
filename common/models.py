@@ -256,8 +256,14 @@ class ApproveParams(BaseModel):
 
     context: AgentExecutionContextPayload
     approval_id: str = Field(min_length=1, max_length=255)
-    command: str | None = Field(min_length=1, max_length=20_000)
+    metadata: dict[str, Any] | None
     timeout_seconds: float = Field(default=300, gt=0, le=3600, allow_inf_nan=False)
+
+    @field_validator("metadata")
+    @classmethod
+    def validate_json_metadata(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        json.dumps(value, allow_nan=False)
+        return value
 
     @model_validator(mode="after")
     def require_workflow(self) -> ApproveParams:

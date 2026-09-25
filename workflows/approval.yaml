@@ -8,6 +8,7 @@ workflow:
   ttlSecondsAfterFinished: 300
   envFiles:
     - /root/.config/agentis/agentis.env
+    - /root/.config/agentis/jev.env
   env:
     IS_SANDBOX: 1
   mounts:
@@ -19,9 +20,16 @@ workflow:
   steps:
     - name: Review command
       run: |
-        sleep 1
-        echo 1 > "$AGENTIS_RUN_DIR/approved.data"
-        printf '%s\n' '{"score": 1.0}' > "$AGENTIS_RUN_DIR/approved-metadata.json"
+        set -euo pipefail
+        command="$(jq -r '.command // ""' <<< "$AGENTIS_APPROVE_METADATA")"
+        printf '%s\n' "$command" | /var/www/infrabot/scripts/check-command-dangerous.sh > "$AGENTIS_RUN_DIR/approved-score.json"
+        score="$(jq -es '
+          if length == 1 and (.[0] | type == "number" and . >= 0 and . <= 1)
+          then .[0]
+          else error("Expected a numeric approval score between 0 and 1") end
+        ' "$AGENTIS_RUN_DIR/approved-score.json")"
+        jq -n --argjson score "$score" 'if $score > 0.3 then 0 else 1 end' > "$AGENTIS_RUN_DIR/approved.data"
+        jq -cn --argjson score "$score" '{score: $score}' > "$AGENTIS_RUN_DIR/approved-metadata.json"
       outputs:
         - type: var
           name: APPROVED
