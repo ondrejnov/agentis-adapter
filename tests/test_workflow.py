@@ -2265,7 +2265,57 @@ def test_bundled_approval_score(
     else:
         assert result.returncode == 0, result.stderr
         assert (tmp_path / "approved.data").read_text().strip() == approved
-        assert json.loads((tmp_path / "approved-metadata.json").read_text()) == {"score": json.loads(score)}
+        assert json.loads((tmp_path / "approved-metadata.json").read_text()) == {
+            "score": json.loads(score),
+            "kind": "jev",
+        }
+
+
+@pytest.mark.parametrize(
+    ("command", "whitelisted"),
+    [
+        ("git status --short", True),
+        ("git status --short\n\n", True),
+        ("poetry run pytest -q", True),
+        ("poetry run pytest -q\n\n", True),
+        ("poetry run pytest -q && touch should-not-exist", False),
+        ("poetry run pytest -q --verbose", False),
+        ("git status --short; touch should-not-exist", False),
+        ("git status --short\ntouch should-not-exist", False),
+        ("git status --short && touch should-not-exist", False),
+        ("git status --short > should-not-exist", False),
+        ("git status --short$(touch should-not-exist)", False),
+        ("git status --short\u0000", False),
+        ("git status --short --branch", False),
+        ("git status", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_bundled_approval_whitelist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str | None, whitelisted: bool
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    workflow = load_workflow_file(repo_root / "workflows" / "approval.yaml", _values(tmp_path))
+    (review,) = workflow.workflow.steps
+    checker = tmp_path / "checker.py"
+    checker.write_text("import pathlib\npathlib.Path('checker-called').touch()\nprint(0.8)\n")
+    script = (review.run or "").replace("/var/www/infrabot/scripts/check-command-dangerous.sh", f'python3 "{checker}"')
+    monkeypatch.setenv("AGENTIS_RUN_DIR", str(tmp_path))
+    monkeypatch.setenv("AGENTIS_APPROVE_METADATA", json.dumps({"command": command}))
+    subprocess.run(["bash", "-c", script], cwd=tmp_path, capture_output=True, text=True, check=True)
+    variables: dict[str, str] = {}
+    for output in review.outputs:
+        assert output.name is not None and output.valueFrom is not None
+        variables[output.name] = (tmp_path / output.valueFrom).read_text().strip()
+    assert set(variables) == {"APPROVED", "APPROVED_METADATA"}
+    assert variables["APPROVED"] == ("1" if whitelisted else "0")
+    assert (tmp_path / "checker-called").exists() is not whitelisted
+    assert not (tmp_path / "should-not-exist").exists()
+    if whitelisted:
+        assert json.loads(variables["APPROVED_METADATA"]) == {"kind": "whitelist"}
+    else:
+        assert json.loads(variables["APPROVED_METADATA"]) == {"score": 0.8, "kind": "jev"}
 
 
 def test_repo_action_workflows_parse(tmp_path: Path) -> None:
@@ -2280,7 +2330,6 @@ def test_repo_action_workflows_parse(tmp_path: Path) -> None:
     assert len(approval_outputs) == 1
     assert approval.extends is None
     assert [mount.name for mount in approval.workflow.mounts] == ["approval-run"]
-    approval_script = approval.workflow.steps[0].run or ""
     metadata_outputs = [
         output
         for step in approval.workflow.steps
@@ -2289,7 +2338,8 @@ def test_repo_action_workflows_parse(tmp_path: Path) -> None:
     ]
     assert len(metadata_outputs) == 1
     assert metadata_outputs[0].valueFrom == "approved-metadata.json"
-    subprocess.run(["bash", "-n"], input=approval_script, text=True, check=True)
+    for step in approval.workflow.steps:
+        subprocess.run(["bash", "-n"], input=step.run or "", text=True, check=True)
 
     default = load_workflow_file(repo_root / WORKFLOW_FILE_RELPATH, _values(tmp_path))
     assert any(step.name == "Auto merge task branch" for step in default.workflow.steps)

@@ -310,7 +310,13 @@ Approval workflow má přísnější kontrakt: v celé resolved definici musí b
 
 Approval nepoužije žádné ostatní completion outputs ani callbacks. Fatální selhání, abort, deadline nebo neplatný výsledek vrací technický JSON-RPC error. `continueOnError` zachovává běžnou sémantiku: pokud workflow jako celek skončí `success` a platní producenti doběhnou, jejich výsledek je použit. Hodnoty se zachytí po dokončení produkujícího kroku, takže opakovaný request se stejným approval ID nečte pozdější změny souborů.
 
-Každý approval dostane namespace a task label odvozené z `approval_id`, takže nekoliduje s Joby, kontejnery ani procesy hlavního workflow. Deadline nastaví abort event a zároveň cíleně ukončí executor resources konkrétního attemptu. Bundled `approval.yaml` nedědí infrastrukturní mounty z `_base.yaml`: připojuje jen vlastní run adresář. Příkaz předá na stdin skriptu `/var/www/infrabot/scripts/check-command-dangerous.sh` a číselný výsledek uloží do `approved-score.json` v run adresáři. Zpracování JSON a porovnání skóre používá Bash a `jq`. `APPROVED=1` vrátí pouze pro skóre `<= 0.3`, jinak `0`; `APPROVED_METADATA` obsahuje `{"score": <skutečné skóre>}`. Selhání kontroly nebo neplatné skóre ukončí krok chybou. Projektové přepsání `approval.yaml` určuje vlastní review policy; zejména local executor není sandbox a autor workflow nesmí command přímo vykonat ani interpolovat do shellu.
+Každý approval dostane namespace a task label odvozené z `approval_id`, takže nekoliduje s Joby, kontejnery ani procesy hlavního workflow. Deadline nastaví abort event a zároveň cíleně ukončí executor resources konkrétního attemptu. Bundled `approval.yaml` nedědí infrastrukturní mounty z `_base.yaml`: připojuje jen vlastní run adresář. Má jediný krok `Review command`:
+
+Nejprve porovná celý příkaz s whitelistem, který obsahuje `git status --short` a `poetry run pytest -q`. Ignoruje pouze koncové LF znaky; další argumenty, shellové operátory ani další příkazy se za shodu nepovažují. Shoda připraví `APPROVED=1` a metadata `{"kind": "whitelist"}`.
+
+Při neshodě předá příkaz na stdin skriptu `/var/www/infrabot/scripts/check-command-dangerous.sh` a číselný výsledek uloží do `approved-score.json` v run adresáři. Pro skóre `<= 0.3` připraví `APPROVED=1`, jinak `0`; metadata obsahují `{"score": <skutečné skóre>, "kind": "jev"}`. Selhání kontroly nebo neplatné skóre ukončí krok chybou. Tentýž krok publikuje outputs `APPROVED` a `APPROVED_METADATA` z připravených souborů pro obě větve.
+
+Zpracování JSON a porovnání skóre používá Bash a `jq`. Projektové přepsání `approval.yaml` určuje vlastní review policy; zejména local executor není sandbox a autor workflow nesmí command přímo vykonat ani interpolovat do shellu.
 
 Artifact `path` může obsahovat `*`, `?`, `[]` a rekurzivní `**`. Jeden output tak může přiložit více souborů; runtime pro jejich počet ani celkovou velikost aktuálně nevynucuje limit, takže glob musí být dostatečně úzký.
 
@@ -362,7 +368,7 @@ Projektová workflow dědí přes `.agentis/workflows/_base.yaml` sdílenou infr
 | `workflows/_base.yaml` | Minimální bundled šablona `run-agent` |
 | `workflows/default.yaml` | Bundled fallback běžného tasku: jediný krok `Run agent` |
 | `workflows/project.yaml` | Bundled fallback project scope: jediný krok `Run agent` |
-| `workflows/approval.yaml` | Approval workflow: schválí pouze skóre `<= 0.3` a vrátí skutečné skóre v JSON metadatech |
+| `workflows/approval.yaml` | Jednokrokové approval: whitelist `git status --short` a `poetry run pytest -q`, jinak kontrola skóre `<= 0.3`, vrácení výsledku a JSON metadat |
 
 ## Časté chyby
 
