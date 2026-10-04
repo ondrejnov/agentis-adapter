@@ -104,7 +104,7 @@ class LocalProcessRunner:
             return self._spawn_failed(
                 name,
                 log_path,
-                "bash nenalezen v PATH (na Windows nainstaluj Git Bash nebo WSL a přidej ho do PATH)",
+                "bash not found in PATH (on Windows, install Git Bash or WSL and add it to PATH)",
             )
 
         wrapper = build_bash_wrapper(step.run, workdir=step.workingDir or spec.workingDir)

@@ -130,7 +130,7 @@ def test_activity_from_event_formats():
     assert (
         activity_from_event("tool_use", {"name": "Edit", "input": {"file_path": "app/main.py"}}) == "Edit app/main.py"
     )
-    assert activity_from_event("thinking", {}) == "přemýšlí…"
+    assert activity_from_event("thinking", {}) == "thinking…"
     assert activity_from_event("error", {"message": "boom"}) == "chyba: boom"
     assert activity_from_event("raw", {"line": "noise"}) is None
     assert activity_from_event("text", {"text": ""}) is None

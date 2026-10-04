@@ -61,47 +61,47 @@ async def _run_transports(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentis-adapter",
-        description="Bez příkazu spustí adapter (WebSocket spojení s Agentisem).",
+        description="Without a command, runs the adapter (WebSocket connection to Agentis).",
     )
     parser.add_argument("--id", help="Agentis adapter id. Defaults to AGENTIS_ADAPTER_ID.")
     commands = parser.add_subparsers(dest="command", metavar="COMMAND")
 
-    workflow = commands.add_parser("workflow", help="Testování workflow bez Agentisu.")
+    workflow = commands.add_parser("workflow", help="Test workflows without Agentis.")
     workflow_commands = workflow.add_subparsers(dest="workflow_command", metavar="ACTION", required=True)
 
     run_cmd = workflow_commands.add_parser(
         "run",
-        help="Spustí workflow lokálně a vypíše kroky, komentáře a outputs.",
-        description="Spustí workflow stejnou cestou jako Agentis `start`; výsledky místo do Agentisu vypíše.",
+        help="Run a workflow locally and print its steps, comments and outputs.",
+        description="Runs a workflow the same way as Agentis `start`; results are printed instead of sent to Agentis.",
     )
-    run_cmd.add_argument("workflow", help="Jméno workflow (ai-news, default, project) nebo cesta k YAML.")
-    run_cmd.add_argument("prompt", nargs="?", default=None, help="Text zadání ($AGENTIS_PROMPT_FILE).")
-    run_cmd.add_argument("-f", "--prompt-file", help="Zadání ze souboru; '-' = stdin.")
-    run_cmd.add_argument("-C", "--project", type=Path, help="Adresář projektu (default: nejbližší s .agentis/).")
+    run_cmd.add_argument("workflow", help="Workflow name (ai-news, default, project) or path to a YAML file.")
+    run_cmd.add_argument("prompt", nargs="?", default=None, help="Prompt text ($AGENTIS_PROMPT_FILE).")
+    run_cmd.add_argument("-f", "--prompt-file", help="Read the prompt from a file; '-' = stdin.")
+    run_cmd.add_argument("-C", "--project", type=Path, help="Project directory (default: nearest one containing .agentis/).")
     run_cmd.add_argument(
         "-r",
         "--runtime",
         choices=RUNTIMES,
         default="local",
-        help="local = bash na hostu (default), docker, workflow = executor z YAML / WORKFLOW_EXECUTOR.",
+        help="local = bash on the host (default), docker, workflow = executor from YAML / WORKFLOW_EXECUTOR.",
     )
-    run_cmd.add_argument("--scope", choices=SCOPES, help="Scope runu (default project; pro default.yaml task).")
-    run_cmd.add_argument("-m", "--model", help="AGENTIS_MODEL (default: nenastaveno, platí model z workflow).")
-    run_cmd.add_argument("-e", "--effort", help="AGENTIS_EFFORT (default: nenastaveno).")
-    run_cmd.add_argument("--title", help="Název mock tasku (TASK_TITLE).")
-    run_cmd.add_argument("--full", action="store_true", help="Vypíše komentáře celé, bez zkrácení.")
+    run_cmd.add_argument("--scope", choices=SCOPES, help="Run scope (default: project; task for default.yaml).")
+    run_cmd.add_argument("-m", "--model", help="AGENTIS_MODEL (default: unset, the workflow's model applies).")
+    run_cmd.add_argument("-e", "--effort", help="AGENTIS_EFFORT (default: unset).")
+    run_cmd.add_argument("--title", help="Mock task title (TASK_TITLE).")
+    run_cmd.add_argument("--full", action="store_true", help="Print comments in full, without truncation.")
     run_cmd.add_argument(
-        "--agentis", action="store_true", help="Posílat eventy a outputs do skutečného Agentisu (AGENTIS_ENDPOINT)."
+        "--agentis", action="store_true", help="Send events and outputs to the real Agentis (AGENTIS_ENDPOINT)."
     )
 
     validate_cmd = workflow_commands.add_parser(
-        "validate", help="Zkontroluje workflow YAML (bez args všechna workflow projektu)."
+        "validate", help="Validate workflow YAML (without arguments: all project workflows)."
     )
-    validate_cmd.add_argument("workflows", nargs="*", help="Jména workflow nebo cesty k YAML.")
-    validate_cmd.add_argument("-C", "--project", type=Path, help="Adresář projektu.")
+    validate_cmd.add_argument("workflows", nargs="*", help="Workflow names or paths to YAML files.")
+    validate_cmd.add_argument("-C", "--project", type=Path, help="Project directory.")
 
-    list_cmd = workflow_commands.add_parser("list", help="Vypíše workflow projektu a zabalená workflow adapteru.")
-    list_cmd.add_argument("-C", "--project", type=Path, help="Adresář projektu.")
+    list_cmd = workflow_commands.add_parser("list", help="List project workflows and the workflows bundled with the adapter.")
+    list_cmd.add_argument("-C", "--project", type=Path, help="Project directory.")
     return parser
 
 

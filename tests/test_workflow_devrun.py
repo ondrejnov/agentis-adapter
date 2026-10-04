@@ -138,11 +138,11 @@ def test_run_workflow_prints_steps_comment_and_run_dir(project: Path, runner: Ou
     assert [step["step"] for step in runner.steps] == ["Hello"]
     assert "AGENTIS_MODEL" not in runner.steps[0]["env"]
     assert "▶ Hello" in text and "✓ Hello" in text
-    assert "Krok přeskočen (if: SEND_EMAIL): Send mail" in text
-    assert "autor: Demo, status: done" in text
+    assert "Step skipped (if: SEND_EMAIL): Send mail" in text
+    assert "author: Demo, status: done" in text
     assert "│ Napiš newsletter" in text
-    assert "✓ Workflow doběhlo" in text
-    assert "run adresář:" in text
+    assert "✓ Workflow finished" in text
+    assert "run dir:" in text
 
 
 def test_run_workflow_returns_failure_with_log_tail(project: Path, runner: OutputWritingRunner) -> None:
@@ -154,7 +154,7 @@ def test_run_workflow_returns_failure_with_log_tail(project: Path, runner: Outpu
     assert code == 1
     assert "✗ Krok selhal (failed): Fail" in text
     assert "│ boom" in text
-    assert "skončilo stavem failed" in text
+    assert "ended with status failed" in text
 
 
 def test_cli_workflow_run_unknown_workflow_exits_with_usage_error(
@@ -166,7 +166,7 @@ def test_cli_workflow_run_unknown_workflow_exits_with_usage_error(
         run(["workflow", "run", "missing"])
 
     assert exc.value.code == 2
-    assert "Workflow 'missing' nenalezeno" in capsys.readouterr().err
+    assert "Workflow 'missing' not found" in capsys.readouterr().err
 
 
 def test_cli_workflow_run_dispatches_to_devrun(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -61,15 +61,15 @@ def resolve_target(target: str, project: Path | None, cwd: Path) -> tuple[Path, 
     if target.endswith((".yaml", ".yml")) or os.sep in target:
         path = (cwd / target).resolve()
         if not path.is_file():
-            raise WorkflowCliError(f"Soubor workflow neexistuje: {path}")
+            raise WorkflowCliError(f"Workflow file does not exist: {path}")
         if path.parent.name != "workflows" or path.parent.parent.name != ".agentis":
-            raise WorkflowCliError(f"Workflow musí ležet v <projekt>/{WORKFLOW_DIR_RELPATH}/: {path}")
+            raise WorkflowCliError(f"Workflow must be located in <project>/{WORKFLOW_DIR_RELPATH}/: {path}")
         resolved_project = path.parent.parent.parent
         if project is not None and project.resolve() != resolved_project:
-            raise WorkflowCliError(f"Soubor {path} nepatří do projektu {project}")
+            raise WorkflowCliError(f"File {path} does not belong to project {project}")
         return resolved_project, path.stem
     if not WORKFLOW_NAME_RE.match(target):
-        raise WorkflowCliError(f"Neplatné jméno workflow {target!r} (povoleno jen [A-Za-z0-9_.-])")
+        raise WorkflowCliError(f"Invalid workflow name {target!r} (allowed only [A-Za-z0-9_.-])")
     return (project.resolve() if project is not None else find_project(cwd)), target
 
 
@@ -94,9 +94,9 @@ def list_workflows(project: Path, settings: Settings, out: TextIO = sys.stdout) 
     for name in project_names:
         out.write(f"  {name}\n")
     if not project_names:
-        out.write(f"  (žádná workflow v {project_dir})\n")
+        out.write(f"  (no workflows in {project_dir})\n")
     if bundled_names:
-        out.write(f"Zabalená v adapteru ({settings.bundled_workflow_dir}):\n")
+        out.write(f"Bundled with the adapter ({settings.bundled_workflow_dir}):\n")
         for name in bundled_names:
             out.write(f"  {name}\n")
     return 0
@@ -119,7 +119,7 @@ def validate_file(path: Path, out: TextIO = sys.stdout) -> bool:
     spec = workflow.workflow
     ok = True
     out.write(f"OK   {path}\n")
-    out.write(f"     executor: {spec.executor or '(default adapteru)'}  image: {spec.image or '-'}\n")
+    out.write(f"     executor: {spec.executor or '(adapter default)'}  image: {spec.image or '-'}\n")
     for index, step in enumerate(spec.steps, start=1):
         details = []
         if step.needs is not None:
@@ -134,11 +134,11 @@ def validate_file(path: Path, out: TextIO = sys.stdout) -> bool:
     for env_file in spec.envFiles:
         env_path = Path(env_file).expanduser()
         if not env_path.is_file():
-            out.write(f"     WARN envFiles: {env_path} neexistuje (run by selhal)\n")
+            out.write(f"     WARN envFiles: {env_path} does not exist (the run would fail)\n")
             ok = False
         else:
             keys = sorted(key for key in dotenv_values(env_path, interpolate=False))
-            out.write(f"     envFiles: {env_path} ({len(keys)} klíčů)\n")
+            out.write(f"     envFiles: {env_path} ({len(keys)} keys)\n")
     return ok
 
 
@@ -150,14 +150,14 @@ def validate_workflows(targets: list[str], project: Path | None, cwd: Path, out:
             target_project, name = resolve_target(target, project, cwd)
             path = workflow_path(target_project, name, settings)
             if path is None:
-                raise WorkflowCliError(f"Workflow {name!r} nenalezeno v {target_project / WORKFLOW_DIR_RELPATH}")
+                raise WorkflowCliError(f"Workflow {name!r} not found in {target_project / WORKFLOW_DIR_RELPATH}")
             paths.append(path)
     else:
         root = project.resolve() if project is not None else find_project(cwd)
         # `_base.yaml` a další rodiče nejsou samostatně spustitelné; ověří se přes `extends` potomků.
         paths = sorted(p for p in (root / WORKFLOW_DIR_RELPATH).glob("*.yaml") if not p.stem.startswith("_"))
         if not paths:
-            raise WorkflowCliError(f"V {root / WORKFLOW_DIR_RELPATH} není žádné workflow")
+            raise WorkflowCliError(f"No workflow found in {root / WORKFLOW_DIR_RELPATH}")
     results = [validate_file(path, out) for path in paths]
     return 0 if all(results) else 1
 
@@ -306,7 +306,7 @@ class ConsoleReporter:
                 self._line(f"{self._c('33', '↷')} {message}")
             elif status == "failed":
                 attempts = data.get("attempts")
-                suffix = f", pokusů {attempts}" if attempts and attempts > 1 else ""
+                suffix = f", attempts {attempts}" if attempts and attempts > 1 else ""
                 tolerated = " — continueOnError" if data.get("continueOnError") else ""
                 self._line(f"{self._c('31', '✗')} {message}{self._c('2', took + suffix + tolerated)}")
                 tail = (data.get("log_tail") or "").rstrip().splitlines()[-LOG_TAIL_LINES:]
@@ -315,9 +315,9 @@ class ConsoleReporter:
             return
         if kind == "workflow_outputs":
             for attachment in data.get("attachments") or []:
-                self._line(f"  příloha {attachment.get('label')}: {attachment.get('value')}")
+                self._line(f"  attachment {attachment.get('label')}: {attachment.get('value')}")
             for name in data.get("artifact_names") or []:
-                self._line(f"  artefakt: {name}")
+                self._line(f"  artifact: {name}")
             return
         if kind == "idle":
             # Konec workflow shrnuje `run_workflow`.
@@ -332,7 +332,7 @@ class ConsoleReporter:
         self.comments += 1
         author = params.get("author_name") or "agent"
         status = TASK_STATUS_NAMES.get(params.get("status"), params.get("status"))
-        header = f"Komentář do tasku — autor: {author}, status: {status}"
+        header = f"Task comment — author: {author}, status: {status}"
         self._line()
         self._line(self._c("1", f"┌─ {header}"))
         lines = (params.get("body") or "").splitlines()
@@ -340,13 +340,13 @@ class ConsoleReporter:
         for line in shown:
             self._line(f"│ {line}")
         if len(shown) < len(lines):
-            self._line(self._c("2", f"│ … dalších {len(lines) - len(shown)} řádků (celé: --full)"))
+            self._line(self._c("2", f"│ … {len(lines) - len(shown)} more lines (full: --full)"))
         for attachment in params.get("attachments") or []:
-            self._line(f"│ příloha {attachment.get('label')}: {attachment.get('value')}")
+            self._line(f"│ attachment {attachment.get('label')}: {attachment.get('value')}")
         for artifact in params.get("artifacts") or []:
-            self._line(f"│ artefakt: {artifact.get('name')}")
+            self._line(f"│ artifact: {artifact.get('name')}")
         if params.get("images"):
-            self._line(f"│ obrázků: {len(params['images'])}")
+            self._line(f"│ images: {len(params['images'])}")
         for action in params.get("actions") or []:
             self._line(f"│ followup: [{action.get('title') or action.get('label')}]")
         self._line(self._c("1", "└─"))
@@ -354,13 +354,13 @@ class ConsoleReporter:
 
 def read_prompt(prompt: str | None, prompt_file: str | None, stdin: TextIO = sys.stdin) -> str:
     if prompt is not None and prompt_file is not None:
-        raise WorkflowCliError("Zadej prompt buď jako argument, nebo přes --prompt-file, ne obojí")
+        raise WorkflowCliError("Provide the prompt either as an argument or via --prompt-file, not both")
     if prompt_file == "-":
         return stdin.read()
     if prompt_file is not None:
         path = Path(prompt_file)
         if not path.is_file():
-            raise WorkflowCliError(f"Soubor s promptem neexistuje: {path}")
+            raise WorkflowCliError(f"Prompt file does not exist: {path}")
         return path.read_text(encoding="utf-8")
     return prompt or ""
 
@@ -396,7 +396,7 @@ def run_workflow(
     path = workflow_path(project_dir, name, settings)
     if path is None:
         raise WorkflowCliError(
-            f"Workflow {name!r} nenalezeno v {project_dir / WORKFLOW_DIR_RELPATH} ani v {settings.bundled_workflow_dir}"
+            f"Workflow {name!r} not found in {project_dir / WORKFLOW_DIR_RELPATH} nor in {settings.bundled_workflow_dir}"
         )
 
     # `default`/`project` se v Agentisu nevolají jménem — vybírá je scope.
@@ -425,19 +425,19 @@ def run_workflow(
 
     out.write(reporter._c("1", f"Workflow {name}") + f"  ({path})\n")
     out.write(
-        reporter._c("2", f"projekt {project_dir} · scope {scope} · runtime {runtime} · run {context['run_id']}\n")
+        reporter._c("2", f"project {project_dir} · scope {scope} · runtime {runtime} · run {context['run_id']}\n")
     )
     if scope in {"task", "worktree"}:
-        out.write(reporter._c("33", "Pozor: task scope vytvoří git worktree a větev v projektu.\n"))
+        out.write(reporter._c("33", "Warning: task scope creates a git worktree and branch in the project.\n"))
     if agentis_callbacks:
-        out.write(reporter._c("33", f"Výsledky se posílají do Agentisu ({settings.agentis_endpoint}).\n"))
+        out.write(reporter._c("33", f"Results are sent to Agentis ({settings.agentis_endpoint}).\n"))
     out.write("\n")
 
     started = time.monotonic()
     body, http_status = asyncio.run(dispatch_start(payload, service))
     if http_status >= 400 or "error" in body:
         error = body.get("error") or {}
-        out.write(reporter._c("31", f"✗ Start selhal: {error.get('message') or body}\n"))
+        out.write(reporter._c("31", f"✗ Start failed: {error.get('message') or body}\n"))
         if error.get("data"):
             out.write(f"    {error['data']}\n")
         return 1
@@ -447,7 +447,7 @@ def run_workflow(
         while not manager.wait_idle(0.5):
             pass
     except KeyboardInterrupt:
-        out.write(reporter._c("33", "\nPřerušeno — zastavuji workflow…\n"))
+        out.write(reporter._c("33", "\nInterrupted — stopping workflow…\n"))
         from common.models import AgentExecutionContextPayload
 
         manager.abort(AgentExecutionContextPayload.model_validate(context))
@@ -459,23 +459,23 @@ def run_workflow(
     elapsed = time.monotonic() - started
     out.write("\n")
     if status == "success":
-        out.write(reporter._c("32", f"✓ Workflow doběhlo za {elapsed:.1f}s") + "\n")
+        out.write(reporter._c("32", f"✓ Workflow finished in {elapsed:.1f}s") + "\n")
     else:
-        out.write(reporter._c("31", f"✗ Workflow skončilo stavem {status} po {elapsed:.1f}s") + "\n")
+        out.write(reporter._c("31", f"✗ Workflow ended with status {status} after {elapsed:.1f}s") + "\n")
         if result.get("error"):
             out.write(f"    {result['error']}\n")
     run_dir = result.get("run_dir")
     if run_dir is not None:
-        out.write(f"  run adresář: {run_dir}\n")
+        out.write(f"  run dir:    {run_dir}\n")
         logs = Path(run_dir) / "logs"
         if logs.is_dir():
-            out.write(f"  logy:        {logs}\n")
+            out.write(f"  logs:       {logs}\n")
         outputs = Path(run_dir) / "outputs"
         if outputs.is_dir():
             files = sorted(p.relative_to(outputs) for p in outputs.rglob("*") if p.is_file())
-            out.write(f"  outputs:     {outputs}" + (f" ({', '.join(map(str, files[:10]))})" if files else "") + "\n")
+            out.write(f"  outputs:    {outputs}" + (f" ({', '.join(map(str, files[:10]))})" if files else "") + "\n")
     if reporter.comments == 0 and status == "success" and _declares_comment(path):
-        out.write(reporter._c("33", "  Workflow nevytvořilo žádný komentář — zkontroluj cesty v outputs.\n"))
+        out.write(reporter._c("33", "  Workflow produced no comment — check the paths in outputs.\n"))
     return 0 if status == "success" else 1
 
 

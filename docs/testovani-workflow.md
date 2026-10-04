@@ -14,7 +14,7 @@ v tom, že eventy kroků, komentáře do tasku a přílohy se místo do Agentisu
 
 ```
 Workflow ai-news  (/var/www/agentis-general/.agentis/workflows/ai-news.yaml)
-projekt /var/www/agentis-general · scope project · runtime local · run dev-run-3f2a…
+project /var/www/agentis-general · scope project · runtime local · run dev-run-3f2a…
 
 ▶ Fetch AI news
 ✓ Fetch AI news (8.2s)
@@ -22,18 +22,18 @@ projekt /var/www/agentis-general · scope project · runtime local · run dev-ru
 ✓ Select and summarize (41.0s)
 ▶ Render newsletter
 ✓ Render newsletter (0.1s)
-↷ Krok přeskočen (if: SEND_EMAIL): Send newsletter email
+↷ Step skipped (if: SEND_EMAIL): Send newsletter email
 
-┌─ Komentář do tasku — autor: AI newsletter, status: done
+┌─ Task comment — author: AI newsletter, status: done
 │ # AI novinky – 4. 10. 2026
 │ …
-│ artefakt: newsletter.html
+│ artifact: newsletter.html
 └─
 
-✓ Workflow doběhlo za 49.6s
-  run adresář: /tmp/agentis/dev-run-3f2a…/1a105b…
-  logy:        /tmp/agentis/dev-run-3f2a…/1a105b…/logs
-  outputs:     /tmp/agentis/dev-run-3f2a…/1a105b…/outputs (items.json, newsletter.html, …)
+✓ Workflow finished in 49.6s
+  run dir:    /tmp/agentis/dev-run-3f2a…/1a105b…
+  logs:       /tmp/agentis/dev-run-3f2a…/1a105b…/logs
+  outputs:    /tmp/agentis/dev-run-3f2a…/1a105b…/outputs (items.json, newsletter.html, …)
 ```
 
 U selhaného kroku se vypíše konec jeho logu. Exit kód je `0` při úspěchu, `1` při selhání workflow

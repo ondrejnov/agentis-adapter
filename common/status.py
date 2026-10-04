@@ -285,7 +285,7 @@ def activity_from_event(event_type: str, data: dict[str, Any] | None) -> str | N
         text = (data.get("text") or "").strip()
         return _truncate(text, 120) if text else None
     if event_type == "thinking":
-        return "přemýšlí…"
+        return "thinking…"
     if event_type == "error":
         return _truncate(f"chyba: {data.get('message') or 'unknown'}", 160)
     return None

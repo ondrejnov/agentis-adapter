@@ -145,7 +145,7 @@ class AgentJsonRpcService:
                 worktree_step = self._run_adapter_step(
                     adapter,
                     kind="create_worktree",
-                    success_message="Git worktree je připravený.",
+                    success_message="Git worktree is ready.",
                     callback=adapter.create_worktree,
                 )
                 adapter_steps.append(worktree_step)
@@ -160,8 +160,8 @@ class AgentJsonRpcService:
             workflow_step = self._run_adapter_step(
                 adapter,
                 kind="workflow_start",
-                started_message="Spouštím workflow.",
-                success_message="Workflow běží na pozadí.",
+                started_message="Starting workflow.",
+                success_message="Workflow is running in the background.",
                 callback=lambda: self.workflow_manager.start_workflow(context, worktree, prompt),
             )
             adapter_steps.append(workflow_step)
@@ -345,8 +345,8 @@ class AgentJsonRpcService:
             step = self._run_adapter_step(
                 adapter,
                 kind="undo",
-                started_message="Vracím pracovní strom do posledního snapshotu.",
-                success_message="Pracovní strom byl vrácen do posledního snapshotu.",
+                started_message="Reverting the working tree to the last snapshot.",
+                success_message="The working tree was reverted to the last snapshot.",
                 callback=lambda: adapter.restore_snapshot(snapshot_key),
             )
         except Exception as exc:

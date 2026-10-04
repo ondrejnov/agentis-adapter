@@ -2982,14 +2982,14 @@ def test_local_executor_missing_bash_reports_spawn_failure(
     assert run.status == "failed"
     stderr = capfd.readouterr().err
     assert "selhal (spawn" in stderr
-    assert "bash nenalezen" in stderr
+    assert "bash not found" in stderr
     failed_events = [
         params
         for method, params in calls
         if method == "run.adapter_event" and params["kind"] == "workflow_step" and params["status"] == "failed"
     ]
     assert failed_events
-    assert "bash nenalezen" in failed_events[0]["data"]["log_tail"]
+    assert "bash not found" in failed_events[0]["data"]["log_tail"]
     assert not any(method == "task.add_agent_comment" for method, _ in calls)
 
 

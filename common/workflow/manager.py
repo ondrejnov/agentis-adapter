@@ -416,13 +416,13 @@ class WorkflowManager:
                 workflow_path = bundled_path
             elif workflow_name:
                 raise FileNotFoundError(
-                    f"Workflow {workflow_name!r} vyžaduje soubor {workflow_relpath} v projektu "
-                    f"({workflow_path}) nebo zabalený fallback ({bundled_path}), ale ani jeden neexistuje"
+                    f"Workflow {workflow_name!r} requires file {workflow_relpath} in the project "
+                    f"({workflow_path}) or the bundled fallback ({bundled_path}), but neither exists"
                 )
             else:
                 raise FileNotFoundError(
-                    f"Projekt nemá workflow soubor {workflow_relpath} ({workflow_path}) "
-                    f"ani zabalený fallback ({bundled_path}); run přes workflow runtime nelze spustit"
+                    f"Project has no workflow file {workflow_relpath} ({workflow_path}) "
+                    f"and no bundled fallback ({bundled_path}); the run cannot be started via the workflow runtime"
                 )
 
         external_run_files = is_project_scope or workflow_name is not None
@@ -576,7 +576,7 @@ class WorkflowManager:
             kind="workflow_abort",
             status="success",
             event_id=f"workflow_abort:{context.run_id}:{uuid4().hex}",
-            message="Workflow bylo zastaveno, Joby byly smazány.",
+            message="Workflow was stopped, Jobs were deleted.",
             data={"namespace": namespace, "deleted": deleted},
         )
         return {
@@ -655,8 +655,8 @@ class WorkflowManager:
         missing = [step.name for step in spec.steps if not (step.image or spec.image)]
         if missing:
             raise ValueError(
-                f"Workflow executor {executor!r} vyžaduje 'image' v {workflow_relpath} "
-                f"(chybí pro kroky: {', '.join(missing)})"
+                f"Workflow executor {executor!r} requires 'image' in {workflow_relpath} "
+                f"(missing for steps: {', '.join(missing)})"
             )
 
     @staticmethod
@@ -766,7 +766,7 @@ class WorkflowManager:
                 kind="workflow",
                 status="failed",
                 event_id=f"workflow:{run.context.run_id}:{run.attempt_id}",
-                message="Workflow běh selhal.",
+                message="Workflow run failed.",
                 data={"error": str(exc)},
             )
         finally:
@@ -784,7 +784,7 @@ class WorkflowManager:
                 kind="workflow",
                 status="success",
                 event_id=workflow_event_id,
-                message="Workflow bylo spuštěno.",
+                message="Workflow started.",
                 data={"attempt": run.attempt_id, "namespace": run.namespace, "executor": run.executor},
             )
 
@@ -928,7 +928,7 @@ class WorkflowManager:
                 kind="idle",
                 status="success",
                 event_id=workflow_event_id,
-                message="Workflow doběhlo.",
+                message="Workflow finished.",
                 data={"attempt": run.attempt_id},
             )
 
@@ -1138,10 +1138,10 @@ class WorkflowManager:
         if condition is not None:
             data["condition"] = condition
             data["vars"] = dict(visible_vars or {})
-            message = f"Krok přeskočen (if: {condition}): {step.name}"
+            message = f"Step skipped (if: {condition}): {step.name}"
         else:
             data["failed_step"] = failed_step
-            message = f"Krok přeskočen (workflow selhalo): {step.name}"
+            message = f"Step skipped (workflow failed): {step.name}"
         self._emit_adapter_event(
             run.context,
             kind="workflow_step",
@@ -1169,7 +1169,7 @@ class WorkflowManager:
                 kind="workflow_cleanup",
                 status="failed",
                 event_id=f"workflow_cleanup:{run.context.run_id}:{run.attempt_id}",
-                message=f"Smazání namespace {run.namespace} selhalo.",
+                message=f"Deleting namespace {run.namespace} failed.",
                 data={"namespace": run.namespace, "error": str(exc)},
             )
 
@@ -1303,7 +1303,7 @@ class WorkflowManager:
                 kind="workflow_outputs",
                 status="success",
                 event_id=f"workflow_outputs:{run.context.run_id}:{run.attempt_id}",
-                message="Workflow outputs byly zpracovány.",
+                message="Workflow outputs were processed.",
                 data={"attachments": attachments, "artifact_names": [item.get("name") for item in artifacts]},
             )
 
