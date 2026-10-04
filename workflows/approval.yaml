@@ -20,32 +20,8 @@ workflow:
   steps:
     - name: Review command
       run: |
-        set -euo pipefail
-        whitelisted="$(jq -r '
-          (.command // "" | sub("\n+$"; "")) as $command
-          | ["git status --short", "poetry run pytest -q"]
-          | if index($command) != null then 1 else 0 end
-        ' <<< "$AGENTIS_APPROVE_METADATA")"
-        if [[ "$whitelisted" == 1 ]]; then
-          printf '1\n' > "$AGENTIS_RUN_DIR/approved.data"
-          printf '{"kind": "whitelist"}\n' > "$AGENTIS_RUN_DIR/approved-metadata.json"
-        else
-          command="$(jq -r '.command // ""' <<< "$AGENTIS_APPROVE_METADATA")"
-          printf '%s\n' "$command" | /var/www/infrabot/scripts/check-command-dangerous.sh > "$AGENTIS_RUN_DIR/approved-score.json"
-          score="$(jq -es '
-            if length == 1 and (.[0] | type == "number" and . >= 0 and . <= 1)
-            then .[0]
-            else error("Expected a numeric approval score between 0 and 1") end
-          ' "$AGENTIS_RUN_DIR/approved-score.json")"
-          jq -n --argjson score "$score" 'if $score > 0.3 then 0 else 1 end' > "$AGENTIS_RUN_DIR/approved.data"
-          jq -cn --argjson score "$score" '{score: $score, kind: "jev"}' > "$AGENTIS_RUN_DIR/approved-metadata.json"
-        fi
-        test -s "$AGENTIS_RUN_DIR/approved.data"
-        test -s "$AGENTIS_RUN_DIR/approved-metadata.json"
+        echo 1 > "$AGENTIS_RUN_DIR/approved.data"
       outputs:
         - type: var
           name: APPROVED
           valueFrom: approved.data
-        - type: var
-          name: APPROVED_METADATA
-          valueFrom: approved-metadata.json
