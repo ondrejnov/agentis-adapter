@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -262,10 +263,20 @@ async def dispatch_start(payload: dict[str, Any], service: Any) -> tuple[dict[st
 class ConsoleReporter:
     """Vypisuje Agentis RPC volání workflow manageru čitelně do terminálu."""
 
-    def __init__(self, out: TextIO = sys.stdout, *, color: bool | None = None, full: bool = False) -> None:
+    def __init__(
+        self,
+        out: TextIO = sys.stdout,
+        *,
+        color: bool | None = None,
+        full: bool = False,
+        verbose: bool = False,
+        log_dir: Callable[[], Path | None] | None = None,
+    ) -> None:
         self.out = out
         self.color = out.isatty() if color is None else color
         self.full = full
+        self.verbose = verbose
+        self.log_dir = log_dir
         self.step_started: dict[Any, float] = {}
         self.comments = 0
 
@@ -302,6 +313,7 @@ class ConsoleReporter:
             took = f" ({time.monotonic() - started:.1f}s)" if started is not None else ""
             if status == "success":
                 self._line(f"{self._c('32', '✓')} {step}{self._c('2', took)}")
+                self._step_log(data)
             elif status == "skipped":
                 self._line(f"{self._c('33', '↷')} {message}")
             elif status == "failed":
@@ -309,9 +321,10 @@ class ConsoleReporter:
                 suffix = f", attempts {attempts}" if attempts and attempts > 1 else ""
                 tolerated = " — continueOnError" if data.get("continueOnError") else ""
                 self._line(f"{self._c('31', '✗')} {message}{self._c('2', took + suffix + tolerated)}")
-                tail = (data.get("log_tail") or "").rstrip().splitlines()[-LOG_TAIL_LINES:]
-                for line in tail:
-                    self._line(self._c("2", f"    │ {line}"))
+                if not self._step_log(data):
+                    tail = (data.get("log_tail") or "").rstrip().splitlines()[-LOG_TAIL_LINES:]
+                    for line in tail:
+                        self._line(self._c("2", f"    │ {line}"))
             return
         if kind == "workflow_outputs":
             for attachment in data.get("attachments") or []:
@@ -327,6 +340,21 @@ class ConsoleReporter:
             self._line(f"{marker} {self._c('2', message) if status != 'failed' else message}")
             if status == "failed" and data.get("error"):
                 self._line(f"    {data['error']}")
+
+    def _step_log(self, data: dict[str, Any]) -> bool:
+        """V `--verbose` vypíše celý log kroku (`<run_dir>/logs/<job>.log`); vrací, zda se něco vypsalo."""
+
+        job = data.get("job")
+        run_dir = self.log_dir() if self.verbose and self.log_dir is not None else None
+        if not job or run_dir is None or not WORKFLOW_NAME_RE.match(str(job)):
+            return False
+        try:
+            text = (run_dir / "logs" / f"{job}.log").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        for line in text.rstrip().splitlines():
+            self._line(self._c("2", f"    │ {line}"))
+        return bool(text.strip())
 
     def _comment(self, params: dict[str, Any]) -> None:
         self.comments += 1
@@ -386,6 +414,7 @@ def run_workflow(
     title: str | None = None,
     agentis_callbacks: bool = False,
     full: bool = False,
+    verbose: bool = False,
     out: TextIO = sys.stdout,
 ) -> int:
     """Spustí workflow, počká na konec a vrátí exit kód (0 = success)."""
@@ -407,8 +436,16 @@ def run_workflow(
     else:
         scope, workflow_name = scope or "project", name
 
-    reporter = ConsoleReporter(out, full=full)
+    task_id = f"dev-task-{uuid4().hex[:12]}"
+    services: list[Any] = []
+
+    def current_run_dir() -> Path | None:
+        result = services[0].workflow_manager.run_result(task_id) if services else None
+        return result["run_dir"] if result else None
+
+    reporter = ConsoleReporter(out, full=full, verbose=verbose, log_dir=current_run_dir)
     service = create_service(settings, agentis_callbacks=agentis_callbacks, sink=reporter)
+    services.append(service)
     payload = build_start_payload(
         working_dir=project_dir,
         prompt=prompt,
@@ -419,7 +456,7 @@ def run_workflow(
         effort=effort,
         title=title or f"Test workflow {name}",
         run_id=f"dev-run-{uuid4().hex[:12]}",
-        task_id=f"dev-task-{uuid4().hex[:12]}",
+        task_id=task_id,
     )
     context = payload["params"]["context"]
 

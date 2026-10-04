@@ -59,6 +59,7 @@ podle nejbližšího nadřazeného adresáře s `.agentis/workflows`, nebo ho ur
 | `--scope` | `project` | `task`/`worktree` vytvoří git worktree a větev jako běžný task run |
 | `--title` | `Test workflow <jméno>` | Název tasku (`TASK_TITLE`) |
 | `--full` | vypnuto | Vypíše komentáře celé (jinak prvních 60 řádků) |
+| `-v, --verbose` | vypnuto | Po každém kroku vypíše jeho log (stdout/stderr z `<run_dir>/logs/`); u neúspěšného kroku místo posledních 30 řádků celý log |
 | `--agentis` | vypnuto | Pošle eventy a outputs do skutečného Agentisu (`AGENTIS_ENDPOINT`) |
 
 Jména `default` a `project` Agentis nevolá jménem, vybírá je scope. `run default` proto běží v task

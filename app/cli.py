@@ -90,6 +90,7 @@ def _parser() -> argparse.ArgumentParser:
     run_cmd.add_argument("-e", "--effort", help="AGENTIS_EFFORT (default: unset).")
     run_cmd.add_argument("--title", help="Mock task title (TASK_TITLE).")
     run_cmd.add_argument("--full", action="store_true", help="Print comments in full, without truncation.")
+    run_cmd.add_argument("-v", "--verbose", action="store_true", help="Print the log of every step (stdout/stderr).")
     run_cmd.add_argument(
         "--agentis", action="store_true", help="Send events and outputs to the real Agentis (AGENTIS_ENDPOINT)."
     )
@@ -123,6 +124,7 @@ def _run_workflow_command(args: argparse.Namespace) -> int:
                 title=args.title,
                 agentis_callbacks=args.agentis,
                 full=args.full,
+                verbose=args.verbose,
             )
         if args.workflow_command == "validate":
             return devrun.validate_workflows(args.workflows, args.project, cwd)
