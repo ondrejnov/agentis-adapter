@@ -43,6 +43,24 @@ cd agentis-adapter
 poetry install
 ```
 
+#### Globální instalace příkazu
+
+Aby `agentis-adapter` (např. `agentis-adapter workflow list`) fungoval odkudkoliv bez aktivace virtuálního prostředí, nainstalujte jej přes [pipx](https://pipx.pypa.io/) v editable režimu z naklonovaného repozitáře:
+
+```bash
+pipx install --editable --python python3.13 .
+pipx ensurepath   # jednou; poté otevřete nový terminál
+```
+
+Příkaz je pak dostupný v `~/.local/bin` v libovolném adresáři:
+
+```bash
+cd ~/muj-projekt
+agentis-adapter workflow list
+```
+
+Použijte právě `--editable`: adapter hledá `.env`, dodané workflow ve `workflows/` a pracovní adresáře relativně k adresáři repozitáře, takže se tento adresář nesmí přesunout ani smazat. Změny v kódu se projeví okamžitě; aktualizace závislostí: `pipx reinstall agentis-adapter`. Odinstalace: `pipx uninstall agentis-adapter`.
+
 ### 3. Připojení k Agentisu
 
 Vytvořte `.env` v kořeni repozitáře:
@@ -60,7 +78,7 @@ WORKFLOW_EXECUTOR=local
 Spusťte adapter:
 
 ```bash
-poetry run agentis-adapter
+poetry run agentis-adapter   # nebo jen `agentis-adapter` po globální instalaci
 ```
 
 Adapter se sám připojí k Agentisu a začne přijímat tasky. Není potřeba vystavovat veřejný příchozí port.

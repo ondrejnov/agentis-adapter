@@ -312,11 +312,7 @@ Approval nepoužije žádné ostatní completion outputs ani callbacks. Fatáln�
 
 Každý approval dostane namespace a task label odvozené z `approval_id`, takže nekoliduje s Joby, kontejnery ani procesy hlavního workflow. Deadline nastaví abort event a zároveň cíleně ukončí executor resources konkrétního attemptu. Bundled `approval.yaml` nedědí infrastrukturní mounty z `_base.yaml`: připojuje jen vlastní run adresář. Má jediný krok `Review command`:
 
-Nejprve porovná celý příkaz s whitelistem, který obsahuje `git status --short` a `poetry run pytest -q`. Ignoruje pouze koncové LF znaky; další argumenty, shellové operátory ani další příkazy se za shodu nepovažují. Shoda připraví `APPROVED=1` a metadata `{"kind": "whitelist"}`.
-
-Při neshodě předá příkaz na stdin skriptu `/var/www/infrabot/scripts/check-command-dangerous.sh` a číselný výsledek uloží do `approved-score.json` v run adresáři. Pro skóre `<= 0.3` připraví `APPROVED=1`, jinak `0`; metadata obsahují `{"score": <skutečné skóre>, "kind": "jev"}`. Selhání kontroly nebo neplatné skóre ukončí krok chybou. Tentýž krok publikuje outputs `APPROVED` a `APPROVED_METADATA` z připravených souborů pro obě větve.
-
-Zpracování JSON a porovnání skóre používá Bash a `jq`. Projektové přepsání `approval.yaml` určuje vlastní review policy; zejména local executor není sandbox a autor workflow nesmí command přímo vykonat ani interpolovat do shellu.
+Krok pouze zapíše `1` do `approved.data` a publikuje jej jako `APPROVED`; žádnou kontrolu příkazu ani metadata bundled verze neprovádí (neposílá `APPROVED_METADATA`, RPC result je tedy integer `1`). Skutečnou review policy (whitelist, kontrola skóre apod.) definuje projektové přepsání `approval.yaml`; local executor není sandbox a autor workflow nesmí command přímo vykonat ani interpolovat do shellu.
 
 Artifact `path` může obsahovat `*`, `?`, `[]` a rekurzivní `**`. Jeden output tak může přiložit více souborů; runtime pro jejich počet ani celkovou velikost aktuálně nevynucuje limit, takže glob musí být dostatečně úzký.
 
@@ -353,7 +349,7 @@ Workflow bez sekce (`project.yaml`, `merge.yaml`, `close.yaml`) žádné akce ne
 
 ## Workflow v tomto repozitáři
 
-Repozitář obsahuje dvě odlišné sady. Bundled fallback v `workflows/` se distribuuje s adapterem a obsahuje `_base.yaml`, `default.yaml`, `project.yaml` a `approval.yaml`; běžná spustitelná workflow mají pouze standardní agentí krok a žádné followups, approval vrací `APPROVED` a volitelně `APPROVED_METADATA`. Projektová sada v `.agentis/workflows/` konfiguruje samotný vývoj tohoto repozitáře a navíc obsahuje `slack.yaml`, `merge.yaml` a `close.yaml`.
+Repozitář obsahuje dvě odlišné sady. Bundled fallback v `workflows/` se distribuuje s adapterem a obsahuje `_base.yaml`, `default.yaml`, `project.yaml` a `approval.yaml`; běžná spustitelná workflow mají pouze standardní agentí krok a žádné followups, approval vrací `APPROVED`. Projektová sada v `.agentis/workflows/` konfiguruje samotný vývoj tohoto repozitáře a navíc obsahuje `slack.yaml`, `merge.yaml` a `close.yaml`.
 
 Projektová workflow dědí přes `.agentis/workflows/_base.yaml` sdílenou infrastrukturu (image, `imagePullSecrets`, `envFiles`, společné env a mounty) a šablonu `run-agent`:
 
@@ -368,7 +364,7 @@ Projektová workflow dědí přes `.agentis/workflows/_base.yaml` sdílenou infr
 | `workflows/_base.yaml` | Minimální bundled šablona `run-agent` |
 | `workflows/default.yaml` | Bundled fallback běžného tasku: jediný krok `Run agent` |
 | `workflows/project.yaml` | Bundled fallback project scope: jediný krok `Run agent` |
-| `workflows/approval.yaml` | Jednokrokové approval: whitelist `git status --short` a `poetry run pytest -q`, jinak kontrola skóre `<= 0.3`, vrácení výsledku a JSON metadat |
+| `workflows/approval.yaml` | Jednokrokové approval, které vždy vrací `APPROVED=1` |
 
 ## Testování
 
