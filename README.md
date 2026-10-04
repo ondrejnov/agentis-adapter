@@ -65,6 +65,14 @@ poetry run agentis-adapter
 
 Adapter se sám připojí k Agentisu a začne přijímat tasky. Není potřeba vystavovat veřejný příchozí port.
 
+Workflow se dá před nasazením vyzkoušet bez Agentisu — kroky, komentáře a outputs se vypíší do terminálu
+(viz [Testování workflow](docs/testovani-workflow.md)):
+
+```bash
+agentis-adapter workflow validate
+agentis-adapter workflow run ai-news "Zadání tasku"
+```
+
 > [!IMPORTANT]
 > Lokální executor spouští workflow přímo pod uživatelem adapteru a neposkytuje sandbox. Pro nedůvěryhodný kód použijte Docker, Kubernetes nebo jinou izolaci.
 
@@ -334,6 +342,7 @@ Výchozí adresa je `http://localhost:8001`. HTTP server neslouží k přijímá
 
 - [Adapter a komunikace s Agentisem](docs/adapter.md)
 - [Workflow, executory a outputs](docs/workflow.md)
+- [Testování workflow před nasazením](docs/testovani-workflow.md)
 - [Koncept lokálního workflow executoru](docs/koncept-local-workflow-executor.md)
 
 ## Vývoj

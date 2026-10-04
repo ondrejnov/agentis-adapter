@@ -40,7 +40,6 @@ class BaseAdapterService:
     def __init__(self, context: AgentExecutionContextPayload, settings: Settings):
         self.context = context
         self.settings = settings
-        print(f"Adapter initialized with context: {self.context}")
 
     @staticmethod
     def is_project_scope(context: AgentExecutionContextPayload) -> bool:

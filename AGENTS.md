@@ -6,7 +6,8 @@ Agentis Adapter is a Python 3.13 service that receives Agentis JSON-RPC requests
 
 ## Repository Map
 
-- `app/cli.py`: `agentis-adapter` CLI entrypoint and WebSocket/status-server lifecycle.
+- `app/cli.py`: `agentis-adapter` CLI entrypoint, WebSocket/status-server lifecycle, and `workflow run|validate|list` developer subcommands.
+- `common/workflow/devrun.py`: local workflow testing without Agentis (`agentis-adapter workflow …`); Agentis callbacks are printed to the console.
 - `app/adapter_api.py`: thin FastAPI application and JSON-RPC dispatch table.
 - `common/config.py`: environment-backed immutable settings. Clear the `get_settings()` cache in tests after changing environment variables.
 - `common/models.py`: Pydantic request, execution-context, and run payloads.
@@ -58,6 +59,7 @@ Agentis Adapter is a Python 3.13 service that receives Agentis JSON-RPC requests
 ```bash
 poetry install
 poetry run agentis-adapter
+poetry run agentis-adapter workflow run <name> "prompt"   # test a workflow locally, see docs/testovani-workflow.md
 poetry run pytest -q
 poetry run ruff check .
 ```

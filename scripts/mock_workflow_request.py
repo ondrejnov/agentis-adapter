@@ -5,24 +5,22 @@ import argparse
 import asyncio
 import json
 import sys
-from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
-from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.adapter_api import _DISPATCH  # noqa: E402
 from common.config import get_settings  # noqa: E402
-from common.git_adapter import GitAdapterService  # noqa: E402
-from common.rpc.dispatcher import dispatch_jsonrpc_payload  # noqa: E402
 from common.rpc.jsonrpc import AgentJsonRpcService  # noqa: E402
+from common.workflow.devrun import build_start_payload, create_service, dispatch_start  # noqa: E402
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build or dispatch a local mock Agentis JSON-RPC start request for workflow testing."
+        description=(
+            "Build or dispatch a local mock Agentis JSON-RPC start request for workflow testing. "
+            "For everyday testing prefer `agentis-adapter workflow run`."
+        )
     )
     parser.add_argument("prompt", nargs="?", default="Mock Slack workflow request.", help="Prompt sent to the agent.")
     parser.add_argument("--print-only", action="store_true", help="Only print the JSON-RPC payload; do not run it.")
@@ -60,8 +58,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def build_payload(args: argparse.Namespace) -> dict[str, Any]:
-    working_dir = Path(args.working_dir).resolve()
-    project_slug = args.project_slug or working_dir.name
     headers = {
         key: value
         for key, value in {
@@ -71,48 +67,35 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         }.items()
         if value
     }
-    adapter = {
-        "scope": args.scope,
-        "runtime": args.runtime,
-        "agent": args.agent,
-        "model": args.model,
-        "effort": args.effort,
-    }
-    if args.workflow:
-        adapter["workflow"] = args.workflow
-
-    context: dict[str, Any] = {
-        "run_id": args.run_id or f"mock-run-{uuid4().hex}",
-        "task_id": args.task_id or f"mock-task-{uuid4().hex}",
-        "session_id": args.session_id,
-        "title": args.title,
-        "description": args.description,
-        "user_prompt": args.prompt,
-        "task_number": args.task_number,
-        "headers": headers or None,
-        "project_slug": project_slug,
-        "project_title": args.project_title or project_slug,
-        "project_github_repo": args.project_github_repo,
-        "base_branch": args.base_branch,
-        "working_dir": str(working_dir),
-        "adapter": adapter,
-    }
-    return {"jsonrpc": "2.0", "id": context["run_id"], "method": "start", "params": {"context": context}}
+    return build_start_payload(
+        working_dir=Path(args.working_dir),
+        prompt=args.prompt,
+        workflow=args.workflow,
+        scope=args.scope,
+        runtime=args.runtime,
+        model=args.model,
+        effort=args.effort,
+        agent=args.agent,
+        title=args.title,
+        description=args.description,
+        task_id=args.task_id,
+        run_id=args.run_id,
+        task_number=args.task_number,
+        session_id=args.session_id,
+        project_slug=args.project_slug,
+        project_title=args.project_title,
+        project_github_repo=args.project_github_repo,
+        base_branch=args.base_branch,
+        headers=headers,
+    )
 
 
 async def dispatch_payload(
     payload: dict[str, Any], *, agentis_callbacks: bool
 ) -> tuple[dict[str, Any], int, AgentJsonRpcService]:
-    settings = get_settings()
-    if not agentis_callbacks:
-        settings = replace(settings, agentis_endpoint=None)
-    service = AgentJsonRpcService(
-        settings=settings,
-        adapter_factory=lambda context: GitAdapterService(context=context, settings=settings),
-    )
-    container = SimpleNamespace(agent_jsonrpc_service=service)
-    result = await dispatch_jsonrpc_payload(payload, _DISPATCH, container)
-    return result.body, result.http_status, service
+    service = create_service(get_settings(), agentis_callbacks=agentis_callbacks)
+    body, http_status = await dispatch_start(payload, service)
+    return body, http_status, service
 
 
 def main(argv: list[str] | None = None) -> int:

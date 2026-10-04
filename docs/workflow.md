@@ -370,6 +370,11 @@ Projektová workflow dědí přes `.agentis/workflows/_base.yaml` sdílenou infr
 | `workflows/project.yaml` | Bundled fallback project scope: jediný krok `Run agent` |
 | `workflows/approval.yaml` | Jednokrokové approval: whitelist `git status --short` a `poetry run pytest -q`, jinak kontrola skóre `<= 0.3`, vrácení výsledku a JSON metadat |
 
+## Testování
+
+Lokální běh bez Agentisu: `agentis-adapter workflow run <jméno> "zadání"`, kontrola YAML:
+`agentis-adapter workflow validate`. Podrobnosti v [testovani-workflow.md](testovani-workflow.md).
+
 ## Časté chyby
 
 - **Workflow executor `kubernetes` nebo `docker` vyžaduje `image`** — krok nemá `image` ani workflow default; doplnit, nebo přepnout `executor: local`.

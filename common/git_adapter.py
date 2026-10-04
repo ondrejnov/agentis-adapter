@@ -34,7 +34,6 @@ class GitAdapterService(BaseAdapterService):
 
     @staticmethod
     def _run_git(cwd: Path, *args: str) -> str:
-        print(args)
         completed = subprocess.run(
             ["git", "-C", str(cwd), *args],
             capture_output=True,

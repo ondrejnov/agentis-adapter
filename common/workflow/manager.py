@@ -20,7 +20,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from uuid import uuid4
 
 from dotenv import dotenv_values
@@ -158,10 +158,17 @@ class _ApprovalEntry:
 class WorkflowManager:
     """Owns background workflow runs keyed by task_id."""
 
-    def __init__(self, settings: Settings, runner: WorkflowStepRunner | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        runner: WorkflowStepRunner | None = None,
+        agentis_sink: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> None:
         self.settings = settings
         #: Explicitní runner (testy) má přednost před výběrem podle executoru.
         self._runner_override = runner
+        #: Náhrada Agentis RPC (`agentis-adapter workflow run`): volání jdou sem místo na endpoint.
+        self._agentis_sink = agentis_sink
         self._runners: dict[tuple[str, str | None], WorkflowStepRunner] = {}
         self._runs: dict[str, _WorkflowRun] = {}
         self._starting_tasks: set[str] = set()
@@ -611,6 +618,20 @@ class WorkflowManager:
             if remaining <= 0:
                 return False
             threads[0].join(timeout=remaining)
+
+    def run_result(self, task_id: str) -> dict[str, Any] | None:
+        """Stav posledního runu tasku (status, run adresář, output root, chyba); None, pokud run neexistuje."""
+        with self._lock:
+            run = self._runs.get(task_id)
+        if run is None:
+            return None
+        return {
+            "status": run.status,
+            "run_dir": run.run_dir,
+            "output_root": run.output_root,
+            "executor": run.executor,
+            "error": str(run.error) if run.error else None,
+        }
 
     def _active_threads(self) -> list[threading.Thread]:
         with self._lock:
@@ -1367,6 +1388,9 @@ class WorkflowManager:
     # ------------------------------------------------------------------
 
     def _agentis_call(self, method: str, params: dict[str, Any]) -> None:
+        if self._agentis_sink is not None:
+            self._agentis_sink(method, params)
+            return
         endpoint = self.settings.agentis_endpoint
         if not endpoint:
             return
