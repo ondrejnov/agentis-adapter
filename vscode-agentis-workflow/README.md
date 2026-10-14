@@ -10,8 +10,9 @@ VS Code language support for declarative workflow files stored in `.agentis/work
 - Go to Definition for workflow files, step templates, steps, and locally defined condition variables.
 - Cross-file completion from the one-level `extends` parent, including unsaved editor content.
 - Live diagnostics for interpolation tokens, inheritance, template references, DAG dependencies, duplicate step names, and mount volume sources.
+- Validation of declarative `agent` steps; warnings for a missing `agent.promptFile` / `agent.outputSchema` in the project and errors for a schema file that is not a JSON object (runtime paths such as `${AGENTIS_RUN_DIR}/…` are skipped).
 - Bold formatting for workflow step names.
-- Light gray backgrounds for workflow `run` blocks.
+- Light gray backgrounds for workflow `run` blocks and inline `agent.prompt` blocks.
 
 The extension installs `redhat.vscode-yaml` as a dependency. Runtime validation in `common/workflow/schema.py` remains authoritative.
 

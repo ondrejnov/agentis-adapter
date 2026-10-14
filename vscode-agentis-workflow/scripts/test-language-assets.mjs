@@ -92,3 +92,58 @@ workflow:
       workflow: merge
 `);
 assert.equal(validate(optionalPrompt), true, JSON.stringify(validate.errors));
+
+const agentStep = parse(`
+version: 1
+workflow:
+  steps:
+    - name: Select
+      timeoutSeconds: 1200
+      agent:
+        adapter: claude
+        model: \${NEWS_MODEL}
+        prompt: |
+          Vyber zprávy.
+        inputs:
+          - label: "Položky:"
+            path: \${AGENTIS_RUN_DIR}/outputs/items.json
+            optional: true
+        outputSchema: \${WORKDIR}/.agentis/schemas/selection.schema.json
+        schemaRetries: 1
+        output: \${AGENTIS_RUN_DIR}/outputs/selection.json
+    - name: Task prompt agent
+      agent:
+        adapter: opencode
+`);
+assert.equal(validate(agentStep), true, JSON.stringify(validate.errors));
+
+const agentInvalid = (agentYaml, extra = "") =>
+  parse(`
+version: 1
+workflow:
+  steps:
+    - name: Select
+${extra}      agent:
+${agentYaml}
+`);
+assert.equal(validate(agentInvalid("        model: x")), false, "agent requires adapter");
+assert.equal(
+  validate(agentInvalid("        adapter: claude\n        prompt: a\n        promptFile: b")),
+  false,
+  "prompt and promptFile are exclusive",
+);
+assert.equal(
+  validate(agentInvalid("        adapter: claude\n        schemaRetries: 1")),
+  false,
+  "schemaRetries requires outputSchema",
+);
+assert.equal(
+  validate(agentInvalid("        adapter: claude\n        unknown: 1")),
+  false,
+  "agent rejects unknown keys",
+);
+assert.equal(
+  validate(agentInvalid("        adapter: claude", "      run: echo hi\n")),
+  false,
+  "step cannot declare both run and agent",
+);

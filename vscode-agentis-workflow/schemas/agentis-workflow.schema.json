@@ -50,6 +50,31 @@
           ]
         }
       }
+    },
+    {
+      "label": "Agentis workflow with structured agent step",
+      "body": {
+        "version": 1,
+        "workflow": {
+          "steps": [
+            {
+              "name": "Select items",
+              "agent": {
+                "adapter": "claude",
+                "prompt": "$1",
+                "inputs": [
+                  {
+                    "label": "Items:",
+                    "path": "\\${AGENTIS_RUN_DIR}/outputs/items.json"
+                  }
+                ],
+                "outputSchema": "\\${WORKDIR}/.agentis/schemas/$2.schema.json",
+                "output": "\\${AGENTIS_RUN_DIR}/outputs/selection.json"
+              }
+            }
+          ]
+        }
+      }
     }
   ],
   "definitions": {
@@ -317,8 +342,27 @@
                   "type": "string"
                 }
               }
+            },
+            {
+              "required": ["agent"],
+              "properties": {
+                "agent": {
+                  "type": "object"
+                }
+              }
             }
           ],
+          "not": {
+            "required": ["run", "agent"],
+            "properties": {
+              "run": {
+                "type": "string"
+              },
+              "agent": {
+                "type": "object"
+              }
+            }
+          },
           "properties": {
             "name": {
               "type": "string"
@@ -337,6 +381,9 @@
             "run": {
               "type": ["string", "null"]
             },
+            "agent": {
+              "$ref": "#/definitions/agent"
+            },
             "if": {},
             "continueOnError": {},
             "retries": {},
@@ -351,6 +398,110 @@
           }
         }
       ]
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter"],
+      "description": "Declarative agentiscode call; the adapter generates the step's run script from it. Only $NAME, ${NAME} and ${NAME:-text} environment references are expanded.",
+      "not": {
+        "required": ["prompt", "promptFile"]
+      },
+      "dependencies": {
+        "schemaRetries": ["outputSchema"]
+      },
+      "properties": {
+        "adapter": {
+          "type": "string",
+          "minLength": 1,
+          "examples": ["claude", "claude-p", "opencode"],
+          "description": "agentiscode runtime: claude, claude-p, or opencode."
+        },
+        "model": {
+          "type": ["string", "null"],
+          "description": "Model passed to the agent."
+        },
+        "effort": {
+          "type": ["string", "null"],
+          "description": "Reasoning effort (Claude --effort, OpenCode --variant)."
+        },
+        "taskOverrides": {
+          "type": "boolean",
+          "default": true,
+          "description": "AGENTIS_ADAPTER, AGENTIS_MODEL, and AGENTIS_EFFORT from the task override adapter, model, and effort."
+        },
+        "prompt": {
+          "type": ["string", "null"],
+          "description": "Inline prompt passed literally, without variable expansion. Without prompt and promptFile the task prompt is used."
+        },
+        "promptFile": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Prompt file path. Only $NAME, ${NAME} and ${NAME:-text} environment references are expanded."
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/agentInput"
+          },
+          "default": [],
+          "description": "Files appended to the prompt in order."
+        },
+        "outputSchema": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "JSON Schema of the final answer (agentiscode --output-schema), typically in .agentis/schemas/. An invalid answer gets a repair turn via --resume; if it still fails, the step exits with code 3. Only $NAME, ${NAME} and ${NAME:-text} environment references are expanded."
+        },
+        "schemaRetries": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Repair turns allowed when the answer does not match outputSchema (agentiscode default: 2)."
+        },
+        "output": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "File with the final answer (--final-output); with outputSchema it contains validated JSON. Publish it through outputs separately. Only $NAME, ${NAME} and ${NAME:-text} environment references are expanded."
+        },
+        "sessionOutput": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "File with the agent session id. Only $NAME, ${NAME} and ${NAME:-text} environment references are expanded."
+        },
+        "sessionTitle": {
+          "type": ["string", "null"],
+          "description": "Session title shown in Agentis; defaults to the step name."
+        },
+        "extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Arguments passed verbatim to the runtime CLI (--extra-args-json)."
+        }
+      }
+    },
+    "agentInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "description": "File appended to the agent prompt after an optional label.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "File path in the step filesystem. Only $NAME, ${NAME} and ${NAME:-text} environment references are expanded."
+        },
+        "label": {
+          "type": ["string", "null"],
+          "description": "Text printed before the file content, for example 'Items:'."
+        },
+        "optional": {
+          "type": "boolean",
+          "default": false,
+          "description": "Skip a missing or empty file instead of failing the step."
+        }
+      }
     },
     "condition": {
       "type": ["string", "null"],

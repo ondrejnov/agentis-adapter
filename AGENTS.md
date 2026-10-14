@@ -20,6 +20,8 @@ Agentis Adapter is a Python 3.13 service that receives Agentis JSON-RPC requests
 - `common/workflow/runtime.py`, `local_runtime.py`, `docker_runtime.py`: Kubernetes, local-process, and Docker step runners.
 - `common/artifacts/`: source snapshots, change diffs, screenshots, and output artifacts.
 - `workflows/`: bundled fallback workflows used when a project has no matching `.agentis/workflows/*.yaml` file.
+- `skills/agentis-workflow/`: agent skill for authoring workflows (symlinked into `~/.claude/skills/`), including the `scripts/validate_workflow.py` validator.
+- `vscode-agentis-workflow/`: VS Code extension with the editor JSON Schema and live diagnostics for workflow files.
 - `tests/`: pytest coverage for JSON-RPC, transports, workflows, artifacts, status, shutdown, and CLI behavior.
 - `docs/adapter.md` and `docs/workflow.md`: protocol and workflow documentation that must stay aligned with behavioral changes.
 
@@ -44,7 +46,7 @@ Agentis Adapter is a Python 3.13 service that receives Agentis JSON-RPC requests
 - Keep one active workflow per task. Preserve abort events, timeout handling, retries, `continueOnError`, `always`, dependency scheduling, and graceful shutdown semantics.
 - Outputs from skipped or failed steps must not be applied. Successful `always` step outputs may still report a workflow failure.
 - Treat workflow paths and artifact paths as untrusted input. Keep containment checks and file-count/size limits intact.
-- If workflow behavior or syntax changes, update `docs/workflow.md`, bundled workflows, and focused tests together.
+- If workflow behavior or syntax changes, update `docs/workflow.md`, bundled workflows, focused tests, the extension schema in `vscode-agentis-workflow/schemas/`, and `skills/agentis-workflow/` together.
 
 ## Security And Data Handling
 

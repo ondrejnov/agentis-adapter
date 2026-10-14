@@ -104,8 +104,9 @@ workflow:
     - name: Run agent
       needs: ["Check environment"] # volitelné: explicitní závislosti podle jmen kroků
       uses: run-agent           # volitelně: defaulty kroku ze šablony (viz níže)
-      run: |                    # bash skript kroku (povinný, pokud ho nedodá `uses`)
+      run: |                    # bash skript kroku (povinný, pokud ho nedodá `uses` nebo `agent`)
         ...
+      agent: {...}              # místo `run`: deklarativní volání agenta (viz níže)
       if: ENV_READY != 'true'   # volitelná podmínka (viz níže)
       continueOnError: false    # selhání kroku nezastaví workflow (viz Error handling)
       retries: 0                # počet opakování selhaného kroku
@@ -170,6 +171,39 @@ workflow:
 Resoluce proběhne při načtení souboru (po `extends` merge), runtime už vidí jen plně rozbalené kroky. Parametrizace skriptu se dělá přes env proměnné s defaulty v bashi (`${VAR:-default}`), ne přes interpolační tokeny — `[%TOKEN%]` v šabloně se nahradí built-in hodnotami runu jako kdekoli jinde.
 
 Dodávaná volitelná šablona `run-agent` v `_base.yaml` spouští externí balíček `agentiscode` (adapter CLI podle modelu, resume session) a parametrizuje se přes `RUN_AGENT_FLAGS` (default `--json`), `RUN_AGENT_OUTPUT_DIR` (default `$AGENTIS_RUN_DIR/outputs`; při přepisu je nutné přepsat i `outputs`, jejich cesty se čtou relativně k output rootu runu) a `RUN_AGENT_STREAM_FILTER` (příkaz, kterým proteče stdout agenta, default `cat` — Slack workflow tudy posílá stream do `scripts/slack_stream.py`). Balíček musí být samostatně nainstalovaný na hostu nebo ve zvolené image; není závislostí adapteru.
+
+### Agentní kroky (`agent`)
+
+Krok s `agent:` popisuje volání `agentiscode` daty místo ručně psaného bash skriptu. Při načtení souboru se z něj vygeneruje `run` (runtime tedy vidí obyčejný bash krok); `agent` a `run` na jednom kroku jsou chyba validace, `agent` přebíjí `run` dodaný šablonou přes `uses`. Ostatní pole kroku (`needs`, `if`, `retries`, `timeoutSeconds`, `outputs`, …) fungují beze změny.
+
+```yaml
+- name: Select and summarize
+  timeoutSeconds: 1200
+  agent:
+    adapter: ${NEWSLETTER_ADAPTER}       # povinné: claude | claude-p | opencode
+    model: ${NEWSLETTER_MODEL}           # volitelné
+    effort: high                         # volitelné
+    taskOverrides: true                  # default: AGENTIS_ADAPTER/MODEL/EFFORT z tasku přepisují hodnoty výše
+    promptFile: ${WORKDIR}/.agentis/prompts/news-selection.md   # nebo inline `prompt: |`; bez obou prompt tasku
+    inputs:                              # soubory připojené za prompt, v tomto pořadí
+      - label: "Už odvysíláno:"
+        path: ${AGENTIS_RUN_DIR}/outputs/history.md
+        optional: true                   # chybějící/prázdný soubor se přeskočí (jinak krok selže)
+      - label: "Položky:"
+        path: ${AGENTIS_RUN_DIR}/outputs/items.json
+    outputSchema: ${WORKDIR}/.agentis/schemas/news-selection.schema.json
+    schemaRetries: 2                     # opravné turny přes --resume (default agentiscode: 2)
+    output: ${AGENTIS_RUN_DIR}/outputs/selection.json   # --final-output
+    sessionOutput: ${AGENTIS_RUN_DIR}/outputs/session-id
+    sessionTitle: Výběr zpráv            # titulek session v Agentisu; default jméno kroku
+    extraArgs: ["--max-turns", "20"]     # předá se runtime CLI beze změny
+```
+
+Vygenerovaný skript pošle prompt a vstupy na stdin `agentiscode --json` a připojí `--run-id` / `--task-id` z `AGENTIS_RUN_ID` / `AGENTIS_TASK_ID`, takže se session zobrazí v tasku. Hodnoty se do skriptu vkládají v uvozovkách a expandují se v nich jen odkazy na env proměnné `$NAME`, `${NAME}` a `${NAME:-text}`. Cokoli jiného (`$(…)`, backticky, uvozovky) zůstane doslovným textem, takže hodnota smí obsahovat i interpolovaný `[%TASK_TITLE%]`. Kroky běží pod `set -u`, proto nepovinné proměnné piš jako `${NAME:-}`. Inline `prompt` se neexpanduje vůbec.
+
+**Strukturovaný výstup.** S `outputSchema` dostane agent JSON Schema: Claude nativně (`--json-schema`), OpenCode v promptu. Odpověď se navíc validuje lokálně. Když neodpovídá, `agentiscode` naváže na stejnou session (`--resume`) se seznamem chyb, a to nejvýš `schemaRetries`krát. Soubor `output` pak obsahuje zvalidovaný JSON bez Markdownu a další krok ho může rovnou načíst přes `json.loads`. Když ani oprava nepomůže, `output` se nezapíše a krok selže (exit kód 3), takže platí `retries` / `continueOnError` kroku. Schémata patří do `.agentis/schemas/`. Když má schéma záviset na datech runu (např. `enum` povolených ID), předchozí krok ho vygeneruje do run adresáře ze statického základu.
+
+Cesty v `output` / `sessionOutput` jsou cesty souborového systému kroku. Chceš-li soubor publikovat přes `outputs` (`agent_comment`, `var`, …), deklaruj ho tam zvlášť relativně k output rootu, stejně jako u `run` kroků. Krok vyžaduje `agentiscode` s podporou `--output-schema` v image (nebo na hostu u `local` executoru).
 
 ### Paralelní kroky (`needs` + `maxParallel`)
 

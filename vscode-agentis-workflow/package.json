@@ -2,7 +2,7 @@
   "name": "agentis-workflow",
   "displayName": "Agentis Workflow",
   "description": "Language support for Agentis workflow YAML files.",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "publisher": "agentis",
   "private": true,
   "type": "module",

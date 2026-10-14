@@ -1,0 +1,109 @@
+# Vzor: stáhni data → nech LLM napsat report → pošli e-mailem a dej komentář do tasku.
+# Pojmenované / project workflow: output root = $AGENTIS_RUN_DIR, outputs se deklarují jako `outputs/...`.
+# Pokud projekt má `.agentis/workflows/_base.yaml`, nahraď infrastrukturní blok řádkem `extends: _base`
+# a ponech jen to, čím se workflow liší.
+version: 1
+workflow:
+  image: registry.reactis.cloud/infrabot:1.0
+  imagePullSecrets:
+    - name: registry
+  workingDir: "[%WORKDIR%]"
+  timeoutSeconds: 3600
+  ttlSecondsAfterFinished: 300
+  deleteNamespace: true
+  envFiles:
+    - /root/.config/agentis/agentis.env   # SMTP_*, EMAIL_FROM, API klíče — ověř, že tam jsou; nikdy ne do YAML
+  env:
+    HOME: /root
+    REPORT_SOURCE_URL: https://example.com/source
+    REPORT_MODEL: openai/gpt-5.4-mini
+    REPORT_EMAIL_TO: someone@example.com
+    REPORT_SUBJECT: Report
+  mounts:
+    # workingDir / WORKDIR musí být v kontejneru dostupný (Kubernetes executor nic nemountuje sám).
+    - name: www
+      mountPath: /var/www
+      hostPath:
+        path: /var/www
+    - name: agentis-tmp
+      mountPath: /tmp/agentis
+      hostPath:
+        path: /tmp/agentis
+        type: DirectoryOrCreate
+    - name: agentis-config
+      mountPath: /root/.config/agentis
+      readOnly: true
+      hostPath:
+        path: /root/.config/agentis/
+    # Konfigurace agentů (opencode / claude), aby agentiscode v kontejneru měl přihlášení:
+    - name: opencode-config
+      mountPath: /root/.config/opencode
+      hostPath:
+        path: /root/.config/opencode
+        type: DirectoryOrCreate
+    - name: opencode-share
+      mountPath: /root/.local/share/opencode
+      hostPath:
+        path: /root/.local/share/opencode
+        type: DirectoryOrCreate
+    - name: claudecodejson
+      mountPath: /root/.claude.json
+      hostPath:
+        path: /root/.claude.json
+    - name: claudecode
+      mountPath: /root/.claude
+      hostPath:
+        path: /root/.claude
+        type: DirectoryOrCreate
+  steps:
+    - name: Fetch data
+      retries: 2
+      run: |
+        mkdir -p "$AGENTIS_RUN_DIR/outputs"
+        tvly extract --json -o "$AGENTIS_RUN_DIR/outputs/source.json" "$REPORT_SOURCE_URL"
+        test -s "$AGENTIS_RUN_DIR/outputs/source.json"
+
+    - name: Write report
+      run: |
+        {
+          cat "$AGENTIS_PROMPT_FILE"
+          printf '\n\nZdrojová data:\n---\n'
+          cat "$AGENTIS_RUN_DIR/outputs/source.json"
+        } | agentiscode --adapter opencode --json \
+          --model "$REPORT_MODEL" \
+          --run-id "$AGENTIS_RUN_ID" \
+          --task-id "$AGENTIS_TASK_ID" \
+          --final-output "$AGENTIS_RUN_DIR/outputs/report.md"
+        test -s "$AGENTIS_RUN_DIR/outputs/report.md"
+      outputs:
+        - type: agent_comment
+          bodyFrom: outputs/report.md
+          name: Report agent
+          status: done
+
+    - name: Send report email
+      run: |
+        python3 - <<'PY'
+        import os
+        import smtplib
+        from email.message import EmailMessage
+        from pathlib import Path
+
+        body = (Path(os.environ["AGENTIS_RUN_DIR"]) / "outputs" / "report.md").read_text(encoding="utf-8").strip()
+        # LLM občas obalí HTML do ```html bloku — odstraň ho.
+        lines = body.splitlines()
+        if lines and lines[0].strip().lower() in {"```html", "```"}:
+            lines = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+            body = "\n".join(lines).strip()
+
+        msg = EmailMessage()
+        msg["From"] = os.getenv("EMAIL_FROM", "agent@agentis.cz")
+        msg["To"] = os.environ["REPORT_EMAIL_TO"]
+        msg["Subject"] = os.environ["REPORT_SUBJECT"]
+        msg.set_content("Report je ve formátu HTML.")
+        msg.add_alternative(body, subtype="html")
+
+        host = os.getenv("SMTP_SERVER", os.getenv("SMTP_HOST", "localhost"))
+        with smtplib.SMTP(host, int(os.getenv("SMTP_PORT", "25"))) as smtp:
+            smtp.send_message(msg)
+        PY

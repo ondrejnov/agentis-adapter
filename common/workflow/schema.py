@@ -18,6 +18,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from common.models import TaskStatus
+from common.workflow.agent_step import WorkflowAgent, WorkflowAgentInput, render_agent_run
 
 WORKFLOW_DIR_RELPATH = ".agentis/workflows"
 
@@ -350,13 +351,17 @@ class WorkflowStep(WorkflowStepTemplate):
     #: None = implicitně sekvenčně čekat na bezprostředně předchozí krok;
     #: [] = root krok bez závislostí.
     needs: list[str] | None = None
-    #: Povinné, pokud krok nemá `uses` — pak `run` dodá šablona.
+    #: Povinné, pokud krok nemá `uses` ani `agent` — pak `run` dodá šablona / vygeneruje se.
     run: str | None = None
+    #: Deklarativní volání `agentiscode`; `run` se z něj vygeneruje při validaci spec.
+    agent: WorkflowAgent | None = None
 
     @model_validator(mode="after")
     def validate_run_or_uses(self) -> WorkflowStep:
-        if self.uses is None and self.run is None:
-            raise ValueError(f"step {self.name!r} requires 'run' (or 'uses' referencing a step template)")
+        if self.agent is not None and self.run is not None:
+            raise ValueError(f"step {self.name!r} cannot declare both 'run' and 'agent'")
+        if self.uses is None and self.run is None and self.agent is None:
+            raise ValueError(f"step {self.name!r} requires 'run', 'agent' or 'uses' referencing a step template")
         return self
 
 
@@ -402,20 +407,22 @@ class WorkflowSpec(BaseModel):
 
         resolved: list[WorkflowStep] = []
         for step in self.steps:
-            if step.uses is None:
-                resolved.append(step)
-                continue
-            template = self.stepTemplates.get(step.uses)
-            if template is None:
-                known = ", ".join(sorted(self.stepTemplates)) or "no stepTemplates defined"
-                raise ValueError(f"step {step.name!r} uses unknown step template {step.uses!r} ({known})")
-            updates: dict[str, Any] = {
-                field: getattr(template, field)
-                for field in _TEMPLATE_DEFAULTED_STEP_FIELDS
-                if field not in step.model_fields_set
-            }
-            updates["env"] = {**template.env, **step.env}
-            resolved.append(step.model_copy(update=updates))
+            if step.uses is not None:
+                template = self.stepTemplates.get(step.uses)
+                if template is None:
+                    known = ", ".join(sorted(self.stepTemplates)) or "no stepTemplates defined"
+                    raise ValueError(f"step {step.name!r} uses unknown step template {step.uses!r} ({known})")
+                updates: dict[str, Any] = {
+                    field: getattr(template, field)
+                    for field in _TEMPLATE_DEFAULTED_STEP_FIELDS
+                    if field not in step.model_fields_set
+                }
+                updates["env"] = {**template.env, **step.env}
+                step = step.model_copy(update=updates)
+            if step.agent is not None:
+                # `agent` krok má přednost i před `run` ze šablony.
+                step = step.model_copy(update={"run": render_agent_run(step.agent, step_name=step.name)})
+            resolved.append(step)
         self.steps = resolved
         self._validate_step_graph()
         return self
@@ -591,6 +598,8 @@ __all__ = [
     "WORKFLOW_EXECUTORS",
     "INTERPOLATION_ALLOWLIST",
     "ConditionTerm",
+    "WorkflowAgent",
+    "WorkflowAgentInput",
     "WorkflowConditionError",
     "WorkflowExtendsError",
     "WorkflowFollowup",

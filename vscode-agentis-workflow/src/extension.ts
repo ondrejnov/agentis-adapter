@@ -46,6 +46,9 @@ const MOUNT_FIELDS = new Set([
   "mountPropagation",
 ]);
 
+// `agent` step fields pointing at project files that the extension can check.
+const AGENT_FILE_FIELDS = ["promptFile", "outputSchema"] as const;
+
 type RecordValue = Record<string, unknown>;
 
 interface WorkflowModel {
@@ -92,6 +95,9 @@ export function activate(context: vscode.ExtensionContext): void {
   const watcher = vscode.workspace.createFileSystemWatcher(
     "**/.agentis/workflows/*.yaml",
   );
+  const schemaWatcher = vscode.workspace.createFileSystemWatcher(
+    "**/.agentis/schemas/*.json",
+  );
 
   context.subscriptions.push(
     vscode.languages.registerCompletionItemProvider(
@@ -109,6 +115,7 @@ export function activate(context: vscode.ExtensionContext): void {
     stepNameDecoration,
     runBlockDecoration,
     watcher,
+    schemaWatcher,
     vscode.workspace.onDidOpenTextDocument((document) => {
       if (isWorkflowUri(document.uri)) refreshOpenWorkflows();
     }),
@@ -126,6 +133,9 @@ export function activate(context: vscode.ExtensionContext): void {
     watcher.onDidCreate(refreshOpenWorkflows),
     watcher.onDidChange(refreshOpenWorkflows),
     watcher.onDidDelete(refreshOpenWorkflows),
+    schemaWatcher.onDidCreate(refreshOpenWorkflows),
+    schemaWatcher.onDidChange(refreshOpenWorkflows),
+    schemaWatcher.onDidDelete(refreshOpenWorkflows),
   );
   refreshOpenWorkflows();
 }
@@ -183,7 +193,12 @@ function runRangesInSequence(
 ): vscode.Range[] {
   if (!isSeq(value)) return [];
   return value.items.flatMap((item) =>
-    isMap(item) ? runRange(document, item) : [],
+    isMap(item)
+      ? [
+          ...runRange(document, item),
+          ...runRange(document, item.get("agent", true), "prompt"),
+        ]
+      : [],
   );
 }
 
@@ -200,10 +215,11 @@ function runRangesInMap(
 function runRange(
   document: vscode.TextDocument,
   step: unknown,
+  key = "run",
 ): vscode.Range[] {
   if (!isMap(step)) return [];
   const pair = step.items.find(
-    (item) => isScalar(item.key) && item.key.value === "run",
+    (item) => isScalar(item.key) && item.key.value === key,
   );
   if (!pair || !isScalar(pair.key) || !isScalar(pair.value)) return [];
   if (!pair.key.range || !pair.value.range) return [];
@@ -1146,6 +1162,13 @@ async function updateDiagnostics(
     }
     if (typeof step.name === "string") previous.add(step.name);
   }
+  await addAgentDiagnostics(
+    document,
+    effectiveWorkflow,
+    steps,
+    stepRanges,
+    diagnostics,
+  );
 
   const mountRanges = listItemRanges(document, "mounts");
   records(effectiveWorkflow.mounts).forEach((mount, index) => {
@@ -1229,6 +1252,104 @@ async function addExtendsDiagnostics(
       ),
     );
   }
+}
+
+async function addAgentDiagnostics(
+  document: vscode.TextDocument,
+  workflow: RecordValue,
+  steps: RecordValue[],
+  stepRanges: vscode.Range[],
+  diagnostics: vscode.Diagnostic[],
+): Promise<void> {
+  // .agentis/workflows/<name>.yaml -> project root.
+  const projectRoot = vscode.Uri.joinPath(document.uri, "..", "..", "..");
+  for (const [index, step] of steps.entries()) {
+    if (!isRecord(step.agent)) continue;
+    const workingDir = step.workingDir ?? workflow.workingDir;
+    const relativeToRoot =
+      workingDir === undefined ||
+      workingDir === null ||
+      workingDir === "[%WORKDIR%]";
+    for (const field of AGENT_FILE_FIELDS) {
+      const value = step.agent[field];
+      if (typeof value !== "string") continue;
+      const uri = projectFileUri(projectRoot, value, relativeToRoot);
+      if (!uri) continue;
+      const range = stepFieldRange(document, stepRanges, index, field);
+      let text: string;
+      try {
+        text = await readWorkflowText(uri);
+      } catch {
+        diagnostics.push(
+          diagnostic(
+            range,
+            `agent.${field} '${value}' was not found in the project.`,
+            vscode.DiagnosticSeverity.Warning,
+          ),
+        );
+        continue;
+      }
+      if (field !== "outputSchema") continue;
+      try {
+        if (!isRecord(JSON.parse(text))) {
+          throw new Error("expected a JSON object");
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        diagnostics.push(
+          diagnostic(
+            range,
+            `agent.outputSchema '${value}' is not a JSON Schema object: ${reason}.`,
+          ),
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Resolves an `agent` file path that points into the project: `${WORKDIR}/…`,
+ * `$WORKDIR/…`, `[%WORKDIR%]/…`, or a plain relative path when the step runs
+ * in WORKDIR. Paths depending on other variables (e.g. `$AGENTIS_RUN_DIR`) only
+ * exist at runtime and are skipped.
+ */
+function projectFileUri(
+  root: vscode.Uri,
+  value: string,
+  relativeToRoot: boolean,
+): vscode.Uri | undefined {
+  const prefixed = /^(?:\$\{WORKDIR\}|\$WORKDIR|\[%WORKDIR%\])\/(.+)$/.exec(value);
+  let relative: string | undefined;
+  if (prefixed) relative = prefixed[1];
+  else if (relativeToRoot && !/[$`[]/.test(value) && !value.startsWith("/"))
+    relative = value;
+  if (!relative || /[$`[]/.test(relative)) return undefined;
+  const parts = relative.split("/").filter((part) => part && part !== ".");
+  if (parts.length === 0 || parts.includes("..")) return undefined;
+  return vscode.Uri.joinPath(root, ...parts);
+}
+
+function stepFieldRange(
+  document: vscode.TextDocument,
+  stepRanges: vscode.Range[],
+  index: number,
+  field: string,
+): vscode.Range {
+  const fallback = stepRanges[index] ?? propertyRange(document, "steps");
+  const end = stepRanges[index + 1]?.start.line ?? document.lineCount;
+  const pattern = new RegExp(`^(\\s*)${field}:`);
+  for (let line = fallback.start.line; line < end; line += 1) {
+    const match = document.lineAt(line).text.match(pattern);
+    if (match) {
+      return new vscode.Range(
+        line,
+        match[1].length,
+        line,
+        match[1].length + field.length,
+      );
+    }
+  }
+  return fallback;
 }
 
 async function isReferencedAsParent(uri: vscode.Uri): Promise<boolean> {
