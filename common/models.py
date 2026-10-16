@@ -86,6 +86,25 @@ class AdapterOptionsPayload(BaseModel):
     workflow: str | None = None
     #: Když je zapnuto v Agentisu, default workflow po úspěšném PR provede merge samo.
     auto_merge: bool = False
+    #: Limit agentů pro UltraCode dynamické workflow: kladné číslo, nebo ``"unlimited"``; ``None`` = UltraCode vypnut.
+    ultracode: int | Literal["unlimited"] | None = None
+
+    @field_validator("ultracode", mode="before")
+    @classmethod
+    def validate_ultracode(cls, value: Any) -> Any:
+        if value is None or value is False or value == "":
+            return None
+        if isinstance(value, str):
+            value = value.strip()
+            if value.lower() == "unlimited":
+                return "unlimited"
+            if value.isdecimal():
+                value = int(value)
+        if isinstance(value, int) and not isinstance(value, bool):
+            if value < 0:
+                raise ValueError("ultracode must be a positive number or 'unlimited'")
+            return value or None
+        raise ValueError("ultracode must be a positive number or 'unlimited'")
 
     @field_validator("manifest")
     @classmethod

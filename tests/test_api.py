@@ -777,3 +777,67 @@ def test_start_rejects_path_inside_adapter_manifest():
     payload = response.json()
     assert payload["error"]["code"] == -32602
     assert any(item["loc"] == ["context", "adapter", "manifest"] for item in payload["error"]["data"])
+
+
+def _captured_prompt(tmp_path: Path, method: str, ultracode: Any) -> str:
+    captured: dict[str, str] = {}
+
+    class FakeAdapter:
+        def create_worktree(self) -> dict[str, str]:
+            return {"action": "create_worktree", "status": "created", "working_dir": str(tmp_path)}
+
+    class CapturingWorkflowManager(_StubWorkflowManager):
+        def start_workflow(self, context: Any, worktree: str, prompt: str) -> dict[str, str]:
+            captured["prompt"] = prompt
+            return super().start_workflow(context, worktree, prompt)
+
+    service = AgentJsonRpcService(
+        settings=make_settings(),
+        adapter_factory=cast(Any, lambda context: FakeAdapter()),
+        workflow_manager=cast(Any, CapturingWorkflowManager()),
+    )
+    params = make_start_params()
+    if ultracode is not None:
+        params["context"]["adapter"]["ultracode"] = ultracode
+    if method == "add_message":
+        params.update(run_id=params["context"]["run_id"], message="Pokracuj")
+    response = make_client(service).post("/api", json={"jsonrpc": "2.0", "id": "1", "method": method, "params": params})
+
+    assert response.status_code == 200
+    return captured["prompt"]
+
+
+@pytest.mark.parametrize("method", ["start", "add_message"])
+@pytest.mark.parametrize(("ultracode", "expected"), [(5, 5), (20, 20), ("10", 10)])
+def test_ultracode_limit_is_appended_to_prompt_end(tmp_path, method, ultracode, expected):
+    prompt = _captured_prompt(tmp_path, method, ultracode)
+
+    assert prompt.endswith(f"\n\nPro dynamické workflow použij maximálně {expected} agentů.")
+
+
+@pytest.mark.parametrize("method", ["start", "add_message"])
+def test_ultracode_unlimited_appends_activation_sentence_without_count(tmp_path, method):
+    prompt = _captured_prompt(tmp_path, method, "unlimited")
+
+    assert prompt.endswith("\n\nPoužij dynamické ultracode workflow.")
+    assert "agentů" not in prompt
+
+
+@pytest.mark.parametrize("method", ["start", "add_message"])
+@pytest.mark.parametrize("ultracode", [None, False, 0])
+def test_ultracode_off_leaves_prompt_untouched(tmp_path, method, ultracode):
+    prompt = _captured_prompt(tmp_path, method, ultracode)
+
+    assert "workflow" not in prompt.lower()
+
+
+@pytest.mark.parametrize("value", [-1, "abc", 1.5, ["5"]])
+def test_adapter_options_reject_invalid_ultracode(value):
+    with pytest.raises(ValueError):
+        AdapterOptionsPayload(ultracode=value)
+
+
+def test_adapter_options_normalize_ultracode():
+    assert AdapterOptionsPayload().ultracode is None
+    assert AdapterOptionsPayload(ultracode=" Unlimited ").ultracode == "unlimited"
+    assert AdapterOptionsPayload(ultracode="20").ultracode == 20

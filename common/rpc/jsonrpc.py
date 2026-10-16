@@ -18,7 +18,12 @@ from common.models import (
     StartParams,
     UndoParams,
 )
-from common.prompt_context import build_comments_block, build_parent_task_block, load_repository_role
+from common.prompt_context import (
+    build_comments_block,
+    build_parent_task_block,
+    build_ultracode_block,
+    load_repository_role,
+)
 from common.adapter_base import BaseAdapterService
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 from common.attachments import build_attachments_block, materialize_attachments, next_attachment_index
@@ -116,6 +121,13 @@ class AgentJsonRpcService:
         return f"{prompt}\n\n{block}" if prompt.strip() else block
 
     @staticmethod
+    def _prompt_with_ultracode(prompt: str, context: AgentExecutionContextPayload) -> str:
+        block = build_ultracode_block(context.adapter.ultracode if context.adapter is not None else None)
+        if not block:
+            return prompt
+        return f"{prompt}\n\n{block}" if prompt.strip() else block
+
+    @staticmethod
     def _prompt_with_project_role(prompt: str, context: AgentExecutionContextPayload, worktree: str) -> str:
         role = context.project_role
         if role is None:
@@ -157,6 +169,7 @@ class AgentJsonRpcService:
             prompt = self._prompt_with_project_role(prompt, context, worktree)
             prompt = self._prompt_with_parent_task(prompt, context)
             prompt = self._prompt_with_attachments(prompt, context, worktree, message_attachments)
+            prompt = self._prompt_with_ultracode(prompt, context)
             workflow_step = self._run_adapter_step(
                 adapter,
                 kind="workflow_start",

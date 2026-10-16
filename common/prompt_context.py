@@ -132,3 +132,12 @@ def build_parent_task_block(parent_task: Any | None) -> str | None:
 
     payload = _without_attachments(payload)
     return "<parent_task_context>\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n</parent_task_context>"
+
+
+def build_ultracode_block(limit: int | str | None) -> str | None:
+    """Věta aktivující UltraCode workflow: s číslem i s limitem agentů, u ``unlimited`` bez počtu; vypnuto = nic."""
+    if limit == "unlimited":
+        return "Použij dynamické ultracode workflow."
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        return None
+    return f"Použij dynamické ultracode workflow s maximálně {limit} agenty."
