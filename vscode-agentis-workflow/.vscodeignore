@@ -1,9 +1,0 @@
-src/**
-scripts/**
-tsconfig.json
-package-lock.json
-.gitignore
-.vscodeignore
-node_modules/**
-dist/*.map
-*.vsix

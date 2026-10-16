@@ -30,20 +30,21 @@ def _running_thread(release: threading.Event) -> threading.Thread:
 
 
 def test_workflow_manager_wait_idle_waits_for_running_threads():
-    manager = WorkflowManager(settings=make_settings(), runner=SimpleNamespace())
+    manager = WorkflowManager(settings=make_settings())
     release = threading.Event()
     run = _WorkflowRun(
         context=None,
         worktree=Path("/tmp"),
-        workflow=SimpleNamespace(),
         namespace="ns",
         attempt_id="a1",
         run_dir=Path("/tmp"),
         output_root=Path("/tmp"),
-        prompt_file=Path("/tmp/prompt.md"),
-        context_file=Path("/tmp/context.json"),
         executor="local",
-        runner=SimpleNamespace(),
+        spec_path=Path("/tmp/spec.json"),
+        labels={},
+        task_label="task-1",
+        workflow_name=None,
+        workflow_relpath=".agentis/workflows/default.yaml",
     )
     run.thread = _running_thread(release)
     manager._runs["task-1"] = run

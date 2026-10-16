@@ -15,7 +15,8 @@ Klíčové zdrojáky:
 | `common/adapter_base.py` | `BaseAdapterService` — společné workspace a reporting operace |
 | `common/git_adapter.py` | `GitAdapterService` — worktree a branch per task |
 | `common/agentis.py` | `AgentisJsonRpcClient` — HTTP JSON-RPC klient na Agentis backend |
-| `common/workflow/` | Workflow runtime a executory (viz [docs/workflow.md](workflow.md)) |
+| `common/workflow/manager.py` | `WorkflowManager` — výběr workflow, spec pro engine, čtení JSONL událostí a `result.json`, Agentis callbacky |
+| `common/workflow/engine_cli.py` | Volání CLI enginu `agentis-workflow` (`check`, `run --spec`, `abort`); adapter engine neimportuje |
 
 ## Architektura v kostce
 
@@ -26,8 +27,9 @@ flowchart LR
     dispatcher["JSON-RPC dispatcher<br/>common/rpc/dispatcher.py"]
     service["AgentJsonRpcService<br/>start / add_message / approve / abort / undo"]
     git["GitAdapterService<br/>worktree, branch, snapshots"]
-    workflow["Workflow runtime<br/>WorkflowManager + YAML kroky"]
-    executor{"Executor kroků"}
+    workflow["WorkflowManager<br/>spec.json, check, reader thread"]
+    engine["agentis-workflow CLI<br/>samostatný projekt (subprocess)"]
+    executor{"Executor kroků<br/>v enginu"}
     k8s["Kubernetes Job<br/>kubectl"]
     bash["Lokální bash<br/>subproces"]
     reporting["AgentisJsonRpcClient<br/>eventy, aktivita, komentáře, session_id"]
@@ -35,7 +37,8 @@ flowchart LR
 
     agentis -->|"JSON-RPC příkazy<br/>wss, spojení iniciuje adapter"| websocket
     websocket --> dispatcher --> service --> git --> workflow
-    workflow --> executor
+    workflow -->|"check, run --spec<br/>JSONL na stdout, result.json"| engine
+    engine --> executor
     executor -->|"kubernetes"| k8s
     executor -->|"local"| bash
     k8s --> reporting
@@ -51,7 +54,7 @@ flowchart LR
     class agentis external
     class websocket,dispatcher transport
     class service,git,status adapter
-    class workflow,executor,k8s,bash runtime
+    class workflow,engine,executor,k8s,bash runtime
     class reporting report
 ```
 
@@ -87,7 +90,7 @@ Serving adapter nevybírá ani neimportuje konkrétní nástroj. Každý krok je
 | `start` | `context`, volitelně `fork_from_session_id` | Připraví workspace a spustí workflow; `fork_from_session_id` se přijme, ale aktuálně se nepoužívá |
 | `add_message` | `run_id`, `context`, `message`, `role`, `attachments` | Spustí workflow s follow-up promptem; `role` má default `user`, ale handler jej aktuálně nerozlišuje |
 | `approve` | `context`, `approval_id`, `metadata`, volitelně `timeout_seconds` | Nad existujícím workspace synchronně spustí pojmenované approval workflow a vrátí `1`/`0`, případně objekt s rozhodnutím a metadaty |
-| `abort` | `context` | Idempotentně označí známý run i jeho approval runy jako abortované a ukončí kroky odpovídající labelům; může uspět i bez známého aktivního runu |
+| `abort` | `context` | Idempotentně označí známý run i jeho approval runy jako abortované a pošle SIGTERM procesu enginu (ten zruší kroky); bez běžícího procesu uklidí joby podle labelů přes `agentis-workflow abort`; může uspět i bez známého runu |
 | `undo` | `context` | Vrátí workspace do source snapshotu evidovaného u posledního runu tasku |
 
 Chyby vrací `AgentJsonRpcException` s kódem, který dispatcher mapuje na HTTP-like status (`404` → not found, `>=500`/`-32603` → internal, jinak 400). Nevalidní parametry = standardní `-32602 Invalid params`.
@@ -112,11 +115,12 @@ Průběh `start` / `add_message`:
 
 1. **Workspace** — `GitAdapterService` pro task scope založí nebo znovu použije worktree `<ADAPTER_WORKTREE_ROOT>/<task-safe-id>` na task větvi. Project scope běží přímo v `context.working_dir`.
 2. **Prompt, role a přílohy** — adapter složí prompt z kontextu nebo follow-up zprávy. Pokud kontext obsahuje `project_role`, před prompt vloží tělo Markdown role z `.agentis/role/*.md`, vyhledané podle `name` v YAML front matteru nebo podle názvu souboru. Projektová role má přednost před `project_role.prompt` z Agentisu; vybraný text role je obalen tagy `<role>...</role>`, aby byl oddělený od hlavního zadání. MCP metadata se zatím nepoužívají. V režimu plného kontextu přidá pro podúkol strukturovaný blok `<parent_task_context>` s nadřazeným úkolem, jeho komentáři a všemi podúkoly, ale bez polí `attachments`; přílohy aktuálního úkolu materializuje do workspace.
-3. **Výběr a validace workflow** — pojmenovaná akce použije `<name>.yaml`, project scope `project.yaml`, ostatní runy `default.yaml`. Projektový soubor má přednost před bundled fallbackem z `ADAPTER_BUNDLED_WORKFLOW_DIR`. YAML se synchronně načte, vyřeší, interpoluje a zvaliduje; zároveň vzniknou `prompt.md` a `context.json`.
-4. **Spuštění** — manager zaregistruje run a spustí background thread. Ten pořídí source snapshot, připraví executor a vykoná DAG přes Kubernetes Joby nebo lokální bash procesy. `start` / `add_message` proto vrací rychle a bez `session_id`.
-5. **Reporting** — workflow posílá `run.adapter_event`; agentí krok s `agentiscode` může navíc průběžně posílat session ID a aktivitu. Po doběhnutí manager aplikuje deklarované outputs, například completion komentář, přílohy, artefakty a followup akce.
+3. **Výběr workflow** — pojmenovaná akce použije `<name>.yaml`, project scope `project.yaml`, ostatní runy `default.yaml`. Projektový soubor má přednost před bundled fallbackem z `ADAPTER_BUNDLED_WORKFLOW_DIR` (předá se jako `search_paths` enginu). YAML validuje, interpoluje a vyhodnocuje až engine; adapter zapíše `prompt.md`, `context.json` a `spec.json`.
+4. **Kontrola** — synchronně `agentis-workflow check --spec <run_dir>/spec.json`: engine načte a zvaliduje workflow, vyřeší executor, ověří images a busy stav. Nevalidní workflow (exit `2`) vrátí `start` chybu s textem ze stderr, busy (exit `3`) vrátí 409. Odpověď `start` (`action`, `task_id`, `attempt`, `namespace`, `executor`, `workflow`, `workflow_file`, `steps`) vychází z výstupu `check`.
+5. **Spuštění** — manager zapíše `spec.json` (bez secretů; `AGENTIS_SERVICE_TOKEN` jde jen v env child procesu přes `pass_env`), zaregistruje run a spustí `agentis-workflow run --spec … --events jsonl` v nové process group a background reader thread. Ten pořídí source snapshot, události enginu převádí na `run.adapter_event` a status registry a po skončení čte `result.json`. `start` / `add_message` proto vrací rychle a bez `session_id`.
+6. **Reporting** — průběh kroků (`started`, `success`, `failed`, `skipped`) jde jako `run.adapter_event` se stejnými payloady jako dřív; agentí krok s `agentiscode` může navíc průběžně posílat session ID a aktivitu. Po doběhnutí manager z `result.json` aplikuje outputs (completion komentář, přílohy, artefakty z `artifact-staging/` v run dir, session ID) a followup akce, které engine již vyhodnotil podle `if`.
 
-Manager blokuje start, pokud v tomto procesu už eviduje aktivní workflow stejného tasku, chybou 409 (busy); evidence není sdílená mezi procesy. `undo` funguje jen se snapshotem dostupným v in-memory evidenci. Pojmenovaná workflow snapshot nevytvářejí a po přepsání evidence tasku proto může `undo` vrátit chybu; project scope naopak obnovuje přímo projektový workspace. Detailně viz [docs/workflow.md](workflow.md).
+Manager blokuje start, pokud v tomto procesu už eviduje aktivní workflow stejného tasku, chybou 409 (busy); evidence není sdílená mezi procesy. `undo` funguje jen se snapshotem dostupným v in-memory evidenci. Pojmenovaná workflow snapshot nevytvářejí a po přepsání evidence tasku proto může `undo` vrátit chybu; project scope naopak obnovuje přímo projektový workspace. Syntaxi YAML, executory, outputs a CLI enginu popisuje dokumentace v repozitáři `agentis-workflow` (`docs/workflow.md`, `docs/cli.md`).
 
 ## Volitelný `agentiscode`
 
@@ -152,8 +156,7 @@ Selhání průběžné telemetrie je best-effort a loguje se na stderr; selhán�
 | `ADAPTER_NAMESPACE_PREFIX` | `Task` | Prefix Kubernetes namespace pro číslované tasky |
 | `ADAPTER_SHUTDOWN_GRACE_PERIOD` | `0` | Sekundy čekání na doběhnutí práce při shutdownu (0 = bez limitu) |
 | `WORKFLOW_EXECUTOR` | `kubernetes` | Executor workflow kroků (`kubernetes` / `docker` / `local`), pokud ho neurčí YAML |
-| `KUBECTL_COMMAND` | `kubectl` | Příkaz pro Kubernetes executor |
-| `DOCKER_COMMAND` | `docker` | Příkaz pro nativní Docker executor |
+| `AGENTIS_WORKFLOW_COMMAND` | `agentis-workflow` vedle běžícího interpretu, jinak z `PATH` | Příkaz enginu (shlex); adapter volá jen CLI. `kubectl` a `docker` konfiguruje engine |
 | `AGENTIS_WS_HEARTBEAT_INTERVAL`, `AGENTIS_WS_MAX_MESSAGE_SIZE`, `AGENTIS_WS_RECONNECT_*` | viz `common/config.py` | Ladění WebSocket transportu |
 
 ## Observabilita
@@ -169,7 +172,9 @@ Selhání průběžné telemetrie je best-effort a loguje se na stderr; selhán�
 
 `tests/test_api.py` jsou in-process integrační testy Pydantic kontraktu a dispatcheru; helper v `tests/support.py` payload předá přímo dispatcheru, nejde o síťový end-to-end test. Hlavní oblasti:
 
-- workflow, executory a outputs: `tests/test_workflow.py`,
+- adaptérová strana workflow (spec, check, události, outputs, abort, approval) proti falešné binárce `tests/fake_agentis_workflow.py`: `tests/test_workflow_manager.py`,
+- integrace se skutečným enginem z venv a validace bundled workflow přes `agentis-workflow validate`: `tests/test_workflow_engine_integration.py`, `tests/test_bundled_workflows.py`,
+- workflow engine (schema, executory, scheduler) je testovaný v repozitáři `agentis-workflow`,
 - WebSocket transport a reconnect: `tests/test_passive_websocket.py`,
 - HTTP klient a autentizační hlavičky: `tests/test_agentis_rpc.py`,
 - observabilita a shutdown: `tests/test_status.py`, `tests/test_shutdown.py`,

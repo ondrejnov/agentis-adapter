@@ -24,11 +24,9 @@ což komplikuje údržbu, testování i bezpečnostní revizi.
 Následující části nejsou samy o sobě závislé na Agentisu a lze je převzít téměř
 beze změny:
 
-- `common/workflow/` — YAML workflow, DAG závislostí, podmínky, retry,
-  `continueOnError`, `always` a outputs.
-- `common/workflow/local_runtime.py` — spouštění lokálních bash procesů.
-- `common/workflow/docker_runtime.py` — spouštění kroků přes Docker.
-- `common/workflow/runtime.py` — Kubernetes executor přes `kubectl`.
+- workflow engine `agentis-workflow` (samostatný repozitář `/var/www/agentis-workflow`) —
+  YAML workflow, DAG závislostí, podmínky, retry, `continueOnError`, `always`, outputs,
+  lokální/Docker/Kubernetes executory. Adapter ho volá jen přes CLI.
 - `common/git_adapter.py` — worktree, větve a snapshoty, pokud vlastní systém
   používá git task branch model.
 - `common/artifacts/` — diffy, screenshoty a práce s artefakty.

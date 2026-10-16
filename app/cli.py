@@ -4,16 +4,13 @@ import argparse
 import asyncio
 import logging
 import os
-import sys
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 from typing import Any
 
 from common.config import Settings, get_settings
 from common.rpc.dispatcher import JsonRpcRoute
 from common.rpc.passive_websocket import run_passive_websocket
 from common.status import get_status_registry
-from common.workflow.devrun import RUNTIMES, SCOPES
 
 
 logger = logging.getLogger(__name__)
@@ -61,85 +58,14 @@ async def _run_transports(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentis-adapter",
-        description="Without a command, runs the adapter (WebSocket connection to Agentis).",
+        description="Runs the adapter (WebSocket connection to Agentis). Workflows run via the `agentis-workflow` CLI.",
     )
     parser.add_argument("--id", help="Agentis adapter id. Defaults to AGENTIS_ADAPTER_ID.")
-    commands = parser.add_subparsers(dest="command", metavar="COMMAND")
-
-    workflow = commands.add_parser("workflow", help="Test workflows without Agentis.")
-    workflow_commands = workflow.add_subparsers(dest="workflow_command", metavar="ACTION", required=True)
-
-    run_cmd = workflow_commands.add_parser(
-        "run",
-        help="Run a workflow locally and print its steps, comments and outputs.",
-        description="Runs a workflow the same way as Agentis `start`; results are printed instead of sent to Agentis.",
-    )
-    run_cmd.add_argument("workflow", help="Workflow name (ai-news, default, project) or path to a YAML file.")
-    run_cmd.add_argument("prompt", nargs="?", default=None, help="Prompt text ($AGENTIS_PROMPT_FILE).")
-    run_cmd.add_argument("-f", "--prompt-file", help="Read the prompt from a file; '-' = stdin.")
-    run_cmd.add_argument("-C", "--project", type=Path, help="Project directory (default: nearest one containing .agentis/).")
-    run_cmd.add_argument(
-        "-r",
-        "--runtime",
-        choices=RUNTIMES,
-        default="local",
-        help="local = bash on the host (default), docker, workflow = executor from YAML / WORKFLOW_EXECUTOR.",
-    )
-    run_cmd.add_argument("--scope", choices=SCOPES, help="Run scope (default: project; task for default.yaml).")
-    run_cmd.add_argument("-m", "--model", help="AGENTIS_MODEL (default: unset, the workflow's model applies).")
-    run_cmd.add_argument("-e", "--effort", help="AGENTIS_EFFORT (default: unset).")
-    run_cmd.add_argument("--title", help="Mock task title (TASK_TITLE).")
-    run_cmd.add_argument("--full", action="store_true", help="Print comments in full, without truncation.")
-    run_cmd.add_argument("-v", "--verbose", action="store_true", help="Print the log of every step (stdout/stderr).")
-    run_cmd.add_argument(
-        "--agentis", action="store_true", help="Send events and outputs to the real Agentis (AGENTIS_ENDPOINT)."
-    )
-
-    validate_cmd = workflow_commands.add_parser(
-        "validate", help="Validate workflow YAML (without arguments: all project workflows)."
-    )
-    validate_cmd.add_argument("workflows", nargs="*", help="Workflow names or paths to YAML files.")
-    validate_cmd.add_argument("-C", "--project", type=Path, help="Project directory.")
-
-    list_cmd = workflow_commands.add_parser("list", help="List project workflows and the workflows bundled with the adapter.")
-    list_cmd.add_argument("-C", "--project", type=Path, help="Project directory.")
     return parser
-
-
-def _run_workflow_command(args: argparse.Namespace) -> int:
-    from common.workflow import devrun
-
-    cwd = Path.cwd()
-    try:
-        if args.workflow_command == "run":
-            return devrun.run_workflow(
-                args.workflow,
-                prompt=devrun.read_prompt(args.prompt, args.prompt_file),
-                project=args.project,
-                cwd=cwd,
-                runtime=args.runtime,
-                scope=args.scope,
-                model=args.model,
-                effort=args.effort,
-                title=args.title,
-                agentis_callbacks=args.agentis,
-                full=args.full,
-                verbose=args.verbose,
-            )
-        if args.workflow_command == "validate":
-            return devrun.validate_workflows(args.workflows, args.project, cwd)
-        project = args.project.resolve() if args.project else devrun.find_project(cwd)
-        return devrun.list_workflows(project, get_settings())
-    except devrun.WorkflowCliError as exc:
-        sys.stderr.write(f"agentis-adapter: {exc}\n")
-        return 2
 
 
 def run(argv: Sequence[str] | None = None) -> None:
     args = _parser().parse_args(argv)
-
-    if args.command == "workflow":
-        raise SystemExit(_run_workflow_command(args))
 
     if args.id is not None:
         os.environ["AGENTIS_ADAPTER_ID"] = args.id

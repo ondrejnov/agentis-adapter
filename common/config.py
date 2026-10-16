@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import shlex
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -25,9 +27,10 @@ class Settings:
     agentis_service_token: str | None = None
     namespace_prefix: str = "Task"
     project_run_root: Path = Path("/tmp/agentis")
-    kubectl_command: str = "kubectl"
-    docker_command: str = "docker"
+    #: Default executor, když ani adapter runtime, ani workflow YAML executor nerozhodnou (předá se do spec).
     workflow_executor: str = "kubernetes"
+    #: Příkaz enginu `agentis-workflow` (argv prefix); volá se jen přes CLI, adapter engine neimportuje.
+    workflow_command: tuple[str, ...] = ("agentis-workflow",)
     #: Předpřipravené workflow zabalené v adapteru; fallback, když projekt nemá vlastní
     #: `.agentis/workflows/<soubor>`. Default `workflows/` v rootu repa.
     bundled_workflow_dir: Path = Path("workflows")
@@ -72,6 +75,16 @@ def _public_base_url(default_port: int) -> str | None:
     return f"http://{service_name.strip()}.{namespace.strip()}.svc.cluster.local:{service_port}"
 
 
+def _workflow_command() -> tuple[str, ...]:
+    """`AGENTIS_WORKFLOW_COMMAND` (shlex) nebo `agentis-workflow` vedle běžícího interpretu, jinak z PATH."""
+
+    configured = _get_env("AGENTIS_WORKFLOW_COMMAND")
+    if configured and configured.strip():
+        return tuple(shlex.split(configured))
+    sibling = Path(sys.executable).parent / "agentis-workflow"
+    return (str(sibling),) if sibling.exists() else ("agentis-workflow",)
+
+
 def _build_settings() -> Settings:
     project_root = Path(__file__).parent.parent.resolve()
     load_dotenv(project_root / ".env")
@@ -88,9 +101,8 @@ def _build_settings() -> Settings:
         agentis_service_token=_get_env("AGENTIS_SERVICE_TOKEN"),
         namespace_prefix=_get_env("ADAPTER_NAMESPACE_PREFIX", "Task") or "Task",
         project_run_root=Path(_get_env("ADAPTER_PROJECT_RUN_ROOT", "/tmp/agentis") or "/tmp/agentis").resolve(),
-        kubectl_command=_get_env("KUBECTL_COMMAND", "kubectl") or "kubectl",
-        docker_command=_get_env("DOCKER_COMMAND", "docker") or "docker",
         workflow_executor=(_get_env("WORKFLOW_EXECUTOR", "kubernetes") or "kubernetes").strip().lower(),
+        workflow_command=_workflow_command(),
         bundled_workflow_dir=Path(
             _get_env("ADAPTER_BUNDLED_WORKFLOW_DIR", str(project_root / "workflows")) or str(project_root / "workflows")
         ).resolve(),

@@ -1,11 +1,11 @@
-"""Background orchestrace deklarativního workflow režimu.
+"""Adapterová strana workflow runů: spouští engine `agentis-workflow` přes CLI a překládá jeho výsledky do Agentisu.
 
-`WorkflowManager` drží běžící workflow runy per task, spouští jednotlivé kroky
-přes :class:`WorkflowStepRunner` (Kubernetes Joby, Docker kontejnery nebo
-lokální bash procesy podle executoru)
-a po dokončení workflow aplikuje `outputs` úspěšně doběhlých kroků do Agentisu
-(i po selhání — `always` krok tak může doručit failure komentář).
-`start` / `add_message` vrací rychle — workflow běží v daemon threadu.
+`WorkflowManager` vybere workflow soubor, namespace a run adresář, zapíše `spec.json`, ověří ho
+`agentis-workflow check` a spustí `agentis-workflow run --spec ... --events jsonl` v child procesu
+(vlastní process group). JSONL události převádí na `run.adapter_event` a status registry; po skončení
+čte `result.json` a aplikuje outputs (komentáře, followup akce, session, přílohy, artefakty, changes diff).
+Scheduler kroků, retry, závislosti a podmínky běží v enginu, adapter o nich neví nic víc než z událostí.
+`start` / `add_message` vrací rychle — run běží na pozadí v reader threadu.
 """
 
 from __future__ import annotations
@@ -13,17 +13,19 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
+import signal
+import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+import unicodedata
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 from uuid import uuid4
-
-from dotenv import dotenv_values
 
 from common.agentis import AgentisJsonRpcClient, AgentisJsonRpcError
 from common.artifacts.screenshots import clear_screenshot_images, collect_screenshot_images
@@ -34,38 +36,24 @@ from common.artifacts.source_snapshot import (
     write_changes_diff_best_effort,
 )
 from common.config import Settings
-from common.workflow.docker_runtime import DockerContainerRunner
 from common.git_adapter import GitAdapterService
-from common.namespaces import namespace_for_context
 from common.models import AgentExecutionContextPayload, ApproveResult, task_header_env
+from common.namespaces import namespace_for_context
 from common.status import get_status_registry
-from common.workflow.local_runtime import LocalProcessRunner
-from common.workflow.runtime import (
-    StepResult,
-    KubectlJobRunner,
-    WorkflowStepRunner,
-    job_labels,
-    job_name,
-    safe_step_name,
-)
-from common.workflow.schema import (
-    PROJECT_WORKFLOW_FILE_RELPATH,
-    WORKFLOW_EXECUTORS,
-    WORKFLOW_FILE_RELPATH,
-    WorkflowFile,
-    WorkflowOutput,
-    WorkflowStep,
-    evaluate_condition,
-    load_workflow_file,
-    workflow_file_relpath,
-)
-
+from common.workflow import engine_cli
 
 ARTIFACT_OUTPUT_MAX_FILES = 50
 ARTIFACT_OUTPUT_MAX_BYTES = 50 * 1024 * 1024
-ARTIFACT_OUTPUT_STAGING_DIR = "artifact-staging"
-ARTIFACT_NAME_MAX_LENGTH = 255
 APPROVAL_HISTORY_MAX_ENTRIES = 1000
+#: Interpolační tokeny, které nastavuje spec sám (z namespace, workdir, run_dir); ve `vars` nejsou povoleny.
+ENGINE_OWNED_TOKENS = frozenset({"NAMESPACE", "WORKDIR", "RUN_DIR"})
+#: Po SIGTERM počkáme na doběh enginu (úklid jobů); po uplynutí se vrací stav bez čekání.
+ABORT_WAIT_SECONDS = 60.0
+#: Posledních N řádků stderr enginu se drží kvůli diagnostice selhaného runu.
+STDERR_TAIL_LINES = 20
+DEFAULT_WORKFLOW_NAME = "default"
+PROJECT_WORKFLOW_NAME = "project"
+WORKFLOW_DIR_RELPATH = ".agentis/workflows"
 
 
 class WorkflowBusyError(RuntimeError):
@@ -80,68 +68,41 @@ class WorkflowApprovalTimeoutError(WorkflowApprovalError):
     pass
 
 
-@dataclass(frozen=True)
-class _StagedArtifact:
-    step_index: int
-    output_index: int
-    match_index: int
-    name: str
-    filename: str
-    source_relpath: str
-    staged_path: Path
-    size: int
-
-
 @dataclass
 class _WorkflowRun:
     context: AgentExecutionContextPayload
     worktree: Path
-    workflow: WorkflowFile
     namespace: str
     attempt_id: str
     run_dir: Path
     output_root: Path
-    prompt_file: Path
-    context_file: Path
     executor: str
-    runner: WorkflowStepRunner
+    spec_path: Path
+    #: Labely, podle kterých engine nachází a ruší joby tohoto runu (bez attempt — joby nese engine vlastní).
+    labels: dict[str, str]
+    task_label: str
+    workflow_name: str | None
+    workflow_relpath: str
     approve_metadata: str | None = None
-    task_label: str = ""
-    artifact_staging_dir: Path | None = None
-    #: Klíč snapshotu zdrojáků pro "Changes diff" attachment; None pro pojmenovaná
-    #: workflow (merge/close), která můžou worktree sama smazat.
+    #: Klíč snapshotu zdrojáků pro "Changes diff" attachment; None pro pojmenovaná workflow
+    #: (merge/close), která můžou worktree sama smazat, a pro approval runy.
     snapshot_key: Optional[str] = None
-    abort_event: threading.Event = field(default_factory=threading.Event)
-    thread: Optional[threading.Thread] = None
-    status: str = "running"
-    #: Proměnné nasbírané z `var` outputs dokončených kroků; vstup pro `if` podmínky.
-    vars: dict[str, str] = field(default_factory=dict)
-    #: Indexy kroků přeskočených kvůli `if` nebo po selhání workflow — jejich
-    #: outputs se na konci neaplikují.
-    skipped_steps: set[int] = field(default_factory=set)
-    #: Indexy selhaných kroků (`continueOnError` i fatální) — outputs se neaplikují.
-    failed_steps: set[int] = field(default_factory=set)
-    #: Artefakty zachycené po úspěchu kroku; uploadují se až při aplikaci outputs.
-    staged_artifacts: list[_StagedArtifact] = field(default_factory=list)
-    #: Diagnostika artifact outputů; workflow kvůli ní nepadá.
-    output_warnings: list[dict[str, Any]] = field(default_factory=list)
     #: Approval runy jsou vnořené do hlavního workflow a nesmí měnit jeho Agentis lifecycle.
     report_to_agentis: bool = True
+    abort_event: threading.Event = field(default_factory=threading.Event)
     completion_event: threading.Event = field(default_factory=threading.Event)
+    process: Optional[subprocess.Popen[str]] = None
+    thread: Optional[threading.Thread] = None
+    returncode: int | None = None
+    status: str = "running"
     error: Exception | None = None
+    #: Proměnné `var` outputs úspěšných kroků z `result.json`.
+    vars: dict[str, str] = field(default_factory=dict)
+    stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=STDERR_TAIL_LINES))
 
     @property
     def active(self) -> bool:
         return self.status == "running" and (self.thread is None or self.thread.is_alive())
-
-
-@dataclass(frozen=True)
-class _StepExecutionResult:
-    index: int
-    step_name: str
-    job_name: str
-    result: StepResult
-    attempts: int
 
 
 @dataclass
@@ -161,70 +122,16 @@ class WorkflowManager:
     def __init__(
         self,
         settings: Settings,
-        runner: WorkflowStepRunner | None = None,
         agentis_sink: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.settings = settings
-        #: Explicitní runner (testy) má přednost před výběrem podle executoru.
-        self._runner_override = runner
-        #: Náhrada Agentis RPC (`agentis-adapter workflow run`): volání jdou sem místo na endpoint.
+        #: Náhrada Agentis RPC (testy): volání jdou sem místo na endpoint.
         self._agentis_sink = agentis_sink
-        self._runners: dict[tuple[str, str | None], WorkflowStepRunner] = {}
         self._runs: dict[str, _WorkflowRun] = {}
         self._starting_tasks: set[str] = set()
         self._approval_runs: dict[str, _ApprovalEntry] = {}
         self._last_attempt_value = 0
         self._lock = threading.Lock()
-
-    def _runner_for(self, executor: str, kube_context: str | None = None) -> WorkflowStepRunner:
-        if self._runner_override is not None:
-            return self._runner_override
-        if executor not in WORKFLOW_EXECUTORS:
-            raise ValueError(f"Unknown workflow executor {executor!r}; expected one of {WORKFLOW_EXECUTORS}")
-        key = (executor, kube_context if executor == "kubernetes" else None)
-        runner = self._runners.get(key)
-        if runner is None:
-            if executor == "local":
-                runner = LocalProcessRunner(self.settings)
-            elif executor == "docker":
-                runner = DockerContainerRunner(self.settings)
-            else:
-                runner = KubectlJobRunner(self.settings, kube_context=kube_context)
-            self._runners[key] = runner
-        return runner
-
-    def _resolve_executor(self, context: AgentExecutionContextPayload, workflow: WorkflowFile) -> str:
-        """Vybere executor pro run.
-
-        Runtime `local` nebo `docker` (`context.adapter.runtime`) vynutí odpovídající executor bez
-        ohledu na `workflow.executor` / `WORKFLOW_EXECUTOR` — runtime je
-        autoritativní signál prostředí. Jinak platí YAML `executor`, pak env
-        default (`settings.workflow_executor`, default `kubernetes`).
-        """
-
-        runtime = (context.adapter.runtime if context.adapter and context.adapter.runtime else "").strip().lower()
-        if runtime in {"local", "docker"}:
-            return runtime
-        return (workflow.workflow.executor or self.settings.workflow_executor).strip().lower()
-
-    @staticmethod
-    def _inject_env_files(workflow: WorkflowFile) -> WorkflowFile:
-        """Read dotenv files on the host and freeze their values into every resolved step."""
-
-        env: dict[str, str] = {}
-        for filename in workflow.workflow.envFiles:
-            path = Path(filename).expanduser()
-            if not path.is_file():
-                raise FileNotFoundError(f"Workflow env file does not exist or is not a file: {path}")
-            values = dotenv_values(path, interpolate=False)
-            env.update({key: value if value is not None else "" for key, value in values.items()})
-
-        if not env:
-            return workflow.model_copy(update={"workflow": workflow.workflow.model_copy(update={"envFiles": []})})
-
-        steps = [step.model_copy(update={"env": {**step.env, **env}}) for step in workflow.workflow.steps]
-        spec = workflow.workflow.model_copy(update={"envFiles": [], "steps": steps})
-        return workflow.model_copy(update={"workflow": spec})
 
     # ------------------------------------------------------------------
     # Public API
@@ -236,14 +143,12 @@ class WorkflowManager:
         worktree: str,
         prompt: str,
     ) -> dict[str, Any]:
-        """Připraví run, načte a zmrazí workflow YAML a spustí workflow na pozadí.
+        """Připraví run, ověří ho přes `check` a spustí engine na pozadí.
 
-        Bez pojmenovaného workflow v kontextu se použije `default.yaml`, pro
-        scope=project `project.yaml`. `context.adapter.workflow` (followup akce
-        jako merge/close) vybírá `.agentis/workflows/<name>.yaml`. Run soubory
-        (prompt, context, outputs) se pro scope=project a pojmenovaná workflow
-        zapisují mimo worktree do `<project_run_root>/<run_id>/<attempt>/` —
-        akce můžou worktree samy smazat.
+        Bez pojmenovaného workflow v kontextu se použije `default.yaml`, pro scope=project `project.yaml`.
+        `context.adapter.workflow` (followup akce jako merge/close) vybírá `.agentis/workflows/<name>.yaml`.
+        Run soubory (prompt, context, spec, outputs) se pro scope=project a pojmenovaná workflow zapisují
+        mimo worktree do `<project_run_root>/<run_id>/<attempt>/` — akce můžou worktree samy smazat.
         """
 
         with self._lock:
@@ -253,10 +158,10 @@ class WorkflowManager:
             self._starting_tasks.add(context.task_id)
 
         try:
-            run, result = self._prepare_workflow(context, worktree, prompt)
+            run, result = self._prepare(context, worktree, prompt)
             with self._lock:
+                self._launch(run, name=f"workflow-{context.task_id}-{run.attempt_id}")
                 self._runs[context.task_id] = run
-                self._start_thread(run, name=f"workflow-{context.task_id}-{run.attempt_id}")
             return result
         finally:
             with self._lock:
@@ -294,7 +199,7 @@ class WorkflowManager:
 
         if owner:
             try:
-                run, _result = self._prepare_workflow(
+                run, _result = self._prepare(
                     context,
                     worktree,
                     None,
@@ -311,7 +216,7 @@ class WorkflowManager:
                         entry.completion_event.set()
                     elif not entry.cancelled:
                         entry.run = run
-                        self._start_thread(run, name=f"approval-{approval_id}-{run.attempt_id}")
+                        self._launch(run, name=f"approval-{approval_id}-{run.attempt_id}")
             except Exception as exc:  # noqa: BLE001
                 with self._lock:
                     if not entry.cancelled:
@@ -353,13 +258,9 @@ class WorkflowManager:
         value = run.vars.get("APPROVED")
         if value not in {"0", "1"}:
             raise WorkflowApprovalError(f"Approval {approval_id!r} returned invalid APPROVED value")
-        if any(
-            output.type == "var" and output.name == "APPROVED_METADATA"
-            for step in run.workflow.workflow.steps
-            for output in step.outputs
-        ):
+        if "APPROVED_METADATA" in run.vars:
             try:
-                resolved_metadata = json.loads(run.vars.get("APPROVED_METADATA", ""))
+                resolved_metadata = json.loads(run.vars["APPROVED_METADATA"])
                 result = ApproveResult(approved=int(value), resolved_metadata=resolved_metadata)
             except (ValueError, RecursionError):
                 raise WorkflowApprovalError(
@@ -373,162 +274,6 @@ class WorkflowManager:
         payload = json.dumps(context.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         return hashlib.sha256(f"{payload}\0{metadata_json}".encode()).hexdigest()
 
-    def _prepare_workflow(
-        self,
-        context: AgentExecutionContextPayload,
-        worktree: str,
-        prompt: str | None,
-        *,
-        report_to_agentis: bool = True,
-        completion_event: threading.Event | None = None,
-        approval: bool = False,
-        approval_id: str | None = None,
-        approve_metadata: str | None = None,
-    ) -> tuple[_WorkflowRun, dict[str, Any]]:
-        namespace = namespace_for_context(context, self.settings)
-        task_label = self._task_label(context)
-        if approval:
-            if approval_id is None:
-                raise ValueError("approval_id is required for approval workflow")
-            approval_key = hashlib.sha256(approval_id.encode()).hexdigest()[:10]
-            namespace = f"{namespace[:42].rstrip('-')}-approval-{approval_key}"
-            task_label = f"approval-{approval_key}"
-
-        worktree_path = Path(worktree)
-        # Hex timestamp s pevnou šířkou: lexikografické řazení názvů jobů odpovídá pořadí spuštění.
-        attempt_id = self._next_attempt_id()
-        is_project_scope = GitAdapterService.is_project_scope(context)
-        workflow_name = self._workflow_name(context)
-        if workflow_name:
-            workflow_relpath = workflow_file_relpath(workflow_name)
-        else:
-            workflow_relpath = PROJECT_WORKFLOW_FILE_RELPATH if is_project_scope else WORKFLOW_FILE_RELPATH
-        # Workflow soubor: přednost má projektový (`.agentis/workflows/...`), při jeho
-        # absenci fallback na předpřipravené workflow zabalené v adapteru
-        # (`settings.bundled_workflow_dir`, default `workflows/` v rootu repa) — hledá se
-        # podle basename. `extends: _base` se i ve fallbacku vyřeší relativně k souboru,
-        # takže `_base.yaml` v té samé složce funguje. Bez obou variant run nemá co
-        # spustit a vrací se chyba do Agentisu (žádný fallback na CLI session).
-        workflow_path = worktree_path / workflow_relpath
-        if not workflow_path.is_file():
-            bundled_path = self.settings.bundled_workflow_dir / Path(workflow_relpath).name
-            if bundled_path.is_file():
-                workflow_path = bundled_path
-            elif workflow_name:
-                raise FileNotFoundError(
-                    f"Workflow {workflow_name!r} requires file {workflow_relpath} in the project "
-                    f"({workflow_path}) or the bundled fallback ({bundled_path}), but neither exists"
-                )
-            else:
-                raise FileNotFoundError(
-                    f"Project has no workflow file {workflow_relpath} ({workflow_path}) "
-                    f"and no bundled fallback ({bundled_path}); the run cannot be started via the workflow runtime"
-                )
-
-        external_run_files = is_project_scope or workflow_name is not None
-        if external_run_files:
-            run_dir = self.settings.project_run_root / context.run_id / attempt_id
-        else:
-            run_dir = worktree_path / ".agentis" / "runs" / attempt_id
-
-        values = self._interpolation_values(context, worktree_path, namespace, run_dir=run_dir)
-        workflow = self._inject_env_files(load_workflow_file(workflow_path, values))
-        if approval:
-            approved_outputs = [
-                output
-                for step in workflow.workflow.steps
-                for output in step.outputs
-                if output.type == "var" and output.name == "APPROVED"
-            ]
-            if len(approved_outputs) != 1:
-                raise ValueError("Approval workflow must declare exactly one var output named APPROVED")
-            metadata_outputs = [
-                output
-                for step in workflow.workflow.steps
-                for output in step.outputs
-                if output.type == "var" and output.name == "APPROVED_METADATA"
-            ]
-            if len(metadata_outputs) > 1:
-                raise ValueError("Approval workflow may declare at most one var output named APPROVED_METADATA")
-        executor = self._resolve_executor(context, workflow)
-        runner = self._runner_for(executor, workflow.workflow.context)
-        if executor in {"kubernetes", "docker"}:
-            self._require_images(workflow, workflow_relpath, executor)
-        if not approval and runner.has_active_run(namespace, task_label):
-            raise WorkflowBusyError(f"Workflow jobs for task {context.task_id} are still active in {namespace}")
-
-        run_dir.mkdir(parents=True, exist_ok=True)
-        prompt_file = run_dir / "prompt.md"
-        prompt_file.write_text(prompt if prompt else "", encoding="utf-8")
-
-        context_file = run_dir / "context.json"
-        context_dump = context.model_dump(mode="json")
-        context_file.write_text(json.dumps(context_dump, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        run = _WorkflowRun(
-            context=context,
-            worktree=worktree_path,
-            workflow=workflow,
-            namespace=namespace,
-            attempt_id=attempt_id,
-            run_dir=run_dir,
-            output_root=run_dir if external_run_files else worktree_path,
-            artifact_staging_dir=run_dir / ARTIFACT_OUTPUT_STAGING_DIR,
-            prompt_file=prompt_file,
-            context_file=context_file,
-            executor=executor,
-            runner=runner,
-            approve_metadata=approve_metadata,
-            task_label=task_label,
-            report_to_agentis=report_to_agentis,
-            completion_event=completion_event or threading.Event(),
-            snapshot_key=(
-                None
-                if approval or workflow_name
-                else build_snapshot_key("workflow", context.run_id, context.task_id, attempt_id)
-            ),
-        )
-
-        if report_to_agentis:
-            get_status_registry().run_update(
-                context.run_id,
-                kind="workflow",
-                worktree=str(worktree_path),
-                workflow=workflow_name,
-            )
-
-        return run, {
-            "action": "workflow_start",
-            "task_id": context.task_id,
-            "attempt": attempt_id,
-            "namespace": namespace,
-            "executor": executor,
-            "workflow": workflow_name,
-            "workflow_file": workflow_relpath,
-            "steps": [step.name for step in workflow.workflow.steps],
-        }
-
-    def _start_thread(self, run: _WorkflowRun, *, name: str) -> None:
-        thread = threading.Thread(target=self._thread_main, args=(run,), name=name, daemon=True)
-        run.thread = thread
-        thread.start()
-
-    def _next_attempt_id(self) -> str:
-        with self._lock:
-            value = max(time.time_ns() // 1_000_000, self._last_attempt_value + 1)
-            self._last_attempt_value = value
-        return f"{value:011x}"
-
-    def _trim_approval_history_locked(self) -> None:
-        if len(self._approval_runs) < APPROVAL_HISTORY_MAX_ENTRIES:
-            return
-        for key, entry in list(self._approval_runs.items()):
-            thread = entry.run.thread if entry.run is not None else None
-            if entry.completion_event.is_set() and (thread is None or not thread.is_alive()):
-                del self._approval_runs[key]
-                if len(self._approval_runs) < APPROVAL_HISTORY_MAX_ENTRIES:
-                    return
-
     def snapshot_key_for_task(self, task_id: str) -> str | None:
         """Klíč source snapshotu posledního runu tasku (pro `undo`); None pro pojmenovaná workflow."""
 
@@ -537,7 +282,7 @@ class WorkflowManager:
             return run.snapshot_key if run is not None else None
 
     def abort(self, context: AgentExecutionContextPayload) -> dict[str, Any]:
-        """Zruší workflow: zastaví aktivní kroky podle labels (bez session_id)."""
+        """Zruší workflow: pošle SIGTERM enginu (ten zruší kroky) nebo uklidí joby podle labelů."""
 
         namespace = namespace_for_context(context, self.settings)
         with self._lock:
@@ -559,17 +304,14 @@ class WorkflowManager:
             run.abort_event.set()
             run.status = "aborted"
 
-        labels = {
-            "agentis.task_id": self._task_label(context),
-            "agentis.run_id": self._run_label(context),
-        }
         runs_to_abort = [item for item in [run, *approval_runs] if item is not None]
         if runs_to_abort:
             deleted_results = [self._abort_run(item) for item in runs_to_abort]
         else:
             runtime = (context.adapter.runtime if context.adapter and context.adapter.runtime else "").strip().lower()
-            fallback = self._runner_for(runtime if runtime in {"local", "docker"} else self.settings.workflow_executor)
-            deleted_results = [fallback.abort(namespace, labels)]
+            executor = runtime if runtime in {"local", "docker"} else self.settings.workflow_executor
+            labels = {"agentis.task_id": self._task_label(context), "agentis.run_id": self._run_label(context)}
+            deleted_results = [self._abort_by_labels(executor, namespace, labels)]
         deleted = "; ".join(deleted_results)
         self._emit_adapter_event(
             context,
@@ -585,16 +327,6 @@ class WorkflowManager:
             "namespace": namespace,
             "deleted": deleted,
         }
-
-    def _abort_run(self, run: _WorkflowRun) -> str:
-        return run.runner.abort(
-            run.namespace,
-            {
-                "agentis.task_id": run.task_label,
-                "agentis.run_id": self._run_label(run.context),
-                "agentis.attempt": run.attempt_id,
-            },
-        )
 
     def active_count(self) -> int:
         """Počet workflow runů, jejichž thready stále běží (pro graceful shutdown)."""
@@ -633,6 +365,185 @@ class WorkflowManager:
             "error": str(run.error) if run.error else None,
         }
 
+    # ------------------------------------------------------------------
+    # Preparation and launch
+    # ------------------------------------------------------------------
+
+    def _prepare(
+        self,
+        context: AgentExecutionContextPayload,
+        worktree: str,
+        prompt: str | None,
+        *,
+        report_to_agentis: bool = True,
+        completion_event: threading.Event | None = None,
+        approval: bool = False,
+        approval_id: str | None = None,
+        approve_metadata: str | None = None,
+    ) -> tuple[_WorkflowRun, dict[str, Any]]:
+        namespace = namespace_for_context(context, self.settings)
+        task_label = self._task_label(context)
+        if approval:
+            if approval_id is None:
+                raise ValueError("approval_id is required for approval workflow")
+            approval_key = hashlib.sha256(approval_id.encode()).hexdigest()[:10]
+            namespace = f"{namespace[:42].rstrip('-')}-approval-{approval_key}"
+            task_label = f"approval-{approval_key}"
+
+        worktree_path = Path(worktree)
+        # Hex timestamp s pevnou šířkou: lexikografické řazení názvů jobů odpovídá pořadí spuštění.
+        attempt_id = self._next_attempt_id()
+        is_project_scope = GitAdapterService.is_project_scope(context)
+        workflow_name = self._workflow_name(context)
+        workflow_relpath = self._workflow_relpath(workflow_name, is_project_scope)
+        self._ensure_workflow_file(worktree_path, workflow_relpath, workflow_name)
+
+        external_run_files = is_project_scope or workflow_name is not None
+        if external_run_files:
+            run_dir = self.settings.project_run_root / context.run_id / attempt_id
+        else:
+            run_dir = worktree_path / ".agentis" / "runs" / attempt_id
+        output_root = run_dir if external_run_files else worktree_path
+
+        values = self._interpolation_values(context, worktree_path, namespace, run_dir=run_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "prompt.md").write_text(prompt if prompt else "", encoding="utf-8")
+        (run_dir / "context.json").write_text(
+            json.dumps(context.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        labels = {"agentis.task_id": task_label, "agentis.run_id": self._run_label(context)}
+        spec = {
+            "protocol": engine_cli.PROTOCOL_VERSION,
+            "workflow": Path(workflow_relpath).stem,
+            # Precedence: projektový soubor, pak workflow zabalené v adapteru (bundled fallback).
+            "search_paths": [
+                str(worktree_path / Path(workflow_relpath).parent),
+                str(self.settings.bundled_workflow_dir),
+            ],
+            "workdir": str(worktree_path),
+            "run_dir": str(run_dir),
+            "output_root": str(output_root),
+            "executor": self._forced_executor(context),
+            "executor_default": self.settings.workflow_executor,
+            "namespace": namespace,
+            "labels": labels,
+            "vars": {name: value for name, value in values.items() if name not in ENGINE_OWNED_TOKENS},
+            "env": self._spec_env(context, run_dir, values, approve_metadata),
+            # Secret se do spec ani do argv nedostane; engine ho vezme z env procesu.
+            "pass_env": ["AGENTIS_SERVICE_TOKEN"],
+            "require_vars": ["APPROVED"] if approval else [],
+        }
+        spec_path = engine_cli.write_spec(run_dir, spec)
+        summary = self._check(spec_path)
+        executor = str(summary.get("executor", ""))
+
+        snapshot_key: str | None = None
+        if not approval and not workflow_name:
+            snapshot_key = build_snapshot_key("workflow", context.run_id, context.task_id, attempt_id)
+            snapshot_sources_best_effort(worktree_path, snapshot_key, label="workflow-start")
+        if report_to_agentis:
+            get_status_registry().run_update(
+                context.run_id,
+                kind="workflow",
+                worktree=str(worktree_path),
+                workflow=workflow_name,
+            )
+
+        run = _WorkflowRun(
+            context=context,
+            worktree=worktree_path,
+            namespace=namespace,
+            attempt_id=attempt_id,
+            run_dir=run_dir,
+            output_root=output_root,
+            executor=executor,
+            spec_path=spec_path,
+            labels=labels,
+            task_label=task_label,
+            workflow_name=workflow_name,
+            workflow_relpath=workflow_relpath,
+            approve_metadata=approve_metadata,
+            snapshot_key=snapshot_key,
+            report_to_agentis=report_to_agentis,
+            completion_event=completion_event or threading.Event(),
+        )
+        return run, {
+            "action": "workflow_start",
+            "task_id": context.task_id,
+            "attempt": attempt_id,
+            "namespace": namespace,
+            "executor": executor,
+            "workflow": workflow_name,
+            "workflow_file": workflow_relpath,
+            "steps": [str(step.get("name", "")) for step in summary.get("steps", [])],
+        }
+
+    def _check(self, spec_path: Path) -> dict[str, Any]:
+        completed = engine_cli.check(self.settings.workflow_command, spec_path)
+        if completed.returncode == engine_cli.EXIT_BUSY:
+            raise WorkflowBusyError(engine_cli.tail(completed.stderr))
+        if completed.returncode == engine_cli.EXIT_INVALID:
+            raise ValueError(engine_cli.tail(completed.stderr))
+        if completed.returncode != engine_cli.EXIT_OK:
+            raise engine_cli.EngineCommandError(
+                f"agentis-workflow check failed (exit {completed.returncode}): {engine_cli.tail(completed.stderr)}"
+            )
+        return engine_cli.check_summary(completed)
+
+    def _launch(self, run: _WorkflowRun, *, name: str) -> None:
+        """Spustí engine `run --spec` a reader thread; volá se pod `self._lock`, takže jen krátké operace."""
+
+        run.process = engine_cli.spawn_run(self.settings.workflow_command, run.spec_path, self._child_env())
+        run.thread = threading.Thread(target=self._thread_main, args=(run,), name=name, daemon=True)
+        run.thread.start()
+
+    def _child_env(self) -> dict[str, str]:
+        """Env procesu enginu: jediné místo, kudy se service token dostane ven z adapteru (viz `pass_env`)."""
+
+        env = dict(os.environ)
+        # Adapterový API token engine nepotřebuje; v env procesu enginu (a jeho podprocesech) nemá být.
+        env.pop("AGENTIS_API_TOKEN", None)
+        env.pop("AGENTIS_TOKEN", None)
+        if self.settings.agentis_service_token:
+            env["AGENTIS_SERVICE_TOKEN"] = self.settings.agentis_service_token
+        return env
+
+    def _next_attempt_id(self) -> str:
+        with self._lock:
+            value = max(time.time_ns() // 1_000_000, self._last_attempt_value + 1)
+            self._last_attempt_value = value
+        return f"{value:011x}"
+
+    def _trim_approval_history_locked(self) -> None:
+        if len(self._approval_runs) < APPROVAL_HISTORY_MAX_ENTRIES:
+            return
+        for key, entry in list(self._approval_runs.items()):
+            thread = entry.run.thread if entry.run is not None else None
+            if entry.completion_event.is_set() and (thread is None or not thread.is_alive()):
+                del self._approval_runs[key]
+                if len(self._approval_runs) < APPROVAL_HISTORY_MAX_ENTRIES:
+                    return
+
+    def _abort_run(self, run: _WorkflowRun) -> str:
+        process = run.process
+        if process is not None and process.poll() is None:
+            engine_cli.signal_process_group(process, signal.SIGTERM)
+            try:
+                returncode = process.wait(timeout=ABORT_WAIT_SECONDS)
+            except subprocess.TimeoutExpired:
+                return "stop signal sent; workflow engine is still running"
+            return f"workflow engine stopped (exit {returncode})"
+        return self._abort_by_labels(run.executor, run.namespace, run.labels)
+
+    def _abort_by_labels(self, executor: str, namespace: str, labels: dict[str, str]) -> str:
+        return engine_cli.abort_by_labels(
+            self.settings.workflow_command,
+            executor=executor,
+            namespace=namespace,
+            labels=labels,
+        )
+
     def _active_threads(self) -> list[threading.Thread]:
         with self._lock:
             threads = [run.thread for run in self._runs.values() if run.thread is not None]
@@ -644,20 +555,8 @@ class WorkflowManager:
         return [thread for thread in threads if thread.is_alive()]
 
     # ------------------------------------------------------------------
-    # Internals
+    # Spec helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _require_images(workflow: WorkflowFile, workflow_relpath: str, executor: str) -> None:
-        """Container executors need an image for every step; the local executor ignores it."""
-
-        spec = workflow.workflow
-        missing = [step.name for step in spec.steps if not (step.image or spec.image)]
-        if missing:
-            raise ValueError(
-                f"Workflow executor {executor!r} requires 'image' in {workflow_relpath} "
-                f"(missing for steps: {', '.join(missing)})"
-            )
 
     @staticmethod
     def _workflow_name(context: AgentExecutionContextPayload) -> str | None:
@@ -666,8 +565,78 @@ class WorkflowManager:
         return None
 
     @staticmethod
+    def _workflow_relpath(workflow_name: str | None, is_project_scope: bool) -> str:
+        if workflow_name:
+            return f"{WORKFLOW_DIR_RELPATH}/{workflow_name}.yaml"
+        name = PROJECT_WORKFLOW_NAME if is_project_scope else DEFAULT_WORKFLOW_NAME
+        return f"{WORKFLOW_DIR_RELPATH}/{name}.yaml"
+
+    def _ensure_workflow_file(self, worktree: Path, workflow_relpath: str, workflow_name: str | None) -> None:
+        """Včasná chyba s cestami; samotné hledání a validaci dělá engine (`check`)."""
+
+        if (worktree / workflow_relpath).is_file():
+            return
+        bundled_path = self.settings.bundled_workflow_dir / Path(workflow_relpath).name
+        if bundled_path.is_file():
+            return
+        workflow_path = worktree / workflow_relpath
+        if workflow_name:
+            raise FileNotFoundError(
+                f"Workflow {workflow_name!r} requires file {workflow_relpath} in the project "
+                f"({workflow_path}) or the bundled fallback ({bundled_path}), but neither exists"
+            )
+        raise FileNotFoundError(
+            f"Project has no workflow file {workflow_relpath} ({workflow_path}) "
+            f"and no bundled fallback ({bundled_path}); the run cannot be started via the workflow runtime"
+        )
+
+    def _forced_executor(self, context: AgentExecutionContextPayload) -> str | None:
+        """Runtime `local` nebo `docker` vynutí executor bez ohledu na YAML; jinak rozhodne YAML / default."""
+
+        runtime = (context.adapter.runtime if context.adapter and context.adapter.runtime else "").strip().lower()
+        return runtime if runtime in {"local", "docker"} else None
+
+    def _spec_env(
+        self,
+        context: AgentExecutionContextPayload,
+        run_dir: Path,
+        values: dict[str, str],
+        approve_metadata: str | None,
+    ) -> dict[str, str]:
+        """Nesecretní env kroků. Tokeny (AGENTIS_*_TOKEN) sem nepatří — viz `pass_env`."""
+
+        env = dict(values)
+        env.update(task_header_env(context.headers))
+        env.update(
+            {
+                "AGENTIS_RUN_ID": context.run_id,
+                "AGENTIS_TASK_ID": context.task_id,
+                "AGENTIS_PROJECT_ID": str(context.project_id) if context.project_id is not None else "",
+                "AGENTIS_RUN_DIR": str(run_dir),
+                "AGENTIS_PROMPT_FILE": str(run_dir / "prompt.md"),
+                "AGENTIS_CONTEXT_FILE": str(run_dir / "context.json"),
+            }
+        )
+        if approve_metadata is not None:
+            env["AGENTIS_APPROVE_METADATA"] = approve_metadata
+        if self.settings.agentis_endpoint:
+            env["AGENTIS_ENDPOINT"] = self.settings.agentis_endpoint
+        adapter = context.adapter
+        if context.session_id:
+            env["AGENTIS_SESSION_ID"] = context.session_id
+        if adapter and adapter.model:
+            env["AGENTIS_MODEL"] = adapter.model
+        if adapter and adapter.agent:
+            env["AGENTIS_AGENT"] = adapter.agent
+        if adapter and adapter.effort:
+            env["AGENTIS_EFFORT"] = adapter.effort
+        if adapter:
+            env["AGENTIS_AUTO_MERGE"] = "true" if adapter.auto_merge else "false"
+        return env
+
+    @staticmethod
     def _task_label(context: AgentExecutionContextPayload) -> str:
-        return safe_step_name(context.task_id) or "task"
+        return _safe_label(context.task_id) or "task"
 
     @staticmethod
     def _run_label(context: AgentExecutionContextPayload) -> str:
@@ -698,231 +667,186 @@ class WorkflowManager:
             "GITHUB_REPO": context.project_github_repo or "",
         }
 
-    def _runtime_env(self, run: _WorkflowRun) -> dict[str, str]:
-        values = self._interpolation_values(run.context, run.worktree, run.namespace, run_dir=run.run_dir)
-        env = dict(values)
-        env.update(task_header_env(run.context.headers))
-        env.update(
-            {
-                "AGENTIS_RUN_ID": run.context.run_id,
-                "AGENTIS_TASK_ID": run.context.task_id,
-                "AGENTIS_PROJECT_ID": str(run.context.project_id) if run.context.project_id is not None else "",
-                "AGENTIS_RUN_DIR": str(run.run_dir),
-                "AGENTIS_PROMPT_FILE": str(run.prompt_file),
-                "AGENTIS_CONTEXT_FILE": str(run.context_file),
-            }
-        )
-        if run.approve_metadata is not None:
-            env["AGENTIS_APPROVE_METADATA"] = run.approve_metadata
-        if self.settings.agentis_endpoint:
-            env["AGENTIS_ENDPOINT"] = self.settings.agentis_endpoint
-        if self.settings.agentis_service_token:
-            env["AGENTIS_SERVICE_TOKEN"] = self.settings.agentis_service_token
-        adapter = run.context.adapter
-        if run.context.session_id:
-            env["AGENTIS_SESSION_ID"] = run.context.session_id
-        if adapter and adapter.model:
-            env["AGENTIS_MODEL"] = adapter.model
-        if adapter and adapter.agent:
-            env["AGENTIS_AGENT"] = adapter.agent
-        if adapter and adapter.effort:
-            env["AGENTIS_EFFORT"] = adapter.effort
-        if adapter:
-            env["AGENTIS_AUTO_MERGE"] = "true" if adapter.auto_merge else "false"
-        return env
-
-    def _condition_vars(
-        self,
-        run: _WorkflowRun,
-        *,
-        env: dict[str, str] | None = None,
-        step_env: dict[str, str] | None = None,
-        visible_vars: dict[str, str] | None = None,
-    ) -> dict[str, str]:
-        """Proměnné viditelné v `if`; `var` outputs přepisují env i built-ins."""
-
-        return {
-            **run.workflow.workflow.env,
-            **(env if env is not None else self._runtime_env(run)),
-            **(step_env or {}),
-            **self._interpolation_values(run.context, run.worktree, run.namespace, run_dir=run.run_dir),
-            **(visible_vars or {}),
-        }
+    # ------------------------------------------------------------------
+    # Reader thread: events, result, outputs
+    # ------------------------------------------------------------------
 
     def _thread_main(self, run: _WorkflowRun) -> None:
         try:
-            self._run_workflow(run)
-            if run.report_to_agentis:
-                get_status_registry().run_finished(run.context.run_id, run.status)
+            self._consume_process(run)
+            self._finish(run)
         except Exception as exc:  # noqa: BLE001
             run.status = "failed"
             run.error = exc
-            if not run.report_to_agentis:
-                return
-            get_status_registry().run_finished(run.context.run_id, "failed")
             sys.stderr.write(f"[workflow] run {run.context.run_id} crashed: {exc!r}\n")
-            self._emit_adapter_event(
-                run.context,
-                kind="workflow",
-                status="failed",
-                event_id=f"workflow:{run.context.run_id}:{run.attempt_id}",
-                message="Workflow run failed.",
-                data={"error": str(exc)},
-            )
+            if run.report_to_agentis:
+                self._emit_adapter_event(
+                    run.context,
+                    kind="workflow",
+                    status="failed",
+                    event_id=f"workflow:{run.context.run_id}:{run.attempt_id}",
+                    message="Workflow run failed.",
+                    data={"error": str(exc)},
+                )
         finally:
+            if run.report_to_agentis:
+                get_status_registry().run_finished(run.context.run_id, run.status)
             run.completion_event.set()
 
-    def _run_workflow(self, run: _WorkflowRun) -> None:
-        if run.snapshot_key:
-            snapshot_sources_best_effort(run.worktree, run.snapshot_key, label="workflow-start")
-        env = self._runtime_env(run)
-        run.runner.prepare(run.workflow, namespace=run.namespace, run_dir=run.run_dir)
-        workflow_event_id = f"workflow:{run.context.run_id}:{run.attempt_id}"
-        if run.report_to_agentis:
+    def _consume_process(self, run: _WorkflowRun) -> None:
+        process = run.process
+        if process is None or process.stdout is None or process.stderr is None:
+            raise RuntimeError("workflow engine process has no pipes")
+        stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            args=(run, process),
+            name=f"workflow-stderr-{run.attempt_id}",
+            daemon=True,
+        )
+        stderr_thread.start()
+        for line in process.stdout:
+            self._handle_line(run, line)
+        run.returncode = process.wait()
+        stderr_thread.join()
+
+    def _drain_stderr(self, run: _WorkflowRun, process: subprocess.Popen[str]) -> None:
+        assert process.stderr is not None
+        for line in process.stderr:
+            text = line.rstrip("\n")
+            if text:
+                run.stderr_tail.append(text)
+                sys.stderr.write(f"[workflow-engine {run.context.run_id}] {text}\n")
+
+    def _handle_line(self, run: _WorkflowRun, line: str) -> None:
+        text = line.strip()
+        if not text:
+            return
+        try:
+            event = json.loads(text)
+        except json.JSONDecodeError:
+            event = None
+        if not isinstance(event, dict):
+            sys.stderr.write(f"[workflow] unparsed engine output for run {run.context.run_id}: {text[:200]}\n")
+            return
+        try:
+            self._handle_event(run, event)
+        except Exception as exc:  # noqa: BLE001 - chyba reportingu nesmí zahodit výsledek runu
+            sys.stderr.write(f"[workflow] reporting engine event {event.get('type')!r} failed: {exc!r}\n")
+
+    def _handle_event(self, run: _WorkflowRun, event: dict[str, Any]) -> None:
+        kind = event.get("type")
+        if not run.report_to_agentis:
+            return
+        event_prefix = f"workflow_step:{run.context.run_id}:{run.attempt_id}"
+        if kind == "workflow_started":
             self._emit_adapter_event(
                 run.context,
                 kind="workflow",
                 status="success",
-                event_id=workflow_event_id,
+                event_id=f"workflow:{run.context.run_id}:{run.attempt_id}",
                 message="Workflow started.",
                 data={"attempt": run.attempt_id, "namespace": run.namespace, "executor": run.executor},
             )
+        elif kind == "step_started":
+            self._emit_adapter_event(
+                run.context,
+                kind="workflow_step",
+                status="started",
+                event_id=f"{event_prefix}:{event['index']}",
+                message=str(event["step"]),
+                data=self._step_data(event),
+            )
+        elif kind == "step_succeeded":
+            self._emit_adapter_event(
+                run.context,
+                kind="workflow_step",
+                status="success",
+                event_id=f"{event_prefix}:{event['index']}",
+                message=str(event["step"]),
+                data=self._step_data(event),
+            )
+        elif kind == "step_failed":
+            error = event.get("error")
+            message = f"{event['step']}: {error}" if error else f"Krok selhal ({event.get('result')}): {event['step']}"
+            data = self._step_data(event)
+            data.update(
+                {
+                    "result": event.get("result"),
+                    "log_tail": event.get("log_tail", ""),
+                    "attempts": event.get("attempts"),
+                    "continueOnError": event.get("continue_on_error", False),
+                }
+            )
+            if error:
+                data["error"] = error
+            self._emit_adapter_event(
+                run.context,
+                kind="workflow_step",
+                status="failed",
+                event_id=f"{event_prefix}:{event['index']}",
+                message=message,
+                data=data,
+            )
+        elif kind == "step_skipped":
+            data = {"step": event["step"], "step_index": event["index"], "needs": event.get("needs", []), "skipped": True}
+            if event.get("reason") == "condition":
+                data["condition"] = event.get("condition")
+                data["vars"] = event.get("vars", {})
+                message = f"Step skipped (if: {event.get('condition')}): {event['step']}"
+            else:
+                data["failed_step"] = event.get("failed_step")
+                message = f"Step skipped (workflow failed): {event['step']}"
+            self._emit_adapter_event(
+                run.context,
+                kind="workflow_step",
+                status="skipped",
+                event_id=f"{event_prefix}:{event['index']}",
+                message=message,
+                data=data,
+            )
+        elif kind == "warning":
+            sys.stderr.write(f"[workflow] {run.context.run_id} warning: {event.get('message')}\n")
 
-        steps = run.workflow.workflow.steps
-        dependencies = self._step_dependencies(steps)
-        step_vars: dict[int, dict[str, str]] = {}
-        terminal_steps: set[int] = set()
-        pending_steps: set[int] = set(range(len(steps)))
-        running_steps: dict[Future[_StepExecutionResult], int] = {}
+    @staticmethod
+    def _step_data(event: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "step": event["step"],
+            "step_index": event["index"],
+            "needs": event.get("needs", []),
+            "job": event.get("job"),
+        }
 
-        #: Jméno prvního fatálně selhaného kroku; po selhání běží už jen `always` kroky.
-        failed_step: str | None = None
-        max_parallel = run.workflow.workflow.maxParallel
-        with ThreadPoolExecutor(max_workers=max_parallel, thread_name_prefix="workflow-step") as executor:
-            while pending_steps or running_steps:
-                if run.abort_event.is_set():
-                    pending_steps.clear()
-                    if not running_steps:
-                        run.status = "aborted"
-                        return
-
-                progressed = False
-                if failed_step is not None:
-                    for index in sorted(list(pending_steps)):
-                        step = steps[index]
-                        if step.always:
-                            continue
-                        pending_steps.remove(index)
-                        terminal_steps.add(index)
-                        run.skipped_steps.add(index)
-                        self._emit_step_skipped(run, index, step, dependencies, failed_step=failed_step)
-                        progressed = True
-
-                active_regular_steps = any(not steps[index].always for index in running_steps.values())
-                for index in sorted(list(pending_steps)):
-                    if len(running_steps) >= max_parallel:
-                        break
-                    step = steps[index]
-                    if failed_step is not None and not step.always:
-                        continue
-                    if failed_step is not None and step.always and active_regular_steps:
-                        continue
-                    if any(dependency not in terminal_steps for dependency in dependencies[index]):
-                        continue
-
-                    dependency_vars = self._dependency_vars(index, dependencies, step_vars)
-                    condition_vars = self._condition_vars(run, env=env, step_env=step.env, visible_vars=dependency_vars)
-                    if step.if_ is not None and not evaluate_condition(step.if_, condition_vars):
-                        pending_steps.remove(index)
-                        terminal_steps.add(index)
-                        run.skipped_steps.add(index)
-                        self._emit_step_skipped(
-                            run,
-                            index,
-                            step,
-                            dependencies,
-                            condition=step.if_,
-                            visible_vars=dependency_vars,
-                        )
-                        progressed = True
-                        continue
-
-                    self._emit_step_started(run, index, step, dependencies)
-                    step_env = {**env, **dependency_vars}
-                    if step.always:
-                        step_env = dict(step_env)
-                        step_env["AGENTIS_WORKFLOW_STATUS"] = "failed" if failed_step else "success"
-                        step_env["AGENTIS_FAILED_STEP"] = failed_step or ""
-                    future = executor.submit(self._run_step_with_retries, run, index, step, step_env)
-                    running_steps[future] = index
-                    pending_steps.remove(index)
-                    progressed = True
-
-                if not running_steps:
-                    if pending_steps and not progressed:
-                        raise RuntimeError("workflow scheduler deadlocked; no runnable pending steps")
-                    continue
-
-                if progressed and len(running_steps) < max_parallel and pending_steps:
-                    continue
-
-                done, _pending = wait(running_steps, return_when=FIRST_COMPLETED)
-                for future in done:
-                    index = running_steps.pop(future)
-                    terminal_steps.add(index)
-                    step = steps[index]
-                    try:
-                        completed = future.result()
-                    except Exception as exc:  # noqa: BLE001
-                        completed = _StepExecutionResult(
-                            index=index,
-                            step_name=step.name,
-                            job_name=job_name(run.context.run_id, run.attempt_id, index, step.name),
-                            result=StepResult(status="failed", log_tail=str(exc)),
-                            attempts=1,
-                        )
-                    if completed.result.status == "aborted":
-                        run.abort_event.set()
-                        pending_steps.clear()
-                        run.status = "aborted"
-                        continue
-                    if completed.result.status != "succeeded":
-                        run.failed_steps.add(index)
-                        self._emit_step_failed(run, completed, step, dependencies)
-                        if not step.continueOnError and failed_step is None:
-                            failed_step = step.name
-                        continue
-
-                    self._emit_step_succeeded(run, completed, step, dependencies)
-                    new_vars = self._collect_step_vars(run, step)
-                    if new_vars:
-                        step_vars[index] = new_vars
-                        run.vars.update(new_vars)
-
-        if run.status == "aborted":
+    def _finish(self, run: _WorkflowRun) -> None:
+        result = engine_cli.read_result(run.run_dir)
+        if result is None:
+            if run.abort_event.is_set():
+                run.status = "aborted"
+                return
+            raise RuntimeError(
+                f"workflow engine exited with code {run.returncode} without a valid result.json: "
+                f"{engine_cli.tail('\n'.join(run.stderr_tail))}"
+            )
+        run.vars = {str(name): str(value) for name, value in (result.get("vars") or {}).items()}
+        if run.abort_event.is_set() or result.get("status") == "aborted":
+            run.status = "aborted"
+            return
+        run.status = "success" if result.get("status") == "success" else "failed"
+        if not run.report_to_agentis:
             return
 
-        # Outputs úspěšně doběhlých kroků se aplikují i po selhání workflow —
-        # `always` krok tak může doručit failure komentář do ticketu.
-        if failed_step is not None:
-            run.status = "failed"
-            if run.report_to_agentis:
-                self._apply_outputs(run)
-                self._emit_adapter_event(
-                    run.context,
-                    kind="idle",
-                    status="failed",
-                    event_id=workflow_event_id,
-                    message="Workflow selhalo.",
-                    data={"failed_step": failed_step, "attempt": run.attempt_id},
-                )
-            return
-
-        if run.report_to_agentis:
-            self._apply_outputs(run)
-            self._cleanup_namespace(run)
-        run.status = "success"
-        if run.report_to_agentis:
+        # Outputs se aplikují i po selhání workflow — `always` krok tak může doručit failure komentář.
+        self._apply_outputs(run, result)
+        workflow_event_id = f"workflow:{run.context.run_id}:{run.attempt_id}"
+        if run.status == "failed":
+            self._emit_adapter_event(
+                run.context,
+                kind="idle",
+                status="failed",
+                event_id=workflow_event_id,
+                message="Workflow selhalo.",
+                data={"failed_step": result.get("failed_step"), "attempt": run.attempt_id},
+            )
+        else:
             self._emit_adapter_event(
                 run.context,
                 kind="idle",
@@ -932,285 +856,22 @@ class WorkflowManager:
                 data={"attempt": run.attempt_id},
             )
 
-    @staticmethod
-    def _step_dependencies(steps: list[WorkflowStep]) -> list[list[int]]:
-        name_to_index: dict[str, int] = {}
-        dependencies: list[list[int]] = []
-        for index, step in enumerate(steps):
-            if step.needs is None:
-                dependencies.append([index - 1] if index > 0 else [])
-            else:
-                dependencies.append([name_to_index[name] for name in step.needs])
-            name_to_index[step.name] = index
-        return dependencies
-
-    @staticmethod
-    def _dependency_names(index: int, steps: list[WorkflowStep], dependencies: list[list[int]]) -> list[str]:
-        return [steps[dependency].name for dependency in dependencies[index]]
-
-    @staticmethod
-    def _dependency_vars(
-        index: int,
-        dependencies: list[list[int]],
-        step_vars: dict[int, dict[str, str]],
-    ) -> dict[str, str]:
-        values: dict[str, str] = {}
-        seen: set[int] = set()
-
-        def visit(dependency: int) -> None:
-            if dependency in seen:
-                return
-            for parent in dependencies[dependency]:
-                visit(parent)
-            seen.add(dependency)
-            values.update(step_vars.get(dependency, {}))
-
-        for dependency in dependencies[index]:
-            visit(dependency)
-        return values
-
-    def _run_step_with_retries(
-        self,
-        run: _WorkflowRun,
-        index: int,
-        step: WorkflowStep,
-        step_env: dict[str, str],
-    ) -> _StepExecutionResult:
-        labels = job_labels(
-            task_id=run.task_label,
-            run_id=run.context.run_id,
-            attempt_id=run.attempt_id,
-            step_index=index,
-            step_name=step.name,
-        )
-        name = job_name(run.context.run_id, run.attempt_id, index, step.name)
-        timeout = step.timeoutSeconds if step.timeoutSeconds is not None else run.workflow.workflow.timeoutSeconds
-        attempt = 0
-        while True:
-            attempt += 1
-            attempt_name = name if attempt == 1 else f"{name[:60].rstrip('-')}-r{attempt}"
-            result = run.runner.run_step(
-                run.workflow,
-                step,
-                namespace=run.namespace,
-                name=attempt_name,
-                labels=labels,
-                env=step_env,
-                timeout=float(timeout),
-                abort_event=run.abort_event,
-                run_dir=run.run_dir,
-            )
-            if result.status == "aborted" or result.status == "succeeded" or attempt > step.retries:
-                return _StepExecutionResult(
-                    index=index,
-                    step_name=step.name,
-                    job_name=name,
-                    result=result,
-                    attempts=attempt,
-                )
-            if run.abort_event.is_set():
-                return _StepExecutionResult(
-                    index=index,
-                    step_name=step.name,
-                    job_name=name,
-                    result=StepResult(status="aborted"),
-                    attempts=attempt,
-                )
-
-    def _emit_step_started(
-        self,
-        run: _WorkflowRun,
-        index: int,
-        step: WorkflowStep,
-        dependencies: list[list[int]],
-    ) -> None:
-        if not run.report_to_agentis:
-            return
-        name = job_name(run.context.run_id, run.attempt_id, index, step.name)
-        self._emit_adapter_event(
-            run.context,
-            kind="workflow_step",
-            status="started",
-            event_id=f"workflow_step:{run.context.run_id}:{run.attempt_id}:{index}",
-            message=step.name,
-            data={
-                "step": step.name,
-                "step_index": index,
-                "needs": self._dependency_names(index, run.workflow.workflow.steps, dependencies),
-                "job": name,
-            },
-        )
-
-    def _emit_step_succeeded(
-        self,
-        run: _WorkflowRun,
-        completed: _StepExecutionResult,
-        step: WorkflowStep,
-        dependencies: list[list[int]],
-    ) -> None:
-        if not run.report_to_agentis:
-            return
-        self._emit_adapter_event(
-            run.context,
-            kind="workflow_step",
-            status="success",
-            event_id=f"workflow_step:{run.context.run_id}:{run.attempt_id}:{completed.index}",
-            message=step.name,
-            data={
-                "step": completed.step_name,
-                "step_index": completed.index,
-                "needs": self._dependency_names(completed.index, run.workflow.workflow.steps, dependencies),
-                "job": completed.job_name,
-            },
-        )
-
-    def _emit_step_failed(
-        self,
-        run: _WorkflowRun,
-        completed: _StepExecutionResult,
-        step: WorkflowStep,
-        dependencies: list[list[int]],
-    ) -> None:
-        if not run.report_to_agentis:
-            return
-        agent_error = self._agent_error_from_log(completed.result.log_tail)
-        message = (
-            f"{step.name}: {agent_error}" if agent_error else f"Krok selhal ({completed.result.status}): {step.name}"
-        )
-        data = {
-            "step": completed.step_name,
-            "step_index": completed.index,
-            "needs": self._dependency_names(completed.index, run.workflow.workflow.steps, dependencies),
-            "job": completed.job_name,
-            "result": completed.result.status,
-            "log_tail": completed.result.log_tail,
-            "attempts": completed.attempts,
-            "continueOnError": step.continueOnError,
-        }
-        if agent_error:
-            data["error"] = agent_error
-        self._emit_adapter_event(
-            run.context,
-            kind="workflow_step",
-            status="failed",
-            event_id=f"workflow_step:{run.context.run_id}:{run.attempt_id}:{completed.index}",
-            message=message,
-            data=data,
-        )
-
-    @staticmethod
-    def _agent_error_from_log(log_tail: str) -> str | None:
-        error: str | None = None
-        for line in log_tail.splitlines():
-            try:
-                event = json.loads(line)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if not isinstance(event, dict) or event.get("type") != "error":
-                continue
-            message = event.get("message")
-            if not isinstance(message, str):
-                data = event.get("data")
-                message = data.get("message") if isinstance(data, dict) else None
-            if isinstance(message, str) and message.strip():
-                error = message.strip()
-        return error
-
-    def _emit_step_skipped(
-        self,
-        run: _WorkflowRun,
-        index: int,
-        step: WorkflowStep,
-        dependencies: list[list[int]],
-        *,
-        condition: str | None = None,
-        visible_vars: dict[str, str] | None = None,
-        failed_step: str | None = None,
-    ) -> None:
-        if not run.report_to_agentis:
-            return
-        data: dict[str, Any] = {
-            "step": step.name,
-            "step_index": index,
-            "needs": self._dependency_names(index, run.workflow.workflow.steps, dependencies),
-            "skipped": True,
-        }
-        if condition is not None:
-            data["condition"] = condition
-            data["vars"] = dict(visible_vars or {})
-            message = f"Step skipped (if: {condition}): {step.name}"
-        else:
-            data["failed_step"] = failed_step
-            message = f"Step skipped (workflow failed): {step.name}"
-        self._emit_adapter_event(
-            run.context,
-            kind="workflow_step",
-            status="skipped",
-            event_id=f"workflow_step:{run.context.run_id}:{run.attempt_id}:{index}",
-            message=message,
-            data=data,
-        )
-
-    def _cleanup_namespace(self, run: _WorkflowRun) -> None:
-        """Smaže namespace po úspěšném workflow s `deleteNamespace: true`.
-
-        Jen pro executor `kubernetes` — lokální executor namespace nevytváří.
-        Selhání úklidu workflow neshodí, jen se nahlásí do Agentisu.
-        """
-
-        if not run.workflow.workflow.deleteNamespace or run.executor != "kubernetes":
-            return
-        try:
-            run.runner.delete_namespace(run.namespace)
-        except Exception as exc:  # noqa: BLE001
-            sys.stderr.write(f"[workflow] delete namespace {run.namespace} failed: {exc!r}\n")
-            self._emit_adapter_event(
-                run.context,
-                kind="workflow_cleanup",
-                status="failed",
-                event_id=f"workflow_cleanup:{run.context.run_id}:{run.attempt_id}",
-                message=f"Deleting namespace {run.namespace} failed.",
-                data={"namespace": run.namespace, "error": str(exc)},
-            )
-
     # ------------------------------------------------------------------
     # Outputs
     # ------------------------------------------------------------------
 
-    def _read_output_file(self, run: _WorkflowRun, relpath: str | None) -> str | None:
-        if not relpath:
-            return None
-        path = (run.output_root / relpath).resolve()
-        if run.output_root.resolve() not in path.parents:
-            return None
-        if not path.is_file():
-            return None
-        try:
-            return path.read_text(encoding="utf-8")
-        except OSError:
-            return None
+    def _apply_outputs(self, run: _WorkflowRun, result: dict[str, Any]) -> None:
+        outputs = result.get("outputs") or {}
+        comments: list[dict[str, Any]] = [
+            {
+                "body": str(comment.get("body", "")),
+                "status": comment.get("status"),
+                "author_name": comment.get("author_name"),
+            }
+            for comment in outputs.get("comments") or []
+        ]
 
-    def _collect_step_vars(self, run: _WorkflowRun, step: WorkflowStep) -> dict[str, str]:
-        values: dict[str, str] = {}
-        for output in step.outputs:
-            if output.type != "var" or not output.name:
-                continue
-            value = self._read_output_file(run, output.valueFrom)
-            values[output.name] = (value or "").strip()
-        return values
-
-    def _apply_outputs(self, run: _WorkflowRun) -> None:
-        outputs: list[WorkflowOutput] = []
-        for index, step in enumerate(run.workflow.workflow.steps):
-            if index in run.skipped_steps or index in run.failed_steps:
-                continue
-            outputs.extend(step.outputs)
-
-        comments: list[dict[str, Any]] = []
-        session_id: str | None = None
         attachments: list[dict[str, Any]] = []
-        artifacts: list[dict[str, Any]] = []
-
         ide = (run.context.ide or "").strip()
         if ide and run.snapshot_key and not GitAdapterService.is_project_scope(run.context):
             attachments.append(
@@ -1220,35 +881,11 @@ class WorkflowManager:
                     "type": "url",
                 }
             )
-
-        for output in outputs:
-            if output.type == "agent_comment":
-                body = self._read_output_file(run, output.bodyFrom)
-                if body and body.strip():
-                    name = self._read_output_file(run, output.nameFrom) if output.nameFrom else output.name
-                    comments.append(
-                        {
-                            "body": body.strip(),
-                            "status": output.status,
-                            "author_name": (name or "").strip() or None,
-                        }
-                    )
-            elif output.type == "session_id":
-                value = self._read_output_file(run, output.valueFrom)
-                if value and value.strip():
-                    session_id = value.strip()
-            elif output.type in {"url", "text"}:
-                value = self._read_output_file(run, output.valueFrom)
-                if value and value.strip():
-                    attachments.append(
-                        {
-                            "label": output.label or output.type,
-                            "value": value.strip(),
-                            "type": output.type,
-                        }
-                    )
-            elif output.type == "artifact":
-                artifacts.extend(self._collect_artifacts(run, output))
+        attachments.extend(
+            {"label": item.get("label"), "value": item.get("value"), "type": item.get("type")}
+            for item in outputs.get("attachments") or []
+        )
+        artifacts = self._collect_artifacts(run, outputs.get("artifacts") or [])
 
         if run.snapshot_key:
             diff_result = write_changes_diff_best_effort(run.worktree, run.snapshot_key, label="workflow-finish")
@@ -1256,6 +893,7 @@ class WorkflowManager:
             if diff_attachment:
                 attachments.append(diff_attachment)
 
+        session_id = outputs.get("session_id")
         if session_id:
             run.context.session_id = session_id
             self._agentis_call(
@@ -1264,18 +902,19 @@ class WorkflowManager:
             )
 
         if comments:
-            # Followup akce se konfigurují v `workflow.followups` sekci workflow YAML;
-            # pojmenovaná workflow (merge/close) sekci nemají, takže další akce nenabízí.
-            # U failure komentáře se akce nenabízí vůbec — merge/close rozdělané práce
-            # po selhaném runu nedává smysl. Followup s `if` se nabídne jen při splnění
-            # podmínky nad env/built-in hodnotami a `var` outputs runu; bez podmínky se nabízí vždy.
+            # Followup akce počítá engine (`if` nad env a `var` outputs). U failure komentáře se nenabízí
+            # vůbec — merge/close rozdělané práce po selhaném runu nedává smysl.
             actions: list[dict[str, Any]] = []
             if run.status != "failed":
-                followup_vars = self._condition_vars(run, visible_vars=run.vars)
                 actions = [
-                    followup.to_action()
-                    for followup in run.workflow.workflow.followups
-                    if followup.if_ is None or evaluate_condition(followup.if_, followup_vars)
+                    {
+                        "title": followup["title"],
+                        "prompt": followup.get("prompt", ""),
+                        "adapter_method": "start",
+                        "workflow": followup["workflow"],
+                        "continue_previous_run": followup.get("continue_previous_run", False),
+                    }
+                    for followup in result.get("followups") or []
                 ]
             images = collect_screenshot_images(run.worktree)
             last_comment_index = len(comments) - 1
@@ -1307,81 +946,26 @@ class WorkflowManager:
                 data={"attachments": attachments, "artifact_names": [item.get("name") for item in artifacts]},
             )
 
-    def _collect_artifacts(self, run: _WorkflowRun, output: WorkflowOutput) -> list[dict[str, Any]]:
-        if not output.path:
-            return []
-        has_glob = self._has_glob(output.path)
-        paths = self._artifact_output_paths(run, output.path)
-        multiple = len(paths) > 1
+    def _collect_artifacts(self, run: _WorkflowRun, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Čte artefakty, které engine zkopíroval do `artifact-staging` v run dir (cesta relativně k run dir)."""
+
+        root = run.run_dir.resolve()
         artifacts: list[dict[str, Any]] = []
-        for path in paths:
+        total_bytes = 0
+        for item in items[:ARTIFACT_OUTPUT_MAX_FILES]:
+            path = (run.run_dir / str(item.get("path", ""))).resolve()
+            if root not in path.parents or not path.is_file():
+                continue
             try:
+                size = path.stat().st_size
+                if total_bytes + size > ARTIFACT_OUTPUT_MAX_BYTES:
+                    continue
                 content = base64.b64encode(path.read_bytes()).decode("ascii")
             except OSError:
                 continue
-            display_relpath = self._artifact_display_relpath(run.output_root.resolve(), output.path, path)
-            artifacts.append(
-                {
-                    "name": self._artifact_name(output, display_relpath, has_glob=has_glob, multiple=multiple),
-                    "filename": path.name,
-                    "content": content,
-                }
-            )
+            total_bytes += size
+            artifacts.append({"name": item.get("name"), "filename": item.get("filename"), "content": content})
         return artifacts
-
-    def _artifact_output_paths(self, run: _WorkflowRun, pattern: str) -> list[Path]:
-        root = run.output_root.resolve()
-        has_glob = self._has_glob(pattern)
-        if not has_glob:
-            path = (root / pattern).resolve()
-            if root not in path.parents or not path.is_file():
-                return []
-            return [path]
-
-        if Path(pattern).is_absolute():
-            return []
-        try:
-            candidates = sorted(root.glob(pattern))
-        except ValueError:
-            return []
-
-        paths: list[Path] = []
-        seen: set[Path] = set()
-        for candidate in candidates:
-            path = candidate.resolve()
-            if path in seen or root not in path.parents or not path.is_file():
-                continue
-            seen.add(path)
-            paths.append(path)
-        return paths
-
-    @staticmethod
-    def _has_glob(pattern: str) -> bool:
-        return any(char in pattern for char in "*?[")
-
-    @classmethod
-    def _artifact_display_relpath(cls, root: Path, pattern: str, path: Path) -> str:
-        root_relpath = path.relative_to(root).as_posix()
-        if not cls._has_glob(pattern):
-            return root_relpath
-
-        base_parts: list[str] = []
-        for part in Path(pattern).parts:
-            if cls._has_glob(part):
-                break
-            base_parts.append(part)
-        base = (root.joinpath(*base_parts)).resolve() if base_parts else root
-        if base == root or base in path.parents:
-            return path.relative_to(base).as_posix()
-        return root_relpath
-
-    @staticmethod
-    def _artifact_name(output: WorkflowOutput, relpath: str, *, has_glob: bool, multiple: bool) -> str:
-        if output.name and multiple:
-            return f"{output.name}/{relpath}"
-        if output.name:
-            return output.name
-        return relpath if has_glob else (output.path or relpath)
 
     # ------------------------------------------------------------------
     # Agentis RPC
@@ -1431,6 +1015,15 @@ class WorkflowManager:
                 "data": data or {},
             },
         )
+
+
+def _safe_label(name: str) -> str:
+    """Stejná normalizace jako labely jobů v enginu, aby busy/abort selektory seděly."""
+
+    ascii_value = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    sanitized = re.sub(r"[^a-z0-9-]+", "-", ascii_value.lower().strip())
+    sanitized = re.sub(r"-{2,}", "-", sanitized).strip("-")
+    return sanitized[:20].strip("-") or "step"
 
 
 __all__ = ["WorkflowApprovalError", "WorkflowApprovalTimeoutError", "WorkflowBusyError", "WorkflowManager"]

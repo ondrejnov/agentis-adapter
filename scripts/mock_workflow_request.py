@@ -5,21 +5,107 @@ import argparse
 import asyncio
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.config import get_settings  # noqa: E402
+from common.config import Settings, get_settings  # noqa: E402
+from common.git_adapter import GitAdapterService  # noqa: E402
 from common.rpc.jsonrpc import AgentJsonRpcService  # noqa: E402
-from common.workflow.devrun import build_start_payload, create_service, dispatch_start  # noqa: E402
+from common.workflow.manager import WorkflowManager  # noqa: E402
+
+DEFAULT_MODEL = "openai/gpt-5.4-mini"
+DEFAULT_EFFORT = "low"
+
+
+def build_start_payload(
+    *,
+    working_dir: Path,
+    prompt: str,
+    workflow: str | None,
+    scope: str = "project",
+    runtime: str = "local",
+    model: str | None = DEFAULT_MODEL,
+    effort: str | None = DEFAULT_EFFORT,
+    agent: str = "build",
+    title: str = "Mock workflow request",
+    description: str = "",
+    task_id: str | None = None,
+    run_id: str | None = None,
+    task_number: int = 999999,
+    session_id: str | None = None,
+    project_slug: str | None = None,
+    project_title: str | None = None,
+    project_github_repo: str | None = None,
+    base_branch: str = "master",
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """JSON-RPC `start` ve tvaru, jaký posílá Agentis."""
+
+    working_dir = working_dir.resolve()
+    slug = project_slug or working_dir.name
+    adapter: dict[str, Any] = {"scope": scope, "runtime": runtime, "agent": agent}
+    # Bez modelu/effortu krok nedostane AGENTIS_MODEL/AGENTIS_EFFORT a použije default z workflow.
+    if model:
+        adapter["model"] = model
+    if effort:
+        adapter["effort"] = effort
+    if workflow:
+        adapter["workflow"] = workflow
+    context: dict[str, Any] = {
+        "run_id": run_id or f"mock-run-{uuid4().hex}",
+        "task_id": task_id or f"mock-task-{uuid4().hex}",
+        "session_id": session_id,
+        "title": title,
+        "description": description,
+        "user_prompt": prompt,
+        "task_number": task_number,
+        "headers": headers or None,
+        "project_slug": slug,
+        "project_title": project_title or slug,
+        "project_github_repo": project_github_repo,
+        "base_branch": base_branch,
+        "working_dir": str(working_dir),
+        "adapter": adapter,
+    }
+    return {"jsonrpc": "2.0", "id": context["run_id"], "method": "start", "params": {"context": context}}
+
+
+def create_service(settings: Settings, *, agentis_callbacks: bool) -> AgentJsonRpcService:
+    """`AgentJsonRpcService` jako v produkci; bez `--agentis-callbacks` jdou Agentis volání jen na stdout."""
+
+    if not agentis_callbacks:
+        settings = replace(settings, agentis_endpoint=None)
+    manager = WorkflowManager(settings, agentis_sink=None if agentis_callbacks else _print_agentis_call)
+    return AgentJsonRpcService(
+        settings=settings,
+        adapter_factory=lambda context: GitAdapterService(context=context, settings=settings),
+        workflow_manager=manager,
+    )
+
+
+def _print_agentis_call(method: str, params: dict[str, Any]) -> None:
+    print(f"[agentis] {method}: {json.dumps(params, ensure_ascii=False, default=str)[:500]}", file=sys.stderr)
+
+
+async def dispatch_start(payload: dict[str, Any], service: AgentJsonRpcService) -> tuple[dict[str, Any], int]:
+    from app.adapter_api import _DISPATCH
+    from common.rpc.dispatcher import dispatch_jsonrpc_payload
+
+    container = SimpleNamespace(agent_jsonrpc_service=service)
+    result = await dispatch_jsonrpc_payload(payload, _DISPATCH, container)
+    return result.body, result.http_status
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Build or dispatch a local mock Agentis JSON-RPC start request for workflow testing. "
-            "For everyday testing prefer `agentis-adapter workflow run`."
+            "For workflow-only testing without the adapter prefer `agentis-workflow run <name> ...`."
         )
     )
     parser.add_argument("prompt", nargs="?", default="Mock Slack workflow request.", help="Prompt sent to the agent.")

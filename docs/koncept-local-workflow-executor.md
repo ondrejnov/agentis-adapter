@@ -1,9 +1,9 @@
 # Lokální workflow executor
 
-> **Stav: implementováno.** Zdrojáky jsou v
-> `common/workflow/local_runtime.py`, společný protokol a Kubernetes executor v
-> `common/workflow/runtime.py`. Uživatelský popis workflow je v
-> [docs/workflow.md](workflow.md).
+> **Stav: implementováno v enginu.** Zdrojáky jsou v repozitáři `agentis-workflow`
+> (`agentis_workflow/local_runtime.py`, společný protokol a Kubernetes executor v
+> `agentis_workflow/runtime.py`). Uživatelský popis workflow je v
+> `docs/workflow.md` tamtéž.
 
 ## Účel
 

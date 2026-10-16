@@ -34,29 +34,34 @@ flowchart LR
 - [Poetry](https://python-poetry.org/)
 - přístupový token a ID adapteru z Agentisu
 - Docker nebo `kubectl` pouze v případě, že je používá zvolený executor
+- Workflow engine [`agentis-workflow`](../agentis-workflow) (samostatný projekt; adapter ho volá přes příkazovou řádku)
 
 ### 2. Instalace
 
 ```bash
 git clone https://github.com/ondrejnov/agentis-adapter.git
+git clone https://github.com/ondrejnov/agentis-workflow.git   # vedle adapteru, odkaz `../agentis-workflow`
 cd agentis-adapter
 poetry install
 ```
 
+`poetry install` nainstaluje engine `agentis-workflow` z `../agentis-workflow` v editable režimu. Jiné umístění nebo
+jinou binárku nastavte proměnnou `AGENTIS_WORKFLOW_COMMAND` (např. `AGENTIS_WORKFLOW_COMMAND="/opt/agentis/bin/agentis-workflow"`).
+
 #### Globální instalace příkazu
 
-Aby `agentis-adapter` (např. `agentis-adapter workflow list`) fungoval odkudkoliv bez aktivace virtuálního prostředí, nainstalujte jej přes [pipx](https://pipx.pypa.io/) v editable režimu z naklonovaného repozitáře:
+Aby `agentis-adapter` fungoval odkudkoliv bez aktivace virtuálního prostředí, nainstalujte jej přes [pipx](https://pipx.pypa.io/) v editable režimu z naklonovaného repozitáře (engine `agentis-workflow` se nainstaluje jako závislost z `../agentis-workflow`, takže musí ležet vedle):
 
 ```bash
 pipx install --editable --python python3.13 .
 pipx ensurepath   # jednou; poté otevřete nový terminál
 ```
 
-Příkaz je pak dostupný v `~/.local/bin` v libovolném adresáři:
+Příkaz je pak dostupný v `~/.local/bin` v libovolném adresáři. Workflow se vypisují a testují přes engine:
 
 ```bash
 cd ~/muj-projekt
-agentis-adapter workflow list
+agentis-workflow list --workdir .
 ```
 
 Použijte právě `--editable`: adapter hledá `.env`, dodané workflow ve `workflows/` a pracovní adresáře relativně k adresáři repozitáře, takže se tento adresář nesmí přesunout ani smazat. Změny v kódu se projeví okamžitě; aktualizace závislostí: `pipx reinstall agentis-adapter`. Odinstalace: `pipx uninstall agentis-adapter`.
@@ -83,12 +88,12 @@ poetry run agentis-adapter   # nebo jen `agentis-adapter` po globální instalac
 
 Adapter se sám připojí k Agentisu a začne přijímat tasky. Není potřeba vystavovat veřejný příchozí port.
 
-Workflow se dá před nasazením vyzkoušet bez Agentisu — kroky, komentáře a outputs se vypíší do terminálu
-(viz [Testování workflow](docs/testovani-workflow.md)):
+Workflow se dá před nasazením vyzkoušet bez Agentisu přímo enginem — kroky, komentáře a outputs se vypíší do terminálu
+(podrobnosti v dokumentaci enginu `agentis-workflow/docs/testovani-workflow.md`):
 
 ```bash
-agentis-adapter workflow validate
-agentis-adapter workflow run ai-news "Zadání tasku"
+agentis-workflow validate .agentis/workflows
+agentis-workflow run default "Zadání tasku" --workdir . --executor local
 ```
 
 > [!IMPORTANT]
@@ -330,7 +335,7 @@ Příklad je záměrně obecný. Cesty, příkazy, image, preview doménu a Kube
 
 Adapter navíc přijímá synchronní JSON-RPC `approve`. Agentis předá execution context, stabilní `approval_id`, celý objekt `metadata` (případně `null`) a volitelný deadline. Workflow dostane metadata jako JSON v env `AGENTIS_APPROVE_METADATA` a samo z nich vybere například `command`. Pojmenované workflow z `context.adapter.workflow` musí přes jediný `var` output `APPROVED` vrátit přesně `1` nebo `0`; volitelný `APPROVED_METADATA` přidá k výsledku `resolved_metadata`. Bundled `workflows/approval.yaml` schválí příkaz pouze při skóre z `check-command-dangerous.sh` menším nebo rovném `0.3` a vrací skutečné skóre v metadatech; projekt jej může přepsat vlastní review policy.
 
-Kompletní formát, executory a outputs popisuje [dokumentace workflow](docs/workflow.md).
+Kompletní formát YAML, executory a outputs popisuje dokumentace enginu `agentis-workflow` (`agentis-workflow/docs/workflow.md`). Adapter k nim přidává jen Agentis specifiku: výběr souboru, namespace, labely, Agentis callbacky a approval.
 
 ## Volitelný AgentisCode Krok
 
@@ -359,8 +364,8 @@ Výchozí adresa je `http://localhost:8001`. HTTP server neslouží k přijímá
 ## Dokumentace
 
 - [Adapter a komunikace s Agentisem](docs/adapter.md)
-- [Workflow, executory a outputs](docs/workflow.md)
-- [Testování workflow před nasazením](docs/testovani-workflow.md)
+- [Rozdělení na adapter a engine](docs/navrh-rozdeleni-agentis-workflow.md)
+- Workflow engine `agentis-workflow` (YAML formát, CLI, testování) je v samostatném repozitáři `agentis-workflow`
 - [Koncept lokálního workflow executoru](docs/koncept-local-workflow-executor.md)
 
 ## Vývoj

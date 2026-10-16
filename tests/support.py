@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
@@ -51,3 +54,13 @@ class RpcTestClient:
 
     def get(self, path: str, **kwargs: Any) -> Any:
         return self._http.get(path, **kwargs)
+
+
+def find_engine_command() -> tuple[str, ...] | None:
+    """Argv prefix skutečné binárky `agentis-workflow` (vedle interpretu nebo v PATH); None, když chybí."""
+
+    sibling = Path(sys.executable).parent / "agentis-workflow"
+    if sibling.is_file():
+        return (str(sibling),)
+    found = shutil.which("agentis-workflow")
+    return (found,) if found else None
