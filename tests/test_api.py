@@ -779,6 +779,9 @@ def test_start_rejects_path_inside_adapter_manifest():
     assert any(item["loc"] == ["context", "adapter", "manifest"] for item in payload["error"]["data"])
 
 
+EFFORT_SENTENCE = "For each agent in the dynamic workflow, choose a suitable model (opus, sonnet, or haiku) and set the corresponding effort."
+
+
 def _captured_prompt(tmp_path: Path, method: str, ultracode: Any) -> str:
     captured: dict[str, str] = {}
 
@@ -812,14 +815,14 @@ def _captured_prompt(tmp_path: Path, method: str, ultracode: Any) -> str:
 def test_ultracode_limit_is_appended_to_prompt_end(tmp_path, method, ultracode, expected):
     prompt = _captured_prompt(tmp_path, method, ultracode)
 
-    assert prompt.endswith(f"\n\nPro dynamické workflow použij maximálně {expected} agentů.")
+    assert prompt.endswith(f"\n\nUse the dynamic ultracode workflow with at most {expected} agents. {EFFORT_SENTENCE}")
 
 
 @pytest.mark.parametrize("method", ["start", "add_message"])
 def test_ultracode_unlimited_appends_activation_sentence_without_count(tmp_path, method):
     prompt = _captured_prompt(tmp_path, method, "unlimited")
 
-    assert prompt.endswith("\n\nPoužij dynamické ultracode workflow.")
+    assert prompt.endswith(f"\n\nUse the dynamic ultracode workflow. {EFFORT_SENTENCE}")
     assert "agentů" not in prompt
 
 

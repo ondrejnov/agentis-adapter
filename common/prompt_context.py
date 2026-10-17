@@ -134,10 +134,15 @@ def build_parent_task_block(parent_task: Any | None) -> str | None:
     return "<parent_task_context>\n" + json.dumps(payload, ensure_ascii=False, indent=2) + "\n</parent_task_context>"
 
 
+_ULTRACODE_EFFORT_SENTENCE = "For each agent in the dynamic workflow, choose a suitable model (opus, sonnet, or haiku) and set the corresponding effort."
+
+
 def build_ultracode_block(limit: int | str | None) -> str | None:
-    """Věta aktivující UltraCode workflow: s číslem i s limitem agentů, u ``unlimited`` bez počtu; vypnuto = nic."""
+    """UltraCode activation sentences: with an agent limit, without a count for ``unlimited``, always with the effort instruction; disabled = nothing."""
     if limit == "unlimited":
-        return "Použij dynamické ultracode workflow."
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        activation = "Use the dynamic ultracode workflow."
+    elif isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         return None
-    return f"Použij dynamické ultracode workflow s maximálně {limit} agenty."
+    else:
+        activation = f"Use the dynamic ultracode workflow with at most {limit} agents."
+    return f"{activation} {_ULTRACODE_EFFORT_SENTENCE}"
