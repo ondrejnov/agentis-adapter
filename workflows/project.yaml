@@ -5,7 +5,7 @@ workflow:
   imagePullSecrets:
     - name: registry
   workingDir: "[%WORKDIR%]"
-  timeoutSeconds: 14400
+  timeoutSeconds: 28800
   ttlSecondsAfterFinished: 300
   envFiles:
     - /root/.config/agentis/agentis.env
