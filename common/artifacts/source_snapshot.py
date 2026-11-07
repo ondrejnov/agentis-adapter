@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,6 +22,7 @@ CHANGES_DIFF_NAME = CHANGES_DIFF_RELPATH.as_posix()
 PROJECT_SETTINGS_RELPATH = Path(".agentis/settings.json")
 _DIFF_EXCLUDES = (CHANGES_DIFF_RELPATH.name, "__pycache__", ".pytest_cache", ".ruff_cache")
 _MAX_SNAPSHOT_KEY_DIR_LENGTH = 48
+_IS_WINDOWS = os.name == "nt"
 
 
 class ProjectSettings(BaseModel):
@@ -107,12 +110,16 @@ def write_changes_diff(worktree: str | Path, snapshot_key: str) -> SourceSnapsho
     except Exception as exc:  # noqa: BLE001
         return SourceSnapshotResult(status="failed", reason=str(exc), **result_base)
 
-    args = ["diff", "-ruN"]
+    diff_command = _resolve_diff_command()
+    if diff_command is None:
+        reason = "diff not found in PATH (on Windows install Git for Windows, which ships usr\\bin\\diff.exe)"
+        return SourceSnapshotResult(status="failed", reason=reason, **result_base)
+    args = [diff_command, "-ruN"]
     for pattern in _DIFF_EXCLUDES:
         args.extend(["-x", pattern])
     args.extend([str(snapshot_dir / "files"), str(current_dir / "files")])
 
-    completed = subprocess.run(args, capture_output=True, text=True, check=False)
+    completed = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
     if completed.returncode not in (0, 1):
         reason = (completed.stderr or completed.stdout or "diff failed").strip()
         return SourceSnapshotResult(status="failed", reason=reason, **result_base)
@@ -215,6 +222,25 @@ def changes_diff_attachment(result: SourceSnapshotResult) -> dict[str, str] | No
     if len(diff_content) > 0:
         return {"label": "Changes diff", "value": diff_content, "type": "diff"}
     return None
+
+
+def _resolve_diff_command() -> str | None:
+    """GNU diff z PATH; na Windows jinak ten, který přibaluje Git for Windows (`<git>\\usr\\bin\\diff.exe`)."""
+
+    found = shutil.which("diff")
+    if found or not _IS_WINDOWS:
+        return found
+    candidates: list[Path] = []
+    git = shutil.which("git")
+    if git:
+        # <root>\cmd\git.exe, <root>\bin\git.exe nebo <root>\mingw64\bin\git.exe -> <root>\usr\bin\diff.exe
+        candidates.extend(root / "usr" / "bin" / "diff.exe" for root in Path(git).resolve().parents[:3])
+    for env_name in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+        if base := os.environ.get(env_name):
+            candidates.append(Path(base) / "Git" / "usr" / "bin" / "diff.exe")
+    if local_app_data := os.environ.get("LOCALAPPDATA"):
+        candidates.append(Path(local_app_data) / "Programs" / "Git" / "usr" / "bin" / "diff.exe")
+    return next((str(candidate) for candidate in candidates if candidate.is_file()), None)
 
 
 def _snapshot_store_dir(snapshot_key: str) -> Path:

@@ -98,8 +98,10 @@ prostředí.
 
 ### Příkaz a pracovní adresář
 
-Runner hledá `bash` přes `PATH`; na POSIX má fallback `/bin/bash`. Na Windows je
-nutný bash dostupný přes `PATH`, například Git Bash nebo WSL. Chybějící bash či
+Runner hledá `bash` v `WORKFLOW_BASH`, jinak přes `PATH`; na POSIX má fallback `/bin/bash`.
+Na Windows je nutný Git Bash (Git for Windows) — spouštěč WSL (`System32\bash.exe`)
+se přeskočí, protože nerozumí Windows cestám; mimo `PATH` se Git Bash dohledá vedle
+`git.exe` nebo ve standardní instalaci. Chybějící bash či
 chyba při vytvoření procesu vrátí neúspěšný `StepResult` a objeví se ve stderr i
 v `workflow_step` eventu.
 

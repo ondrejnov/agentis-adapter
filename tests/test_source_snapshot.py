@@ -210,3 +210,35 @@ def test_snapshot_store_dir_hashes_long_keys(monkeypatch, tmp_path: Path):
     assert source_snapshot._snapshot_store_dir(long_key) == tmp_path / "snapshots" / key_dir / "source-store"
     assert source_snapshot._snapshot_current_store_dir(long_key) == tmp_path / "snapshots" / key_dir / "current-store"
     assert source_snapshot._snapshot_key_dir("snap-1") == "snap-1"
+
+
+def test_resolve_diff_command_on_windows_falls_back_to_git_for_windows(monkeypatch, tmp_path: Path):
+    git_root = tmp_path / "Git"
+    (git_root / "cmd").mkdir(parents=True)
+    (git_root / "usr" / "bin").mkdir(parents=True)
+    (git_root / "cmd" / "git.exe").write_text("")
+    (git_root / "usr" / "bin" / "diff.exe").write_text("")
+    found = {"git": str(git_root / "cmd" / "git.exe")}
+    monkeypatch.setattr(source_snapshot, "_IS_WINDOWS", True)
+    monkeypatch.setattr(source_snapshot.shutil, "which", lambda name: found.get(name))
+    for env_name in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        monkeypatch.delenv(env_name, raising=False)
+
+    assert source_snapshot._resolve_diff_command() == str((git_root / "usr" / "bin" / "diff.exe").resolve())
+
+    found["diff"] = r"C:\tools\diff.exe"
+    assert source_snapshot._resolve_diff_command() == r"C:\tools\diff.exe"
+
+
+def test_write_changes_diff_reports_missing_diff(monkeypatch, tmp_path: Path):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / "a.txt").write_text("a\n", encoding="utf-8")
+    monkeypatch.setattr(source_snapshot, "SNAPSHOT_ROOT", tmp_path / "snapshots")
+    assert source_snapshot.snapshot_sources(worktree, "key").status == "success"
+    monkeypatch.setattr(source_snapshot, "_resolve_diff_command", lambda: None)
+
+    result = source_snapshot.write_changes_diff(worktree, "key")
+
+    assert result.status == "failed"
+    assert "diff not found" in (result.reason or "")
