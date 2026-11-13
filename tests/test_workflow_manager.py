@@ -448,3 +448,35 @@ def test_parent_abort_stops_running_approval(harness, monkeypatch) -> None:
     assert not thread.is_alive()
     assert len(errors) == 1 and isinstance(errors[0], WorkflowApprovalError)
     assert "aborted" in str(errors[0])
+
+
+@pytest.mark.parametrize("agent", [None, ""])
+def test_spec_env_has_no_agentis_agent_without_agent(harness, tmp_path: Path, agent) -> None:
+    context = _context(
+        adapter={"runtime": "workflow", "model": "openai/gpt-5", "agent": agent},
+        agent_id=None,
+        agent_title=None,
+        agent_prompt=None,
+    )
+    env = harness.manager._spec_env(context, tmp_path / "run", {}, None)
+    assert "AGENTIS_AGENT" not in env
+    assert env["AGENTIS_MODEL"] == "openai/gpt-5"
+
+
+def test_spec_env_has_no_agentis_agent_when_adapter_options_missing(harness, tmp_path: Path) -> None:
+    payload = {"run_id": "run-12345678", "task_id": "task-1", "title": "T", "working_dir": "/var/www/project"}
+    context = AgentExecutionContextPayload.model_validate(payload)
+    assert context.agent_id is None and context.agent_title is None and context.agent_prompt is None
+    assert "AGENTIS_AGENT" not in harness.manager._spec_env(context, tmp_path / "run", {}, None)
+
+
+def test_spec_env_sets_agentis_agent_when_selected(harness, tmp_path: Path) -> None:
+    env = harness.manager._spec_env(_context(), tmp_path / "run", {}, None)
+    assert env["AGENTIS_AGENT"] == "build"
+
+
+def test_bundled_workflows_never_pass_agent_flag() -> None:
+    root = Path(__file__).resolve().parent.parent / "workflows"
+    for path in root.glob("*.yaml"):
+        text = path.read_text(encoding="utf-8")
+        assert "--agent" not in text and "AGENTIS_AGENT" not in text, path.name
