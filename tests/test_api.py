@@ -815,7 +815,7 @@ def _captured_prompt(tmp_path: Path, method: str, ultracode: Any) -> str:
 def test_ultracode_limit_is_appended_to_prompt_end(tmp_path, method, ultracode, expected):
     prompt = _captured_prompt(tmp_path, method, ultracode)
 
-    assert prompt.endswith(f"\n\nUse the dynamic ultracode workflow with at most {expected} agents. {EFFORT_SENTENCE}")
+    assert prompt.endswith(f"\n\nUse the dynamic ultracode workflow with at most {expected} agents. This is an upper limit, not a target: use only as many agents as the task actually needs. {EFFORT_SENTENCE}")
 
 
 @pytest.mark.parametrize("method", ["start", "add_message"])

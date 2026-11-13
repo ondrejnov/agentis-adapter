@@ -144,5 +144,5 @@ def build_ultracode_block(limit: int | str | None) -> str | None:
     elif isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         return None
     else:
-        activation = f"Use the dynamic ultracode workflow with at most {limit} agents."
+        activation = f"Use the dynamic ultracode workflow with at most {limit} agents. This is an upper limit, not a target: use only as many agents as the task actually needs."
     return f"{activation} {_ULTRACODE_EFFORT_SENTENCE}"
